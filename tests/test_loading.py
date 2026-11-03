@@ -3,7 +3,7 @@ from unittest.mock import Mock
 import pytest
 
 from weights_lab.lab import load_lab
-from weights_lab.launchers import ModalLauncher, SkyPilotLauncher
+from weights_lab.launchers import SkyPilotLauncher
 
 
 @pytest.mark.parametrize(
@@ -71,7 +71,6 @@ def test_loader_uses_registered_factory_for_nested_text_config(
     assert loaded.budget.limit == 2
 
 
-@pytest.mark.parametrize("kind", ["sky", "modal"])
 @pytest.mark.parametrize(
     "model,config",
     [
@@ -86,20 +85,12 @@ def test_loader_uses_registered_factory_for_nested_text_config(
         ("model", {"poll_interval": 0}),
     ],
 )
-def test_cloud_start_validates_static_config_before_external_work(
-    kind, model, config, tmp_path, monkeypatch
-):
+def test_cloud_start_validates_static_config_before_external_work(model, config, tmp_path):
     runner = Mock(side_effect=AssertionError("invalid config reached an external command"))
-    sdk_lookup = Mock(side_effect=AssertionError("invalid config reached the Modal SDK"))
-    if kind == "sky":
-        launcher = SkyPilotLauncher("weights-test", runner=runner)
-    else:
-        launcher = ModalLauncher()
-        monkeypatch.setattr(launcher, "_modal", sdk_lookup)
+    launcher = SkyPilotLauncher("weights-test", runner=runner)
     with pytest.raises(ValueError):
         launcher.start(model, "/remote/session", source=tmp_path, **config)
     runner.assert_not_called()
-    sdk_lookup.assert_not_called()
     assert list(tmp_path.iterdir()) == []
 
 

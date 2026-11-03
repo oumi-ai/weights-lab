@@ -8,7 +8,7 @@ The package includes exact weight undo and checkpoint export, likelihood and
 sampled evaluation, pass budgets, activation recording and patching, per-row
 gradients, document-split probes, and experimental fixed-weight components.
 An [agent skill and plugin](docs/skill-install.md) guide experiments. Workers run
-locally or through SSH, Slurm, SkyPilot, and Modal.
+locally or through upstream SkyPilot, including its Slurm integration.
 
 ## Install
 
@@ -96,19 +96,18 @@ against an unedited baseline in the same live session.
 ## Remote workers
 
 ```sh
-uv run weights-lab start --host gpu-box --model Qwen/Qwen3-0.6B --session /tmp/lab
-uv run weights-lab send --host gpu-box --session /tmp/lab --code 'print(lab.parts()[0])' --wait
-uv run weights-lab stop --host gpu-box --session /tmp/lab
-uv run weights-lab backup --host gpu-box --session /tmp/lab --output ./lab.tar.gz
+uv run weights-lab start --cluster my-lab --source . --accelerators L4:1 --model Qwen/Qwen3-0.6B --session /tmp/lab
+uv run weights-lab send --cluster my-lab --session /tmp/lab --code 'print(lab.parts()[0])' --wait
+uv run weights-lab stop --cluster my-lab --session /tmp/lab
+uv run weights-lab backup --cluster my-lab --session /tmp/lab --output ./lab.tar.gz
+uv run sky down my-lab
 ```
 
-SSH expects the remote Python to have the package installed. `--install --source .`
-builds and installs a sanitized checkout over SSH. `start --launcher slurm` submits
-on a shared filesystem. `start --launcher sky --cluster NAME --source .` provisions
-a SkyPilot worker; `--launcher modal --source .` returns a sandbox ID used with
-`--sandbox-id ID` on later commands. Remote transports capture output and return it
-at command completion. Read [remote setup and teardown](docs/remote.md) before
-using a provider; cloud workers incur charges until stopped or torn down.
+`--cluster` selects SkyPilot automatically; `--launcher sky` is also accepted.
+Use `--infra slurm/mycluster/mypartition` for a configured Slurm cluster.
+Remote commands capture output and return it at completion. Read
+[remote setup and teardown](docs/remote.md) for prerequisites, artifact downloads,
+and resource cleanup. Cloud workers incur charges until torn down.
 
 ## Records and shutdown
 
@@ -141,7 +140,7 @@ up. Seeds alone do not guarantee the same results across devices or setups.
 - [Seven agent recipes](skills/weights-lab/references/) for common interventions.
 
 CPU, Apple MPS, and NVIDIA H200 CUDA checks have passed, along with real
-SSH/SkyPilot execution, a single-node Slurm lifecycle, and public-model experiments.
+SkyPilot execution and public-model experiments.
 See [measured validation evidence and provider limits](docs/validation.md).
 The Qwen example replays a
 released edit and does not claim to rediscover it or reproduce its benchmark.

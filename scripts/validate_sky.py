@@ -10,7 +10,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from weights_lab.launchers import SkyPilotLauncher, SSHLauncher
+from weights_lab.launchers import SkyPilotLauncher, _SSHTransport
 
 PYTHON = "/tmp/weights-lab-env/bin/python"
 UV = "/tmp/weights-lab-uv/uv"
@@ -94,7 +94,6 @@ def validate(
     *,
     source=None,
     prepared_benchmark=None,
-    slurm_supervisor=None,
     max_seconds=14400,
     cluster=None,
 ):
@@ -198,7 +197,7 @@ def validate(
         return result
 
     launcher = SkyPilotLauncher(cluster, python=PYTHON, runner=runner)
-    ssh = SSHLauncher(cluster, python=PYTHON, runner=runner)
+    ssh = _SSHTransport(cluster, python=PYTHON, runner=runner)
 
     def execute(arguments, name, data=None):
         result = run_logged(
@@ -256,15 +255,15 @@ def validate(
             pass_limit=64,
         )
         print(json.dumps({"stage": "cluster_started", "cluster": cluster}), flush=True)
-        result = ssh.send(
-            SESSION,
-            "import json,torch\nassert lab.device.type=='cuda'\n"
-            "inputs=tokenizer('hello world',return_tensors='pt').to(lab.device)\n"
-            "with torch.no_grad():\n    logits=model(**inputs).logits\n"
-            "assert logits.device.type=='cuda'\n"
-            "(artifacts/'transport.json').write_text(json.dumps({'cuda':True,'passes':lab.forward_passes}))\n",
-            wait=True,
-            timeout=180,
+        result = json.loads(
+            launcher.run(
+                ["send", "--session", SESSION, "--wait", "--timeout", "180"],
+                input="import json,torch\nassert lab.device.type=='cuda'\n"
+                "inputs=tokenizer('hello world',return_tensors='pt').to(lab.device)\n"
+                "with torch.no_grad():\n    logits=model(**inputs).logits\n"
+                "assert logits.device.type=='cuda'\n"
+                "(artifacts/'transport.json').write_text(json.dumps({'cuda':True,'passes':lab.forward_passes}))\n",
+            ).stdout
         )
         if result["state"] != "succeeded":
             raise RuntimeError("CUDA transport snippet did not succeed")
@@ -286,24 +285,6 @@ def validate(
         if runtime["state"] != "succeeded" or runtime["worker_alive_after_stop"]:
             raise RuntimeError("CUDA runtime harness did not pass and stop its worker")
         report["cuda_runtime"] = runtime
-        if slurm_supervisor:
-            try:
-                upload(slurm_supervisor, "/tmp/validate_slurm.py")
-                execute(
-                    [
-                        "-c",
-                        "import subprocess,sys; subprocess.run(['sudo',sys.executable,"
-                        "'/tmp/validate_slurm.py','--output-dir','/tmp/weights-lab-slurm'],check=True)",
-                    ],
-                    "slurm.log",
-                )
-            except Exception as error:
-                report["slurm_error"] = f"{type(error).__name__}: {error}"
-            try:
-                ssh.download("/tmp/weights-lab-slurm/report.json", root / "slurm.json")
-                report["slurm"] = json.loads((root / "slurm.json").read_text())
-            except Exception as error:
-                report["slurm_download_error"] = f"{type(error).__name__}: {error}"
         if prepared:
             remote = "/tmp/weights-lab-benchmark"
             for name in ("manifest.json", "dataset.jsonl", "prompts.jsonl", "upstream_mathqa.py"):
@@ -339,11 +320,9 @@ def validate(
             report["benchmark"] = json.loads((root / "benchmark/summary.json").read_text())
             if not report["benchmark"].get("full_validated"):
                 raise RuntimeError("full frozen benchmark protocol did not finish")
-        report["stop"] = ssh.stop(SESSION, timeout=30)
-        ssh.run(["backup", "--session", SESSION, "--output", "/tmp/transport.tar.gz"])
+        report["stop"] = json.loads(launcher.stop(SESSION, timeout=30).stdout)
+        launcher.run(["backup", "--session", SESSION, "--output", "/tmp/transport.tar.gz"])
         ssh.download("/tmp/transport.tar.gz", root / "transport.tar.gz")
-        if slurm_supervisor and report.get("slurm", {}).get("state") not in {"succeeded", "passed"}:
-            raise RuntimeError("Slurm validation failed; other validation results were retained")
         report["state"] = "succeeded"
     except BaseException as error:
         report.update(state="failed", error=f"{type(error).__name__}: {error}")
@@ -362,7 +341,6 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--source", type=Path)
     parser.add_argument("--prepared-benchmark", type=Path)
-    parser.add_argument("--slurm-supervisor", type=Path)
     parser.add_argument("--max-seconds", type=int, default=14400)
     parser.add_argument("--cluster")
     parser.add_argument("--watchdog", action="store_true")
@@ -377,7 +355,6 @@ if __name__ == "__main__":
         options.output_dir,
         source=options.source,
         prepared_benchmark=options.prepared_benchmark,
-        slurm_supervisor=options.slurm_supervisor,
         max_seconds=options.max_seconds,
         cluster=options.cluster,
     )

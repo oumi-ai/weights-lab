@@ -40,3 +40,10 @@ Read only the recipe needed:
 - [Written-working control](references/written-working.md): test computation before editing weights.
 - [Hand-built parts](references/hand-built.md): temporary logit modules or prompt transformations.
 - [Worked example](references/worked-example.md): baseline, first-layer ablation, exact undo, and a saved report.
+
+For remote sessions, use upstream SkyPilot: `weights-lab start --cluster NAME
+--source . --model MODEL --session /tmp/lab`. Include `--cluster NAME` on every
+later command. For Slurm, configure `~/.slurm/config`, run `sky check`, then add
+`--infra slurm/mycluster/mypartition` to `start`. See [remote setup](../../docs/remote.md).
+Stop and download results before `sky down NAME`, or use `stop --teardown` after
+preserving them. Local sessions need no SkyPilot installation.

@@ -170,3 +170,13 @@ tensor building blocks in `weights_lab.circuits` provide token matching, nearest
 matches, lookup tables, digit addition with carries, integer comparison, and a
 calendar circuit exact over valid dates from 2000 through 2099. They use fixed
 weights, indexing, and integer operations; they are not trained neural arithmetic.
+
+## Remote sessions
+
+`weights_lab.launchers.SkyPilotLauncher(cluster, python="python3")` manages remote
+sessions through upstream SkyPilot. `start(model, session, source=..., infra=None,
+accelerators="A100:1", idle_minutes=15, **config)` accepts the same model settings
+as the local CLI. Set `infra="slurm/mycluster/mypartition"` to select Slurm, or
+`accelerators=None` for a CPU resource request. Use `run(arguments, input=code)`,
+`stop(session, timeout=10)`, `download(source, destination)`, and `teardown()` for
+subsequent operations. See [remote workers](remote.md) for setup and lifecycle.

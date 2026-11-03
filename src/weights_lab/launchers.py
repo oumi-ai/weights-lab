@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import math
@@ -11,28 +10,12 @@ import re
 import shlex
 import shutil
 import subprocess
-import sys
 import tarfile
 import tempfile
 import time
 from pathlib import Path, PurePosixPath
 
 from .budget import PassBudget
-from .session import cancel_unfinished, create_session, read_json, session_lock, write_json
-
-_SLURM_TERMINAL = {
-    "COMPLETED",
-    "CANCELLED",
-    "FAILED",
-    "TIMEOUT",
-    "NODE_FAIL",
-    "OUT_OF_MEMORY",
-    "PREEMPTED",
-    "BOOT_FAIL",
-    "DEADLINE",
-    "REVOKED",
-    "SPECIAL_EXIT",
-}
 
 _SESSION_PROBE = (
     "import json,sys\nfrom pathlib import Path\n"
@@ -51,24 +34,6 @@ _SESSION_PROBE = (
     "    print(json.dumps(status),file=sys.stderr)\n"
     "    raise SystemExit(2)\n"
 )
-
-
-def _scheduler_states(runner, query):
-    try:
-        output = _checked(runner, query, text=True, capture_output=True).stdout
-    except subprocess.CalledProcessError as error:
-        message = error.stderr or ""
-        if isinstance(message, bytes):
-            message = message.decode("utf-8", errors="replace")
-        if "invalid job id" in message.lower():
-            return []
-        raise
-    return [
-        state
-        for line in output.splitlines()
-        if not line.strip().startswith("CLUSTER:")
-        for state in line.split()
-    ]
 
 
 def _checked(runner, args, **kwargs):
@@ -97,47 +62,11 @@ def sanitized_workdir(source, destination):
     return destination
 
 
-def _start_args(
-    model,
-    session,
-    adapter=None,
-    device="auto",
-    dtype="auto",
-    snippet_timeout=300,
-    pass_limit=None,
-    revision=None,
-    adapter_revision=None,
-):
-    args = [
-        "start",
-        "--model",
-        str(model),
-        "--session",
-        str(session),
-        "--device",
-        device,
-        "--dtype",
-        dtype,
-        "--snippet-timeout",
-        str(snippet_timeout),
-    ]
-    if adapter:
-        args += ["--adapter", str(adapter)]
-    for flag, value in (
-        ("--pass-limit", pass_limit),
-        ("--revision", revision),
-        ("--adapter-revision", adapter_revision),
-    ):
-        if value is not None:
-            args += [flag, str(value)]
-    return args
-
-
 def _configuration(model, config):
     if not isinstance(model, (str, Path)) or not str(model).strip():
         raise ValueError("model must be a nonempty checkpoint path or Hub ID")
     configuration = {
-        "model": model,
+        "model": str(model),
         "device": "auto",
         "dtype": "auto",
         "snippet_timeout": 300,
@@ -167,28 +96,22 @@ def _source_checkout(source):
     return checkout
 
 
-def _json_output(result):
-    return json.loads(result.stdout)
-
-
-def _worker_script(session, configuration, keep_alive=False):
+def _worker_script(session, configuration):
     script = (
-        "import os,subprocess,sys,time\nfrom pathlib import Path\n"
+        "import os,sys\nfrom pathlib import Path\n"
         "from weights_lab.session import create_session\n"
         f"p=Path({str(session)!r}).expanduser().resolve()\n"
         f"create_session(p, {configuration!r})\n"
         "command=[sys.executable,'-m','weights_lab','_worker','--session',str(p)]\n"
         "log=(p/'worker.log').open('ab',buffering=0)\n"
     )
-    if keep_alive:
-        return script + "subprocess.run(command,stdout=log,stderr=log)\ntime.sleep(2147483647)\n"
     return (
         script
         + "os.dup2(log.fileno(),1)\nos.dup2(log.fileno(),2)\nos.execv(sys.executable,command)\n"
     )
 
 
-class SSHLauncher:
+class _SSHTransport:
     def __init__(self, host, python="python3", *, runner=subprocess.run):
         if not host or str(host).startswith("-") or any(char.isspace() for char in str(host)):
             raise ValueError("host must be an SSH host or config alias")
@@ -205,57 +128,6 @@ class SSHLauncher:
             text=True,
             capture_output=True,
         )
-
-    def start(self, model, session, **config):
-        return _json_output(self.run(_start_args(model, session, **config)))
-
-    def send(self, session, code, *, wait=False, follow=False, timeout=300):
-        args = ["send", "--session", str(session), "--timeout", str(timeout)]
-        if wait:
-            args.append("--wait")
-        if follow:
-            args.append("--follow")
-        return _json_output(self.run(args, input=code))
-
-    def stop(self, session, timeout=10):
-        # This command runs on the remote host; remote PIDs never reach os.kill locally.
-        return _json_output(
-            self.run(["stop", "--session", str(session), "--timeout", str(timeout)])
-        )
-
-    def install(self, source):
-        """Build an isolated source wheel locally, transfer it, then pip install remotely.
-
-        Requires the `build` package locally and pip on the remote Python.
-        """
-        with tempfile.TemporaryDirectory(prefix="weights-lab-build-") as temporary:
-            root = Path(temporary)
-            sanitized_workdir(source, root / "source")
-            _checked(
-                self.runner,
-                [
-                    sys.executable,
-                    "-m",
-                    "build",
-                    "--wheel",
-                    "--outdir",
-                    str(root / "dist"),
-                    str(root / "source"),
-                ],
-                text=True,
-                capture_output=True,
-            )
-            wheels = list((root / "dist").glob("*.whl"))
-            if len(wheels) != 1:
-                raise RuntimeError("wheel build must produce exactly one wheel")
-            wheel = wheels[0]
-            result = _checked(
-                self.runner,
-                self._command(["-c", _INSTALL_WHEEL, wheel.name]),
-                input=wheel.read_bytes(),
-                capture_output=True,
-            )
-            return result
 
     def download(self, remote_path, destination):
         """Stream a checkpoint or file and verify every file's remote SHA-256 digest."""
@@ -286,14 +158,6 @@ class SSHLauncher:
             os.replace(copied, destination)
         return destination
 
-
-_INSTALL_WHEEL = """
-import pathlib, subprocess, sys, tempfile
-with tempfile.TemporaryDirectory(prefix='weights-lab-install-') as directory:
-    wheel = pathlib.Path(directory) / pathlib.Path(sys.argv[1]).name
-    wheel.write_bytes(sys.stdin.buffer.read())
-    subprocess.run([sys.executable, '-m', 'pip', 'install', str(wheel)], check=True)
-"""
 
 _EXPORT = """
 import hashlib, io, json, pathlib, sys, tarfile
@@ -373,114 +237,6 @@ def _unpack_verified(archive_path, destination):
         return manifest
 
 
-class SlurmLauncher:
-    """Submit from a login node with a filesystem shared by the compute node."""
-
-    def __init__(self, python=sys.executable, *, runner=subprocess.run):
-        self.python, self.runner = python, runner
-
-    def start(self, model, session, *, partition=None, gres="gpu:1", time_limit=None, **config):
-        path = Path(session).expanduser().resolve()
-        create_session(path, _configuration(model, config))
-        args = [
-            "sbatch",
-            "--parsable",
-            "--output",
-            str(path / "worker.log"),
-            "--open-mode",
-            "append",
-        ]
-        for flag, value in (("--partition", partition), ("--gres", gres), ("--time", time_limit)):
-            if value is not None:
-                args += [flag, str(value)]
-        args += [
-            "--wrap",
-            shlex.join([self.python, "-m", "weights_lab", "_worker", "--session", str(path)]),
-        ]
-        try:
-            result = _checked(self.runner, args, text=True, capture_output=True)
-            identifier = result.stdout.strip().split(";", 1)
-            if not identifier[0].isdigit():
-                raise RuntimeError("sbatch did not return a numeric job ID")
-        except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
-            with session_lock(path):
-                write_json(
-                    path / "status.json", {"state": "failed", "model": model, "error": str(exc)}
-                )
-                cancel_unfinished(path, "Slurm job submission failed")
-            raise
-        metadata = {"launcher": "slurm", "job_id": identifier[0], "session": str(path)}
-        if len(identifier) > 1:
-            metadata["cluster"] = identifier[1]
-        write_json(path / "launcher.json", metadata)
-        return {**metadata, "state": "queued"}
-
-    def run(self, args, *, input=None):
-        if not args or args[0] not in {"send", "peek"}:
-            raise ValueError(
-                "use SlurmLauncher.stop for cancellation; "
-                "only send/peek run on the shared filesystem"
-            )
-        return _checked(
-            self.runner,
-            [self.python, "-m", "weights_lab", *map(str, args)],
-            input=input,
-            text=True,
-            capture_output=True,
-        )
-
-    def is_active(self, session):
-        metadata = read_json(Path(session).expanduser().resolve() / "launcher.json")
-        job_id = str(metadata.get("job_id", ""))
-        if metadata.get("launcher") != "slurm" or not job_id.isdigit():
-            raise ValueError("session has no valid Slurm job ID")
-        query = ["squeue", "--noheader", "--jobs", job_id, "--format=%T"]
-        if metadata.get("cluster"):
-            query += ["--clusters", metadata["cluster"]]
-        return any(state not in _SLURM_TERMINAL for state in _scheduler_states(self.runner, query))
-
-    def stop(self, session, timeout=10):
-        path = Path(session).expanduser().resolve()
-        if not isinstance(timeout, (int, float)) or not 0 < timeout < float("inf"):
-            raise ValueError("timeout must be finite and positive")
-        metadata = read_json(path / "launcher.json")
-        job_id = metadata["job_id"]
-        if metadata.get("launcher") != "slurm" or not str(job_id).isdigit():
-            raise ValueError("session has no valid Slurm job ID")
-        with session_lock(path):
-            (path / "STOP").touch()
-        args = ["scancel"]
-        if metadata.get("cluster"):
-            args += ["--clusters", metadata["cluster"]]
-        cancellation_error = None
-        try:
-            _checked(self.runner, [*args, str(job_id)], text=True, capture_output=True)
-        except subprocess.CalledProcessError as exc:
-            # Repeated stop after the scheduler forgot the job is still successful.
-            cancellation_error = exc
-        query = ["squeue", "--noheader", "--jobs", str(job_id), "--format=%T"]
-        if metadata.get("cluster"):
-            query += ["--clusters", metadata["cluster"]]
-        deadline = time.monotonic() + timeout
-        while True:
-            states = _scheduler_states(self.runner, query)
-            if not states or all(state in _SLURM_TERMINAL for state in states):
-                break
-            if cancellation_error is not None:
-                raise cancellation_error
-            if time.monotonic() >= deadline:
-                raise TimeoutError(f"Slurm job {job_id} is still active after cancellation")
-            time.sleep(min(0.1, max(0, deadline - time.monotonic())))
-        with session_lock(path):
-            cancel_unfinished(path, "Slurm job stopped before completion")
-            status = read_json(path / "status.json")
-            if status.get("state") != "failed":
-                status.update(state="stopped", updated_at=time.time())
-            status.pop("current_snippet", None)
-            write_json(path / "status.json", status)
-        return {**metadata, **status}
-
-
 class SkyPilotLauncher:
     def __init__(self, cluster, python="python3", *, runner=subprocess.run):
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", cluster):
@@ -501,12 +257,18 @@ class SkyPilotLauncher:
         session,
         *,
         source=None,
+        infra=None,
         accelerators="A100:1",
         idle_minutes=15,
         bootstrap_timeout=900,
         bootstrap_poll_interval=0.5,
         **config,
     ):
+        if infra is not None:
+            if not isinstance(infra, str) or not infra.strip():
+                raise ValueError("infra must be a nonempty SkyPilot infrastructure selector")
+            if infra.split("/", 1)[0].strip().lower() == "modal":
+                raise ValueError("Modal is not supported by upstream SkyPilot")
         if not isinstance(idle_minutes, int) or idle_minutes < 1:
             raise ValueError("idle_minutes must be a positive integer")
         for name, value in (
@@ -531,7 +293,7 @@ class SkyPilotLauncher:
             task = {
                 "name": "weights-lab",
                 "workdir": str(workdir),
-                "resources": {"accelerators": accelerators},
+                "resources": {} if accelerators is None else {"accelerators": accelerators},
                 "setup": shlex.join([self.python, "-m", "pip", "install", "."]),
                 "run": shlex.join([self.python, "-c", script]),
             }
@@ -549,6 +311,7 @@ class SkyPilotLauncher:
                     "--idle-minutes-to-autostop",
                     str(idle_minutes),
                     "--down",
+                    *(["--infra", infra] if infra is not None else []),
                     str(spec),
                 ],
                 text=True,
@@ -618,13 +381,13 @@ class SkyPilotLauncher:
                 args[index] = f"{option}={self._path(value)}"
             elif index + 1 < len(args) and not args[index + 1].startswith("-"):
                 args[index + 1] = self._path(args[index + 1])
-        return SSHLauncher(self.cluster, self.python, runner=self.runner).run(args, input=input)
+        return _SSHTransport(self.cluster, self.python, runner=self.runner).run(args, input=input)
 
     def stop(self, session, timeout=10):
         return self.run(["stop", "--session", str(session), "--timeout", str(timeout)])
 
     def download(self, remote_path, destination):
-        return SSHLauncher(self.cluster, self.python, runner=self.runner).download(
+        return _SSHTransport(self.cluster, self.python, runner=self.runner).download(
             self._path(remote_path), destination
         )
 
@@ -632,185 +395,3 @@ class SkyPilotLauncher:
         return _checked(
             self.runner, ["sky", "down", "-y", self.cluster], text=True, capture_output=True
         )
-
-
-class ModalLauncher:
-    """Keep session files in a finite-lived Modal sandbox until explicit teardown."""
-
-    def __init__(self, app_name="weights-lab", sandbox_id=None, python="python", *, sdk=None):
-        self.app_name, self.sandbox_id, self.python = app_name, sandbox_id, python
-        self._sdk = sdk
-
-    def _modal(self):
-        if self._sdk is None:
-            try:
-                import modal
-            except ImportError as exc:
-                raise RuntimeError(
-                    "install the modal package and configure Modal authentication"
-                ) from exc
-            self._sdk = modal
-        return self._sdk
-
-    def start(
-        self,
-        model,
-        session,
-        *,
-        source=None,
-        gpu="A100",
-        lifetime=3600,
-        bootstrap_timeout=900,
-        bootstrap_poll_interval=0.5,
-        **config,
-    ):
-        if not isinstance(lifetime, int) or lifetime < 1:
-            raise ValueError("lifetime must be a positive number of seconds")
-        for name, value in (
-            ("bootstrap_timeout", bootstrap_timeout),
-            ("bootstrap_poll_interval", bootstrap_poll_interval),
-        ):
-            try:
-                valid = (
-                    not isinstance(value, bool) and math.isfinite(float(value)) and float(value) > 0
-                )
-            except (TypeError, ValueError):
-                valid = False
-            if not valid:
-                raise ValueError(f"{name} must be finite and positive")
-        configuration = _configuration(model, config)
-        modal = self._modal()
-        source = _source_checkout(source)
-        # The sandbox stays alive after the worker stops so callers can copy artifacts.
-        script = _worker_script(session, configuration, keep_alive=True)
-        with tempfile.TemporaryDirectory(prefix="weights-lab-modal-") as temporary:
-            workdir = sanitized_workdir(source, Path(temporary) / "package")
-            image = (
-                modal.Image.debian_slim(python_version="3.11")
-                .add_local_dir(str(workdir), "/opt/weights-lab", copy=True)
-                .run_commands("python -m pip install /opt/weights-lab")
-            )
-            app = modal.App.lookup(self.app_name, create_if_missing=True)
-            sandbox = modal.Sandbox.create(
-                self.python,
-                "-c",
-                script,
-                app=app,
-                image=image,
-                gpu=gpu,
-                timeout=lifetime,
-                runtime="gvisor",
-            )
-            self.sandbox_id = sandbox.object_id
-        self._wait_session(session, float(bootstrap_timeout), float(bootstrap_poll_interval))
-        return {
-            "launcher": "modal",
-            "sandbox_id": self.sandbox_id,
-            "session": str(session),
-            "state": "starting",
-        }
-
-    def _wait_session(self, session, timeout, poll_interval):
-        sandbox = self._sandbox()
-        deadline = time.monotonic() + timeout
-        diagnostic = "no readiness response"
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(
-                    f"Modal sandbox {self.sandbox_id} bootstrap timed out after {timeout:g}s: "
-                    f"{diagnostic}"
-                )
-            if sandbox.poll() is not None:
-                raise RuntimeError(f"Modal sandbox {self.sandbox_id} exited during bootstrap")
-            process = sandbox.exec(
-                self.python,
-                "-c",
-                _SESSION_PROBE,
-                str(session),
-                timeout=max(1, math.ceil(min(15, remaining))),
-            )
-            code = process.wait()
-            diagnostic = (
-                process.stderr.read() or process.stdout.read() or f"probe exited {code}"
-            ).strip()[-2000:]
-            if code == 0:
-                return
-            if code != 75:
-                raise RuntimeError(
-                    f"Modal sandbox {self.sandbox_id} failed during bootstrap: {diagnostic}"
-                )
-            time.sleep(min(poll_interval, max(0, deadline - time.monotonic())))
-
-    def _sandbox(self):
-        if not self.sandbox_id:
-            raise ValueError("start a sandbox or supply its sandbox_id")
-        return self._modal().Sandbox.from_id(self.sandbox_id)
-
-    def run(self, args, *, input=None):
-        command = [self.python, "-m", "weights_lab", *map(str, args)]
-        process = self._sandbox().exec(*command)
-        if input is not None:
-            process.stdin.write(input.encode("utf-8"))
-        process.stdin.write_eof()
-        process.stdin.drain()
-        stdout, stderr = process.stdout.read(), process.stderr.read()
-        returncode = process.wait()
-        result = subprocess.CompletedProcess(command, returncode, stdout, stderr)
-        result.check_returncode()
-        return result
-
-    def stop(self, session, timeout=10):
-        return self.run(["stop", "--session", str(session), "--timeout", str(timeout)])
-
-    def download(self, remote_path, destination):
-        """Copy ephemeral files over the text exec stream, verifying remote SHA-256."""
-        destination = Path(destination).absolute()
-        if destination.exists() or destination.is_symlink():
-            raise FileExistsError(destination)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        encoder = (
-            "import base64,sys\n"
-            "class EncodedOutput:\n"
-            "    def write(self, chunk):\n"
-            "        sys.stdout.write(base64.b64encode(chunk).decode('ascii')+'\\n')\n"
-            "        sys.stdout.flush()\n"
-            "        return len(chunk)\n"
-            "encoded_output=EncodedOutput()\n"
-        )
-        script = encoder + _EXPORT.replace("fileobj=sys.stdout.buffer", "fileobj=encoded_output")
-        command = [self.python, "-c", script, str(remote_path)]
-        process = self._sandbox().exec(*command, text=True, bufsize=1)
-        with tempfile.TemporaryDirectory(
-            prefix=".weights-lab-copy-", dir=destination.parent
-        ) as tmp:
-            root = Path(tmp)
-            archive_path = root / "transfer.tar"
-            with archive_path.open("wb") as output:
-                pending = ""
-                for chunk in process.stdout:
-                    pending += chunk
-                    while "\n" in pending:
-                        line, pending = pending.split("\n", 1)
-                        output.write(base64.b64decode(line, validate=True))
-                    if len(pending) > 1024 * 1024:
-                        raise ValueError("checkpoint transfer contains an oversized encoded chunk")
-                if pending:
-                    raise ValueError("checkpoint transfer ended with an incomplete encoded chunk")
-            stderr = process.stderr.read()
-            returncode = process.wait()
-            if returncode:
-                raise subprocess.CalledProcessError(returncode, command, stderr=stderr)
-            extracted = root / "data"
-            extracted.mkdir()
-            manifest = _unpack_verified(archive_path, extracted)
-            copied = (
-                extracted / manifest["files"][0]["path"]
-                if manifest["kind"] == "file"
-                else extracted
-            )
-            os.replace(copied, destination)
-        return destination
-
-    def teardown(self):
-        self._sandbox().terminate(wait=True)

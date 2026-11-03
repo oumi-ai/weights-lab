@@ -32,9 +32,6 @@ def _positive(value: str) -> float:
 
 def _status(path: Path) -> dict:
     status = session.read_json(path / "status.json")
-    launcher_file = path / "launcher.json"
-    if launcher_file.exists():
-        status["launcher"] = session.read_json(launcher_file).get("launcher")
     if _pid(status) is None:
         try:
             status["pid"] = int((path / "worker.pid").read_text(encoding="ascii"))
@@ -49,9 +46,6 @@ def _pid(status: dict) -> int | None:
 
 
 def _alive(status: dict) -> bool:
-    if status.get("launcher") == "slurm":
-        # The PID belongs to a compute node, not this CLI's machine.
-        return status.get("state") not in TERMINAL_STATES
     pid = _pid(status)
     return pid is not None and session.is_process_alive(pid)
 
@@ -102,15 +96,10 @@ def _wait_result(path: Path, snippet_id: str, timeout: float | None, follow: boo
 def _start(args: argparse.Namespace) -> int:
     if not args.model.strip():
         raise ValueError("model must be a nonempty checkpoint path or Hub ID")
-    if sum(bool(value) for value in (args.host, args.cluster, args.sandbox_id)) > 1:
-        raise ValueError("choose only one remote target")
-    if args.sandbox_id:
-        raise ValueError("start creates a new sandbox; use --sandbox-id with other commands")
-    launcher = args.launcher
-    if launcher == "local":
-        launcher = "ssh" if args.host else "sky" if args.cluster else "local"
-    if launcher != "local":
-        return _remote_start(args, launcher)
+    if args.launcher == "sky" or args.cluster:
+        return _remote_start(args)
+    if args.infra:
+        raise ValueError("--infra requires --cluster")
     path = args.session.expanduser().resolve()
     config = {
         "model": args.model,
@@ -230,11 +219,6 @@ def _matches_worker(pid: int, path: Path) -> bool:
 def _stop(args: argparse.Namespace) -> int:
     path = args.session.expanduser().resolve()
     status = _status(path)
-    if status.get("launcher") == "slurm":
-        from .launchers import SlurmLauncher
-
-        _json(SlurmLauncher().stop(path, timeout=args.timeout))
-        return 0
     (path / "STOP").touch()
     deadline = time.monotonic() + args.timeout
     while _alive(status):
@@ -282,11 +266,6 @@ def _backup(args: argparse.Namespace) -> int:
     if output == path or path in output.parents:
         raise ValueError("backup output must be outside the session directory")
     status = _status(path)
-    if status.get("launcher") == "slurm":
-        from .launchers import SlurmLauncher
-
-        if SlurmLauncher().is_active(path):
-            raise ValueError("stop the scheduler job before creating a backup")
     if _alive(status) or status.get("state") not in TERMINAL_STATES:
         raise ValueError("stop the worker before creating a backup")
     names = {
@@ -315,33 +294,19 @@ def _backup(args: argparse.Namespace) -> int:
 
 
 def _transport(args):
-    from .launchers import ModalLauncher, SkyPilotLauncher, SSHLauncher
+    from .launchers import SkyPilotLauncher
 
-    targets = [bool(getattr(args, name, None)) for name in ("host", "cluster", "sandbox_id")]
-    if sum(targets) > 1:
-        raise ValueError("choose only one of --host, --cluster, or --sandbox-id")
-    if args.host:
-        return SSHLauncher(args.host, python=args.remote_python)
     if args.cluster:
         return SkyPilotLauncher(args.cluster, python=args.remote_python)
-    if args.sandbox_id:
-        return ModalLauncher(sandbox_id=args.sandbox_id, python=args.remote_python)
     return None
 
 
-def _remote_start(args, kind):
-    from .launchers import (
-        ModalLauncher,
-        SkyPilotLauncher,
-        SlurmLauncher,
-        SSHLauncher,
-        _configuration,
-    )
-
-    if (args.host and kind != "ssh") or (args.cluster and kind != "sky"):
-        raise ValueError("remote target does not match --launcher")
+def _remote_start(args):
     from .budget import PassBudget
+    from .launchers import SkyPilotLauncher, _configuration
 
+    if not args.cluster:
+        raise ValueError("SkyPilot launch requires --cluster")
     PassBudget(args.pass_limit)
     config = {
         key: getattr(args, key)
@@ -355,28 +320,14 @@ def _remote_start(args, kind):
             "adapter_revision",
         )
     }
-    _configuration(args.model, config)  # Reject static errors before provisioning or installing.
-    if kind == "ssh":
-        if not args.host:
-            raise ValueError("SSH launch requires --host")
-        transport = SSHLauncher(args.host, python=args.remote_python)
-        if args.install:
-            transport.install(args.source or Path.cwd())
-    elif kind == "slurm":
-        if args.host or args.cluster or args.sandbox_id:
-            raise ValueError("run Slurm launch on the login node with a shared session path")
-        transport = SlurmLauncher()
-        config.update(partition=args.partition, gres=args.gres, time_limit=args.time_limit)
-    elif kind == "sky":
-        if not args.cluster:
-            raise ValueError("SkyPilot launch requires --cluster")
-        transport = SkyPilotLauncher(args.cluster, python=args.remote_python)
-        config.update(
-            source=args.source, accelerators=args.accelerators, idle_minutes=args.idle_minutes
-        )
-    else:
-        transport = ModalLauncher(app_name=args.app_name, python=args.remote_python)
-        config.update(source=args.source, gpu=args.gpu, lifetime=args.lifetime)
+    _configuration(args.model, config)  # Reject static errors before provisioning.
+    transport = SkyPilotLauncher(args.cluster, python=args.remote_python)
+    config.update(
+        source=args.source,
+        accelerators=args.accelerators,
+        idle_minutes=args.idle_minutes,
+        infra=args.infra,
+    )
     _json(transport.start(args.model, str(args.session), **config))
     return 0
 
@@ -403,8 +354,6 @@ def _remote_command(args, transport):
         if args.follow:
             command.append("--follow")
     elif args.command == "stop":
-        if args.teardown and not hasattr(transport, "teardown"):
-            raise ValueError("--teardown is supported for SkyPilot and Modal")
         result = transport.stop(str(args.session), timeout=args.timeout)
         if isinstance(result, dict):
             _json(result)
@@ -450,19 +399,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     start.add_argument("--snippet-timeout", type=_positive, default=300.0)
     start.add_argument("--pass-limit", type=int, help="maximum total model forward calls")
+    start.add_argument("--launcher", choices=["local", "sky"], default="local")
     start.add_argument(
-        "--launcher", choices=["local", "ssh", "slurm", "sky", "modal"], default="local"
+        "--source", type=Path, help="source checkout to install on a SkyPilot worker"
     )
-    start.add_argument("--source", type=Path, help="source checkout to install on a cloud worker")
-    start.add_argument("--install", action="store_true", help="install the source package over SSH")
-    start.add_argument("--partition")
-    start.add_argument("--gres", default="gpu:1")
-    start.add_argument("--time-limit")
+    start.add_argument("--infra", help="SkyPilot infrastructure, e.g. slurm/mycluster/gpu")
     start.add_argument("--accelerators", default="A100:1")
     start.add_argument("--idle-minutes", type=int, default=15)
-    start.add_argument("--gpu", default="A100")
-    start.add_argument("--lifetime", type=int, default=3600)
-    start.add_argument("--app-name", default="weights-lab")
     start.set_defaults(handler=_start)
     send = commands.add_parser("send", help="submit Python from a file, an argument, or stdin")
     send.add_argument("--session", required=True, type=Path)
@@ -499,9 +442,7 @@ def _parser() -> argparse.ArgumentParser:
     worker = commands.add_parser("_worker")
     worker.add_argument("--session", required=True, type=Path)
     for command in (start, send, peek, stop, backup):
-        command.add_argument("--host", help="SSH host or configured alias")
         command.add_argument("--cluster", help="SkyPilot cluster name")
-        command.add_argument("--sandbox-id", help="Modal sandbox ID returned by start")
         command.add_argument("--remote-python", default="python3")
     return parser
 
@@ -518,7 +459,7 @@ def main(argv: list[str] | None = None) -> int:
             if transport is not None:
                 return _remote_command(args, transport)
             if args.command == "stop" and args.teardown:
-                raise ValueError("--teardown requires --cluster or --sandbox-id")
+                raise ValueError("--teardown requires --cluster")
         return args.handler(args)
     except subprocess.CalledProcessError as exc:
         if exc.stdout:

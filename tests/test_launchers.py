@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import io
 import json
@@ -13,10 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 from weights_lab.launchers import (
-    ModalLauncher,
     SkyPilotLauncher,
-    SlurmLauncher,
-    SSHLauncher,
+    _SSHTransport,
     sanitized_workdir,
 )
 from weights_lab.session import read_json
@@ -31,8 +28,6 @@ class Recorder:
 
     def __call__(self, args, **kwargs):
         self.calls.append((args, kwargs))
-        if args[0] == "squeue":
-            return subprocess.CompletedProcess(args, 0, "", "")
         if args[:2] == ["sky", "launch"]:
             self.task = json.loads(Path(args[-1]).read_text())
             self.synced_files = [
@@ -49,27 +44,42 @@ def local_transport(args, **kwargs):
     return subprocess.run(["sh", "-c", args[3]], **kwargs)
 
 
+def test_sky_bootstrap_serializes_path_model(tmp_path):
+    recorder = Recorder()
+    path = tmp_path / "session"
+    model = tmp_path / "model with spaces"
+    SkyPilotLauncher("weights-test", python=sys.executable, runner=recorder).start(
+        model, path, source=package_source(tmp_path)
+    )
+    command = shlex.split(recorder.task["run"])
+    assert command[:2] == [sys.executable, "-c"]
+    # Run session creation without replacing this test's child with a model worker.
+    script = "import os\nos.dup2=lambda *args: None\nos.execv=lambda *args: None\n" + command[2]
+    subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)
+    assert read_json(path / "config.json")["model"] == str(model)
+
+
 def test_ssh_roundtrip_handles_hostile_code_and_paths(tmp_path):
-    launcher = SSHLauncher("test-host", python=sys.executable, runner=local_transport)
+    launcher = _SSHTransport("test-host", python=sys.executable, runner=local_transport)
     session = tmp_path / "session 'with spaces; $(false)"
     from weights_lab.session import create_session
 
     create_session(session, {"model": "unused"})
     code = "print('literal $(false) `false` ; $HOME')\n"
-    result = launcher.send(session, code)
+    result = json.loads(launcher.run(["send", "--session", str(session)], input=code).stdout)
     assert (session / "inbox" / f"{result['id']}.py").read_text() == code
     status = json.loads(launcher.run(["peek", "--session", str(session)]).stdout)
     assert status["state"] == "starting"
 
 
-def test_ssh_code_uses_stdin_and_stop_is_remote():
+def test_ssh_transport_uses_stdin_and_runs_commands_remotely():
     runner = Recorder('{"state":"stopped"}')
-    launcher = SSHLauncher("gpu-box", runner=runner)
+    launcher = _SSHTransport("gpu-box", runner=runner)
     code = "print('sensitive snippet')"
-    launcher.send("/remote/session", code)
+    launcher.run(["send", "--session", "/remote/session"], input=code)
     args, kwargs = runner.calls[-1]
     assert code not in args[-1] and kwargs["input"] == code
-    launcher.stop("/remote/session")
+    launcher.run(["stop", "--session", "/remote/session", "--timeout", "10"])
     assert shlex.split(runner.calls[-1][0][-1]) == [
         "python3",
         "-m",
@@ -81,27 +91,7 @@ def test_ssh_code_uses_stdin_and_stop_is_remote():
         "10",
     ]
     with pytest.raises(ValueError):
-        SSHLauncher("-oProxyCommand=bad")
-
-
-def test_ssh_start_passes_checkpoint_revisions_and_budget():
-    runner = Recorder('{"state":"starting"}')
-    launcher = SSHLauncher("gpu-box", runner=runner)
-    launcher.start(
-        "model",
-        "/session",
-        revision="model-rev",
-        adapter="adapter",
-        adapter_revision="adapter-rev",
-        pass_limit=7,
-    )
-    args = shlex.split(runner.calls[-1][0][-1])
-    for flag, value in (
-        ("--revision", "model-rev"),
-        ("--adapter-revision", "adapter-rev"),
-        ("--pass-limit", "7"),
-    ):
-        assert args[args.index(flag) + 1] == value
+        _SSHTransport("-oProxyCommand=bad")
 
 
 def test_checkpoint_download_roundtrip_and_existing_destination(tmp_path):
@@ -110,7 +100,7 @@ def test_checkpoint_download_roundtrip_and_existing_destination(tmp_path):
     (remote / "config.json").write_text('{"model_type":"tiny"}')
     (remote / "nested").mkdir()
     (remote / "nested" / "weights.bin").write_bytes(bytes(range(256)) * 100)
-    launcher = SSHLauncher("test-host", python=sys.executable, runner=local_transport)
+    launcher = _SSHTransport("test-host", python=sys.executable, runner=local_transport)
     destination = launcher.download(remote, tmp_path / "downloaded")
     for original in remote.rglob("*"):
         if original.is_file():
@@ -129,7 +119,7 @@ def test_checkpoint_download_rejects_source_symlink(tmp_path):
     remote = tmp_path / "remote"
     remote.mkdir()
     (remote / "bad").symlink_to(tmp_path / "secret")
-    launcher = SSHLauncher("test-host", python=sys.executable, runner=local_transport)
+    launcher = _SSHTransport("test-host", python=sys.executable, runner=local_transport)
     with pytest.raises(subprocess.CalledProcessError):
         launcher.download(remote, tmp_path / "output")
     assert not (tmp_path / "output").exists()
@@ -150,76 +140,12 @@ def test_checkpoint_download_rejects_corruption_and_traversal(tmp_path, name, di
             archive.addfile(info, io.BytesIO(b"bad"))
         return subprocess.CompletedProcess(args, 0)
 
-    launcher = SSHLauncher("test-host", runner=corrupt_transport)
+    launcher = _SSHTransport("test-host", runner=corrupt_transport)
     with pytest.raises(ValueError):
         launcher.download("checkpoint", tmp_path / "output")
     assert not (tmp_path / "output").exists()
     assert not (tmp_path / "escape").exists()
     assert list(tmp_path.iterdir()) == []
-
-
-def test_slurm_creates_shared_session_and_cancels_job_not_pid(tmp_path):
-    runner = Recorder("12345;cluster-a\n")
-    launcher = SlurmLauncher(python="/env/bin/python", runner=runner)
-    path = tmp_path / "shared session"
-    result = launcher.start(
-        "model", path, partition="gpu", gres="gpu:a100:1", time_limit="01:00:00"
-    )
-    assert result["job_id"] == "12345" and result["cluster"] == "cluster-a"
-    assert read_json(path / "config.json")["model"] == "model"
-    args = runner.calls[0][0]
-    wrapped = shlex.split(args[args.index("--wrap") + 1])
-    assert wrapped == ["/env/bin/python", "-m", "weights_lab", "_worker", "--session", str(path)]
-    assert args[args.index("--partition") + 1] == "gpu"
-    launcher.stop(path)
-    assert runner.calls[-2][0] == ["scancel", "--clusters", "cluster-a", "12345"]
-    assert read_json(path / "status.json")["state"] == "stopped"
-    assert (path / "STOP").exists()
-    with pytest.raises(ValueError, match="SlurmLauncher.stop"):
-        launcher.run(["stop", "--session", str(path)])
-
-
-def test_slurm_failed_submission_marks_session_failed(tmp_path):
-    def failing(args, **kwargs):
-        raise subprocess.CalledProcessError(1, args, stderr="no partition")
-
-    launcher = SlurmLauncher(runner=failing)
-    path = tmp_path / "session"
-    with pytest.raises(subprocess.CalledProcessError):
-        launcher.start("model", path)
-    assert read_json(path / "status.json")["state"] == "failed"
-
-
-def test_slurm_cancellation_finalizes_queued_sources_and_waits_for_scheduler(tmp_path):
-    from weights_lab.session import submit
-
-    states = iter(["RUNNING\n", "COMPLETING\n", ""])
-
-    def scheduler(args, **kwargs):
-        output = next(states) if args[0] == "squeue" else "42"
-        return subprocess.CompletedProcess(args, 0, output, "")
-
-    launcher = SlurmLauncher(runner=scheduler)
-    path = tmp_path / "session"
-    launcher.start("model", path)
-    identifier = submit(path, "print('queued')")
-    result = launcher.stop(path, timeout=2)
-    assert result["state"] == "stopped"
-    assert read_json(path / "results" / f"{identifier}.json")["state"] == "cancelled"
-    assert (path / "completed" / f"{identifier}.py").exists()
-
-
-def test_slurm_timeout_never_claims_worker_stopped(tmp_path):
-    def scheduler(args, **kwargs):
-        output = "RUNNING\n" if args[0] == "squeue" else "42"
-        return subprocess.CompletedProcess(args, 0, output, "")
-
-    launcher = SlurmLauncher(runner=scheduler)
-    path = tmp_path / "session"
-    launcher.start("model", path)
-    with pytest.raises(TimeoutError, match="still active"):
-        launcher.stop(path, timeout=0.01)
-    assert read_json(path / "status.json")["state"] == "starting"
 
 
 def package_source(tmp_path):
@@ -253,8 +179,49 @@ def test_sky_syncs_sanitized_package_and_keeps_foreground_worker(tmp_path):
     assert run[:2] == ["python3", "-c"] and "os.execv" in run[2] and "_worker" in run[2]
     assert "Popen" not in run[2]
     assert "--down" in runner.calls[0][0] and "-d" in runner.calls[0][0]
+    assert "--infra" not in runner.calls[0][0]
     launcher.teardown()
     assert runner.calls[-1][0] == ["sky", "down", "-y", "weights-test"]
+
+
+@pytest.mark.parametrize("infra", ["slurm/lab/gpu", "aws/us-east-1", "kubernetes/local"])
+def test_sky_routes_infrastructure_through_upstream_cli(tmp_path, infra):
+    runner = Recorder()
+    result = SkyPilotLauncher("weights-test", runner=runner).start(
+        "model", "/tmp/session", source=package_source(tmp_path), infra=infra
+    )
+    command = runner.calls[0][0]
+    assert command[command.index("--infra") + 1] == infra
+    assert runner.task["resources"] == {"accelerators": "A100:1"}
+    assert result["launcher"] == "sky"
+    assert "infra" not in shlex.split(runner.task["run"])[2]
+
+
+def test_sky_cpu_slurm_launch_omits_gpu_request(tmp_path):
+    runner = Recorder()
+    SkyPilotLauncher("weights-test", runner=runner).start(
+        "model",
+        "/tmp/session",
+        source=package_source(tmp_path),
+        infra="slurm/lab/cpu",
+        accelerators=None,
+        device="cpu",
+    )
+    assert runner.task["resources"] == {}
+    assert "'device': 'cpu'" in shlex.split(runner.task["run"])[2]
+
+
+@pytest.mark.parametrize(
+    "infra", ["modal", "Modal", "MODAL/workspace", " modal /workspace", "", "  ", 3, False]
+)
+def test_sky_invalid_or_modal_infrastructure_rejected_before_provisioning(infra):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("invalid infrastructure reached provisioning")
+
+    with pytest.raises(ValueError, match="infra|Modal"):
+        SkyPilotLauncher("weights-test", runner=forbidden).start(
+            "model", "/tmp/session", source="/unavailable", infra=infra
+        )
 
 
 def test_sky_start_waits_for_python_and_session_files_with_quoted_home_path(tmp_path):
@@ -334,7 +301,7 @@ def test_sky_relative_backup_and_download_use_same_remote_workdir(tmp_path, monk
         copied.append((source, destination))
         return destination
 
-    monkeypatch.setattr(SSHLauncher, "download", download)
+    monkeypatch.setattr(_SSHTransport, "download", download)
     target = tmp_path / "downloaded.tar.gz"
     assert launcher.download(Path("backups/test.tar.gz"), target) == target
     assert copied == [("~/sky_workdir/backups/test.tar.gz", target)]
@@ -428,133 +395,6 @@ def test_sanitized_source_rejects_symlinked_package_files(tmp_path):
         sanitized_workdir(source, tmp_path / "destination")
 
 
-def test_modal_sandbox_lifecycle_uses_stdin_and_explicit_teardown(tmp_path):
-    source = package_source(tmp_path)
-    state = {}
-
-    class Image:
-        @classmethod
-        def debian_slim(cls, **kwargs):
-            return cls()
-
-        def add_local_dir(self, local, remote, **kwargs):
-            state["files"] = [
-                path.relative_to(local).as_posix()
-                for path in Path(local).rglob("*")
-                if path.is_file()
-            ]
-            return self
-
-        def run_commands(self, command):
-            state["setup"] = command
-            return self
-
-    class Stdin:
-        def write(self, data):
-            state["stdin"] = data
-
-        def write_eof(self):
-            state["eof"] = True
-
-        def drain(self):
-            state["drained"] = True
-
-    class Sandbox:
-        object_id = "sb-test"
-
-        @classmethod
-        def create(cls, *args, **kwargs):
-            state["create"] = (args, kwargs)
-            return cls()
-
-        @classmethod
-        def from_id(cls, identifier):
-            assert identifier == "sb-test"
-            return cls()
-
-        def poll(self):
-            return None
-
-        def exec(self, *args, **kwargs):
-            state["exec"] = args
-            return SimpleNamespace(
-                stdin=Stdin(),
-                stdout=io.StringIO('{"id":"snippet"}'),
-                stderr=io.StringIO(""),
-                wait=lambda: 0,
-            )
-
-        def terminate(self, *, wait):
-            state["terminated"] = wait
-
-    sdk = SimpleNamespace(
-        Image=Image, Sandbox=Sandbox, App=SimpleNamespace(lookup=lambda *args, **kwargs: "app")
-    )
-    launcher = ModalLauncher(sdk=sdk)
-    result = launcher.start("model", "/session", source=source, gpu="L4", lifetime=1800)
-    assert result["sandbox_id"] == "sb-test"
-    assert state["create"][1]["gpu"] == "L4"
-    assert state["create"][1]["timeout"] == 1800
-    assert state["create"][1]["runtime"] == "gvisor"
-    assert ".env" not in state["files"]
-    code = "print('literal $HOME')\n"
-    launcher.run(["send", "--session", "/session"], input=code)
-    assert state["stdin"] == code.encode() and state["eof"] and state["drained"]
-    assert code not in state["exec"]
-    launcher.teardown()
-    assert state["terminated"]
-
-
-def test_modal_download_streams_and_verifies_real_local_checkpoint(tmp_path):
-    remote = tmp_path / "checkpoint"
-    remote.mkdir()
-    (remote / "weights.bin").write_bytes(bytes(range(256)) * 1000)
-    (remote / "config.json").write_text('{"model_type":"tiny"}')
-
-    class Sandbox:
-        def exec(self, *args, **kwargs):
-            return subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
-
-    sdk = SimpleNamespace(Sandbox=SimpleNamespace(from_id=lambda identifier: Sandbox()))
-    launcher = ModalLauncher(sandbox_id="sb-local", python=sys.executable, sdk=sdk)
-    destination = launcher.download(remote, tmp_path / "copied")
-    assert (destination / "weights.bin").read_bytes() == (remote / "weights.bin").read_bytes()
-    assert (destination / "config.json").read_bytes() == (remote / "config.json").read_bytes()
-    single = launcher.download(remote / "config.json", tmp_path / "config-copy.json")
-    assert single.read_bytes() == (remote / "config.json").read_bytes()
-    with pytest.raises(FileExistsError):
-        launcher.download(remote, destination)
-
-
-def test_modal_download_rejects_corrupt_split_text_stream(tmp_path):
-    archive_bytes = io.BytesIO()
-    with tarfile.open(fileobj=archive_bytes, mode="w") as archive:
-        manifest = json.dumps(
-            {"kind": "file", "files": [{"path": "weights.bin", "sha256": "0" * 64}]}
-        ).encode()
-        info = tarfile.TarInfo(".weights-lab-manifest.json")
-        info.size = len(manifest)
-        archive.addfile(info, io.BytesIO(manifest))
-        info = tarfile.TarInfo("weights.bin")
-        info.size = 3
-        archive.addfile(info, io.BytesIO(b"bad"))
-    encoded = base64.b64encode(archive_bytes.getvalue()).decode() + "\n"
-
-    class Sandbox:
-        def exec(self, *args, **kwargs):
-            return SimpleNamespace(
-                stdout=[encoded[:17], encoded[17:999], encoded[999:]],
-                stderr=io.StringIO(""),
-                wait=lambda: 0,
-            )
-
-    sdk = SimpleNamespace(Sandbox=SimpleNamespace(from_id=lambda identifier: Sandbox()))
-    launcher = ModalLauncher(sandbox_id="sb-local", sdk=sdk)
-    with pytest.raises(ValueError, match="checksum mismatch"):
-        launcher.download("checkpoint", tmp_path / "copied")
-    assert list(tmp_path.iterdir()) == []
-
-
 def test_sky_checkpoint_copy_uses_cluster_ssh_alias(tmp_path):
     source = tmp_path / "source.bin"
     source.write_bytes(b"checkpoint")
@@ -566,186 +406,3 @@ def test_sky_checkpoint_copy_uses_cluster_ssh_alias(tmp_path):
     launcher = SkyPilotLauncher("weights-test", python=sys.executable, runner=local_sky)
     destination = launcher.download(source, tmp_path / "copied.bin")
     assert destination.read_bytes() == b"checkpoint"
-
-
-def test_slurm_stop_already_finished_job_reconciles_session(tmp_path):
-    def scheduler(args, **kwargs):
-        if args[0] == "scancel":
-            raise subprocess.CalledProcessError(1, args, stderr="Invalid job id specified")
-        output = "42" if args[0] == "sbatch" else ""
-        return subprocess.CompletedProcess(args, 0, output, "")
-
-    launcher = SlurmLauncher(runner=scheduler)
-    path = tmp_path / "session"
-    launcher.start("model", path)
-    assert launcher.stop(path)["state"] == "stopped"
-
-
-def test_slurm_tilde_session_roundtrip(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    launcher = SlurmLauncher(runner=Recorder("42"))
-    info = launcher.start("model", "~/session")
-    assert info["session"] == str(tmp_path / "session")
-    assert not launcher.is_active("~/session")
-    assert launcher.stop("~/session")["state"] == "stopped"
-
-
-@pytest.fixture
-def modal_local_sdk():
-    state = SimpleNamespace(probes=0, commands=[], before_exec=lambda: None, returncode=None)
-
-    class Image:
-        @classmethod
-        def debian_slim(cls, **kwargs):
-            return cls()
-
-        def add_local_dir(self, *args, **kwargs):
-            return self
-
-        def run_commands(self, *args):
-            return self
-
-    class Stdin:
-        def __init__(self, stream):
-            self.stream = stream
-
-        def write(self, data):
-            self.stream.write(data)
-
-        def write_eof(self):
-            self.stream.close()
-
-        def drain(self):
-            pass
-
-    class Sandbox:
-        object_id = "sb-local"
-
-        @classmethod
-        def create(cls, *args, **kwargs):
-            state.script = args[2]
-            return cls()
-
-        @classmethod
-        def from_id(cls, identifier):
-            assert identifier == cls.object_id
-            return cls()
-
-        def poll(self):
-            return state.returncode
-
-        def exec(self, *args, **kwargs):
-            state.commands.append((args, kwargs))
-            if "-c" in args:
-                state.probes += 1
-            state.before_exec()
-            process = subprocess.Popen(
-                args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            return SimpleNamespace(
-                stdin=Stdin(process.stdin),
-                stdout=io.TextIOWrapper(process.stdout),
-                stderr=io.TextIOWrapper(process.stderr),
-                wait=process.wait,
-            )
-
-        def terminate(self, *, wait):
-            state.terminated = wait
-
-    sdk = SimpleNamespace(
-        Image=Image, Sandbox=Sandbox, App=SimpleNamespace(lookup=lambda *args, **kwargs: "app")
-    )
-    return sdk, state
-
-
-def test_modal_waits_for_session_before_immediate_send(tmp_path, modal_local_sdk):
-    from weights_lab.session import create_session
-
-    sdk, state = modal_local_sdk
-    path = tmp_path / "session"
-
-    def delayed_creation():
-        if state.probes == 2 and not path.exists():
-            create_session(path, {"model": "unused"})
-
-    state.before_exec = delayed_creation
-    launcher = ModalLauncher(python=sys.executable, sdk=sdk)
-    info = launcher.start(
-        "unused",
-        path,
-        source=package_source(tmp_path),
-        bootstrap_timeout=5,
-        bootstrap_poll_interval=0.001,
-    )
-    assert state.probes == 2
-    assert all(0 < kwargs["timeout"] <= 5 for _, kwargs in state.commands)
-    assert "bootstrap_timeout" not in state.script
-    result = launcher.run(["send", "--session", info["session"]], input="print('ready')")
-    snippet_id = json.loads(result.stdout)["id"]
-    assert (path / "inbox" / f"{snippet_id}.py").read_text() == "print('ready')"
-
-
-@pytest.mark.parametrize("failure", ["failed", "invalid", "exited"])
-def test_modal_bootstrap_failure_keeps_sandbox_available_for_teardown(
-    tmp_path, modal_local_sdk, failure
-):
-    from weights_lab.session import create_session, write_json
-
-    sdk, state = modal_local_sdk
-    path = create_session(tmp_path / "session", {"model": "unused"})
-    if failure == "exited":
-        state.returncode = 1
-    else:
-        write_json(
-            path / "status.json",
-            {"state": "failed", "error": "load failed"} if failure == "failed" else [],
-        )
-    launcher = ModalLauncher(python=sys.executable, sdk=sdk)
-    with pytest.raises(RuntimeError, match="sb-local.*bootstrap"):
-        launcher.start("unused", path, source=package_source(tmp_path))
-    assert state.probes == (0 if failure == "exited" else 1)
-    assert launcher.sandbox_id == "sb-local"
-    launcher.teardown()
-    assert state.terminated
-
-
-def test_modal_bootstrap_timeout_retains_diagnostic_and_sandbox(
-    tmp_path, modal_local_sdk, monkeypatch
-):
-    sdk, state = modal_local_sdk
-    clock = SimpleNamespace(now=0.0)
-    monkeypatch.setattr("weights_lab.launchers.time.monotonic", lambda: clock.now)
-    monkeypatch.setattr(
-        "weights_lab.launchers.time.sleep",
-        lambda seconds: setattr(clock, "now", clock.now + seconds),
-    )
-    launcher = ModalLauncher(python=sys.executable, sdk=sdk)
-    with pytest.raises(TimeoutError, match="sb-local.*session files not created yet"):
-        launcher.start(
-            "unused",
-            tmp_path / "session",
-            source=package_source(tmp_path),
-            bootstrap_timeout=1,
-            bootstrap_poll_interval=0.3,
-        )
-    assert clock.now == 1
-    assert all(kwargs["timeout"] == 1 for _, kwargs in state.commands)
-    launcher.teardown()
-    assert state.terminated
-
-
-@pytest.mark.parametrize(
-    "option,value",
-    [
-        ("bootstrap_timeout", 0),
-        ("bootstrap_timeout", float("inf")),
-        ("bootstrap_poll_interval", float("nan")),
-        ("bootstrap_timeout", None),
-        ("bootstrap_poll_interval", True),
-    ],
-)
-def test_modal_invalid_bootstrap_options_rejected_before_sdk(option, value):
-    launcher = ModalLauncher()
-    with pytest.raises(ValueError, match=option):
-        launcher.start("model", "/session", **{option: value})
-    assert launcher._sdk is None

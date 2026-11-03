@@ -7,9 +7,9 @@ the test suite creates its own small models and does not download weights.
 
 | Environment | Result |
 | --- | --- |
-| macOS, Python 3.12, Torch 2.15.0, Transformers 5.22.1 | 263 tests passed, including actual Apple MPS checks |
-| Linux, Python 3.11.15, Torch 2.14.0, Transformers 5.20.2 | 258 passed, five MPS-only cases skipped; uploaded source hashes verified |
-| NVIDIA H200, Torch 2.15.0+cu132, Transformers 5.22.1 | Full worker runtime harness passed on CUDA |
+| macOS, Python 3.12, Torch 2.15.0, Transformers 5.22.1 | 230 tests passed, including actual Apple MPS checks |
+| Linux, Python 3.11.15, Torch 2.14.0, Transformers 5.20.2 | 225 passed, five MPS-only cases skipped; uploaded source hashes verified |
+| NVIDIA H200, Torch 2.14.0+cu130, Transformers 5.20.2 | Full worker runtime harness passed on CUDA |
 | Source distribution, wheel, installed CLI and API | Build and installation checks passed |
 
 The CUDA harness used a local random GPT-2 and a nonzero LoRA adapter. It checked
@@ -25,13 +25,12 @@ The downloaded CUDA report includes SHA-256 fingerprints of every installed
 The Linux compatibility run used GPUs hidden and one CPU thread; it did not change
 the benchmark environment's packages or consume GPU compute.
 
-The parallel branch review found and fixed three additional bugs: Slurm session
-paths now expand `~` consistently, Modal waits for valid session files before
-returning, and sampled scoring restores Apple MPS random state even when the model
-runs on CPU or generation fails. All four new CPU/MPS success/failure regression
-cases failed before the RNG fix and passed afterward. Launcher regressions execute
-the readiness probe and immediate send against local subprocesses; live Modal
-execution remains blocked as described below.
+The branch review also found an Apple MPS random-state leak in sampled scoring.
+All four CPU/MPS success/failure regression cases failed before the fix and passed
+afterward. Sampled evaluation now preserves the caller's random state on all three
+backends. A separate regression executes the generated SkyPilot bootstrap with a
+`Path` model argument, ensuring that its configuration is serializable before
+provisioning.
 
 Run the reusable harness in an installed package environment with the adapters extra:
 
@@ -80,35 +79,64 @@ helper; an explicit shim raises if that unused diagnostic is called. The prompt,
 answer extraction, and mathematical grading functions are loaded unchanged and
 verified against the pinned source hash.
 
-## Live-provider findings
+## Measured MATH-500 result
 
-Live SkyPilot provisioning and SSH CUDA worker execution succeeded on a dedicated
-Nebius H200 instance. Real validation exposed and fixed a startup race: SkyPilot's
-detached launch can return before setup creates Python and session files. The
-launcher now waits for those files with a bounded, diagnostic readiness check.
-Relative Sky paths are consistently anchored to the remote work directory.
+Both full 500-problem arms completed with four samples per problem on the same
+NVIDIA H200. The predeclared directional criteria passed (`full_validated=true`).
 
-The initial benchmark attempt exposed a separate environment issue: invoking a
-virtualenv's Python by absolute path does not put its compiler executables on PATH.
-The benchmark child now adds its own executable directory before starting vLLM.
-Failed cloud attempts were explicitly torn down. Each validation run also has an
-independent teardown watchdog and a finite worker lifetime with SkyPilot autodown.
+| Metric | Base | Edited |
+| --- | ---: | ---: |
+| Correct samples | 157 / 2,000 | 1,025 / 2,000 |
+| Accuracy | 7.85% | 51.25% |
+| Samples reaching the 32,768-token cap | 1,858 (92.90%) | 611 (30.55%) |
+| Mean generated tokens | 30,845.27 | 21,699.80 |
+| Arm duration, including initialization and grading | 88.03 min | 55.98 min |
 
-A real Slurm 23.11.4 scheduler was also exercised on that disposable VM. A CPU
-worker ran as scheduler job 1, and its `SLURM_JOB_ID` matched the submitted ID.
-Send, peek, cancellation through `scancel`, and checksum verification of all seven
-backup files passed. A login-process guard rejected compute-node PID signalling
-during cancellation. Both control-plane listeners were verified on loopback, and
-all temporary daemons exited after the check.
+Accuracy increased by 43.4 percentage points and token-cap share decreased by
+62.35 percentage points. These are sample-level metrics, rather than pass@4.
 
-The first Slurm harness attempt exposed a setup detail rather than a package
-failure: that Slurm version resolves daemon bind addresses from the hostname.
-The corrected harness gives only its daemon processes a private UTS hostname;
-the VM's global hostname and network remain unchanged. Its keys and spool state
-are removed during cleanup. This validates a real single-node scheduler lifecycle,
-not a production multi-node cluster deployment.
+The dataset revision was `6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be`. Checkpoints
+were pinned to base `2fc06364715b967f1860aea9cf38778875588b17` and edited
+`d1671a178705bcab7644806d23c535517f35723b`. The grader SHA-256 was
+`f0d576a1adc625dede7bff749b3bf8c9a5a8f6bae43d51e2d0ee36d694e89843`.
 
-Modal authentication and SDK compatibility were checked using Modal 1.6.3. The
-actual image build was rejected by the workspace's billing-cycle spend limit
-before any GPU sandbox was allocated. The account's billing settings were not
-changed. Live Modal execution therefore remains blocked by that account limit.
+An independent audit of the raw files verified exactly four unique samples for
+every problem in each arm, unchanged frozen inputs, valid finish reasons and token
+counts, and agreement with every reported aggregate. The comparison report SHA-256
+is `34ff6a8d5e182b382f5858e05945d3efd8e36928d70f26fe6934e6d0ce837c50`.
+Raw outputs, runtime reports, source fingerprints, and the audit are retained in
+this checkout under `sessions/validation-20261103/`, which is ignored by Git.
+
+## Remote coverage and limits
+
+Remote sessions now use upstream SkyPilot exclusively. The CLI and Python API
+forward `infra` selectors, including `slurm/CLUSTER/PARTITION`, to `sky launch`.
+Direct SSH, Slurm, and Modal launchers and their validation scripts were removed;
+SSH remains a private transport for SkyPilot's cluster alias. Modal is unsupported.
+SkyPilot's CLI is installed separately from the model worker.
+
+Live SkyPilot provisioning and SSH CUDA execution succeeded on a dedicated Nebius
+H200 instance. Validation exposed and fixed a detached-startup race: the launcher
+now waits for the remote environment and session files with bounded readiness
+checks. Relative paths are anchored to the remote work directory. Command routing,
+Slurm infrastructure selection, transfers, and teardown failure paths have local
+regression coverage.
+
+Slurm through SkyPilot has not been live-validated. Its upstream bootstrap invokes
+`ray stop`, which would disrupt the active SkyPilot workload on the same disposable
+VM. That test needs a separate cluster or isolated host. Earlier single-node tests
+of the removed direct Slurm launcher passed, but do not validate the new route.
+The original cloud-controller report retains its first direct-Slurm harness failure;
+the benchmark comparison and final runtime reports are separate results.
+
+The benchmark's first attempt exposed a virtualenv issue: invoking Python by
+absolute path does not expose compiler executables on PATH. The benchmark child now
+adds its executable directory before starting vLLM. Failed cloud attempts were
+torn down. Each cloud validation run has an independent teardown watchdog, a finite
+worker lifetime, and SkyPilot autodown as additional cleanup mechanisms.
+
+All three validation instances were terminated. A final provider-side inventory
+found no remaining validation instances, disks, or GPU clusters. Estimated compute
+across all attempts was $12.68 at the launch-time $4.50/hour quote, below the $50
+cap. This is an estimate from controller durations, excludes storage, and is not a
+billing statement.
