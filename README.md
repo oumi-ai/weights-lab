@@ -140,9 +140,9 @@ up. Seeds alone do not guarantee the same results across devices or setups.
   circuit against all 36,525 valid dates in 2000–2099.
 - [Seven agent recipes](skills/weights-lab/references/) for common interventions.
 
-CPU tests, an Apple MPS smoke test, and public-model experiments run locally.
-Remote transports are tested with simulated providers and a local shell; CUDA,
-paid provider deployment, and the full Qwen benchmark have not been run here.
+CPU, Apple MPS, and NVIDIA H200 CUDA checks have passed, along with real
+SSH/SkyPilot execution, a single-node Slurm lifecycle, and public-model experiments.
+See [measured validation evidence and provider limits](docs/validation.md).
 The Qwen example replays a
 released edit and does not claim to rediscover it or reproduce its benchmark.
 Optional Oumi training-step integration remains outside this standalone release.

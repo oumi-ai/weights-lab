@@ -26,7 +26,7 @@ dev = ["pytest>=8", "ruff>=0.9", "build>=1.2"]
 packages = ["src/weights_lab"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/weights_lab", "tests", "examples", "skills", ".claude-plugin", "docs/api.md", "docs/remote.md", "docs/dogfood.md", "docs/parity.md", "docs/qwen-replay.md", "docs/skill-install.md", "README.md", "LICENSE", "pyproject.toml"]
+include = ["src/weights_lab", "tests", "examples", "scripts", "skills", ".claude-plugin", "docs/api.md", "docs/remote.md", "docs/dogfood.md", "docs/parity.md", "docs/qwen-replay.md", "docs/skill-install.md", "docs/validation.md", "README.md", "LICENSE", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

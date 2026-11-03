@@ -7,8 +7,9 @@ be configured on the machine that loads the model. No credentials are copied fro
 the local repository.
 
 These transports have command-construction tests and CPU tests using a local shell
-in place of SSH. They have not been exercised against a live scheduler or cloud
-account. Starting a cloud launcher provisions resources and can incur charges.
+in place of SSH. Live CUDA and SSH execution was also exercised through SkyPilot
+on Nebius; see [validation evidence and remaining provider limits](validation.md).
+Starting a cloud launcher provisions resources and can incur charges.
 
 ## SSH
 
@@ -118,7 +119,10 @@ sky.teardown()
 Only the sanitized package directory is synced. A JSON document, which is also
 valid YAML, supplies the task configuration. Setup installs the package; the job
 executes the worker in the foreground so SkyPilot can track its lifetime. Startup
-returns after job submission, before model loading finishes. `run()` uses the SSH
+waits until the remote Python environment and session files exist, then returns
+without waiting for model loading. `bootstrap_timeout` defaults to 900 seconds;
+bootstrap failures retain readiness diagnostics. Relative paths use
+`~/sky_workdir/`; absolute and explicit remote home paths are preserved. `run()` uses the SSH
 alias that SkyPilot creates for the cluster. This bypasses the scheduler queue
 occupied by the resident worker. Snippets supplied through `input`
 are delivered to the remote CLI stdin, rather than referring to a local
