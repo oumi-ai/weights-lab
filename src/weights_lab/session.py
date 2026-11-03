@@ -15,6 +15,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from .budget import PassBudget
+
 DIRECTORIES = ("inbox", "running", "completed", "outputs", "results", "artifacts")
 
 
@@ -48,6 +50,7 @@ def create_session(path: Path, config: dict[str, Any]) -> Path:
     path = Path(path).expanduser().resolve()
     if not config.get("model"):
         raise ValueError("a model name or checkpoint path is required")
+    PassBudget(config.get("pass_limit"))
     config = {"snippet_timeout": 300.0, "poll_interval": 0.1, **config}
     for name in ("snippet_timeout", "poll_interval"):
         value = float(config[name])

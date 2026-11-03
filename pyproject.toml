@@ -13,18 +13,20 @@ dependencies = ["torch>=2.4", "transformers>=4.56,<6"]
 
 [project.optional-dependencies]
 adapters = ["peft>=0.13"]
+remote = ["build>=1.2"]
+modal = ["modal>=1.6"]
 
 [project.scripts]
 weights-lab = "weights_lab.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.9"]
+dev = ["pytest>=8", "ruff>=0.9", "build>=1.2"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/weights_lab"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/weights_lab", "tests", "examples", "README.md", "LICENSE", "pyproject.toml"]
+include = ["src/weights_lab", "tests", "examples", "skills", ".claude-plugin", "docs/api.md", "docs/remote.md", "docs/dogfood.md", "docs/parity.md", "docs/qwen-replay.md", "docs/skill-install.md", "README.md", "LICENSE", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

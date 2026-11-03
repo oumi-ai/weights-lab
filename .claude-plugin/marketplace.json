@@ -1,0 +1,12 @@
+{
+  "name": "weights-lab-local",
+  "description": "A local skill for persistent open-weights model experiments.",
+  "owner": {"name": "Weights Lab"},
+  "plugins": [
+    {
+      "name": "weights-lab",
+      "source": "./",
+      "description": "Investigate open-weights language models in a persistent local worker."
+    }
+  ]
+}

@@ -3,8 +3,14 @@
 from pathlib import Path
 from typing import Any
 
+from .attachments import AttachmentMixin
+from .budget import PassBudget
+from .editing import EditingMixin
+from .inspection import InspectionMixin
+from .scoring import ScoringMixin
 
-class Lab:
+
+class Lab(EditingMixin, ScoringMixin, InspectionMixin, AttachmentMixin):
     """A loaded model, tokenizer, and the session's artifact directory.
 
     Forward passes count calls to the base language model, including generation
@@ -19,13 +25,16 @@ class Lab:
         tokenizer: Any,
         session_path: Path,
         model_id: str = "",
+        pass_limit: int | None = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.session_path = Path(session_path)
         self.artifacts = self.session_path / "artifacts"
+        self.artifacts.mkdir(parents=True, exist_ok=True)
         self.model_id = model_id
         self._forward_passes = 0
+        self._budget = PassBudget(pass_limit)
         # PEFT generation calls the underlying language model directly.
         counted_model = model.get_base_model() if hasattr(model, "peft_config") else model
         self._counter_hook = counted_model.register_forward_pre_hook(self._count_forward)
@@ -44,7 +53,16 @@ class Lab:
     def passes_used(self) -> int:
         return self._forward_passes
 
+    @property
+    def revision(self) -> int:
+        return (
+            self.editbook.revision
+            + getattr(self, "_attachment_revision", 0)
+            + getattr(self, "_patch_revision", 0)
+        )
+
     def _count_forward(self, module: Any, inputs: Any) -> None:
+        self._before_forward()
         self._forward_passes += 1
 
 
@@ -56,7 +74,13 @@ def load_lab(config: dict[str, Any], session_path: Path) -> Lab:
     Custom model code from the Hub is never enabled.
     """
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
+    from transformers import (
+        AutoConfig,
+        AutoModelForCausalLM,
+        AutoModelForImageTextToText,
+        AutoTokenizer,
+        set_seed,
+    )
 
     model_id = config["model"]
     device = _resolve_device(torch, config.get("device", "auto"))
@@ -73,22 +97,48 @@ def load_lab(config: dict[str, Any], session_path: Path) -> Lab:
     set_seed(config.get("seed", 0))
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=False)
+    reference = {"revision": config.get("revision"), "trust_remote_code": False}
+    model_config = AutoConfig.from_pretrained(model_id, **reference)
+    tokenizer = AutoTokenizer.from_pretrained(model_id, **reference)
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(
+    # Preserve a checkpoint's declared multimodal architecture when it has one.
+    # Nested text_config alone is also used by causal-only model families.
+    architectures = model_config.architectures or []
+
+    def declares(factory):
+        if not architectures or type(model_config) not in factory._model_mapping:
+            return False
+        classes = factory._model_mapping[type(model_config)]
+        classes = classes if isinstance(classes, tuple) else (classes,)
+        return any(cls.__name__ in architectures for cls in classes)
+
+    causal_supported = type(model_config) in AutoModelForCausalLM._model_mapping
+    model_class = AutoModelForCausalLM
+    if not causal_supported or (
+        declares(AutoModelForImageTextToText) and not declares(AutoModelForCausalLM)
+    ):
+        model_class = AutoModelForImageTextToText
+    model = model_class.from_pretrained(
         model_id,
+        config=model_config,
         dtype=dtypes[dtype_name],
         attn_implementation="eager",
-        trust_remote_code=False,
+        **reference,
     )
     if config.get("adapter"):
         from peft import PeftModel
 
-        model = PeftModel.from_pretrained(model, config["adapter"], is_trainable=False)
+        model = PeftModel.from_pretrained(
+            model, config["adapter"], revision=config.get("adapter_revision"), is_trainable=False
+        )
     model.to(device)
     model.eval()
-    return Lab(model, tokenizer, session_path, model_id=model_id)
+    lab = Lab(
+        model, tokenizer, session_path, model_id=model_id, pass_limit=config.get("pass_limit")
+    )
+    lab.model_commit = getattr(model_config, "_commit_hash", None) or config.get("revision")
+    return lab
 
 
 def _resolve_device(torch: Any, requested: str) -> Any:

@@ -1,4 +1,4 @@
-"""Submit with weights-lab send --session DIR --file examples/inspect.py --follow."""
+"""Submit with weights-lab send --session DIR --file examples/inspect_model.py --follow."""
 
 import json
 

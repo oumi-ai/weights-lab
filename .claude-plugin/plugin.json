@@ -1,0 +1,6 @@
+{
+  "name": "weights-lab",
+  "version": "0.1.0",
+  "description": "Persistent model experiments with reversible edits and controlled local evaluations.",
+  "license": "Apache-2.0"
+}

@@ -3,10 +3,13 @@
 from typing import TYPE_CHECKING, Any
 
 __version__ = "0.1.0"
-__all__ = ["Lab", "Worker", "__version__"]
+__all__ = ["BudgetExceeded", "EditBook", "Lab", "PassBudget", "Scorer", "Worker", "__version__"]
 
 if TYPE_CHECKING:
+    from .budget import BudgetExceeded, PassBudget
+    from .editing import EditBook
     from .lab import Lab
+    from .scoring import Scorer
     from .worker import Worker
 
 
@@ -20,4 +23,16 @@ def __getattr__(name: str) -> Any:
         from .worker import Worker
 
         return Worker
+    if name in {"PassBudget", "BudgetExceeded"}:
+        from . import budget
+
+        return getattr(budget, name)
+    if name == "EditBook":
+        from .editing import EditBook
+
+        return EditBook
+    if name == "Scorer":
+        from .scoring import Scorer
+
+        return Scorer
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
