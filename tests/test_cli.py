@@ -1,0 +1,120 @@
+import json
+import os
+import subprocess
+import sys
+import tarfile
+
+import pytest
+
+from weights_lab.cli import main
+from weights_lab.session import create_session, read_json, submit, write_json
+
+
+@pytest.fixture
+def session_path(tmp_path):
+    path = tmp_path / "session"
+    create_session(path, {"model": "local-model"})
+    return path
+
+
+def test_send_file_and_peek_result(session_path, tmp_path, capsys):
+    source = tmp_path / "snippet.py"
+    source.write_text("print('hello')\n")
+    assert main(["send", "--session", str(session_path), "--file", str(source)]) == 0
+    queued = json.loads(capsys.readouterr().out)
+    snippet_id = queued["id"]
+    assert queued["state"] == "queued"
+    assert (session_path / "inbox" / f"{snippet_id}.py").read_text() == source.read_text()
+
+    result = {"id": snippet_id, "state": "succeeded", "duration": 0.1}
+    write_json(session_path / "results" / f"{snippet_id}.json", result)
+    (session_path / "outputs" / f"{snippet_id}.log").write_text("hello\n")
+    assert main(["peek", "--session", str(session_path), "--id", snippet_id]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == result
+    assert captured.err == "hello\n"
+
+
+def test_send_rejects_empty_code(session_path, capsys):
+    assert main(["send", "--session", str(session_path), "--code", "  \n"]) != 0
+    assert "empty" in capsys.readouterr().err
+    assert not list((session_path / "inbox").iterdir())
+
+
+def test_backup_retains_source_results_and_artifacts(session_path, tmp_path, capsys):
+    write_json(session_path / "status.json", {"state": "stopped"})
+    (session_path / "completed" / "example.py").write_text("print(1)")
+    write_json(session_path / "results" / "example.json", {"state": "succeeded"})
+    (session_path / "artifacts" / "weights.bin").write_bytes(b"weights")
+    destination = tmp_path / "session.tar.gz"
+    assert main(["backup", "--session", str(session_path), "--output", str(destination)]) == 0
+    capsys.readouterr()
+    with tarfile.open(destination) as archive:
+        assert archive.extractfile("session/completed/example.py").read() == b"print(1)"
+        assert archive.extractfile("session/artifacts/weights.bin").read() == b"weights"
+        assert "session/results/example.json" in archive.getnames()
+
+
+def test_backup_refuses_output_inside_session(session_path, capsys):
+    write_json(session_path / "status.json", {"state": "stopped"})
+    destination = session_path / "backup.tar.gz"
+    assert main(["backup", "--session", str(session_path), "--output", str(destination)]) != 0
+    assert "outside" in capsys.readouterr().err
+    assert not destination.exists()
+
+
+def test_start_records_launch_failure(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "failed-session"
+
+    def fail_to_launch(*args, **kwargs):
+        raise OSError("process launch failed")
+
+    monkeypatch.setattr("weights_lab.cli.subprocess.Popen", fail_to_launch)
+    assert main(["start", "--session", str(path), "--model", "local-model"]) != 0
+    assert "process launch failed" in capsys.readouterr().err
+    status = read_json(path / "status.json")
+    assert status["state"] == "failed"
+    assert "process launch failed" in status["error"]
+    assert not (path / "worker.pid").exists()
+
+
+def test_stop_finalizes_claimed_and_pending_snippets_after_worker_dies(session_path, capsys):
+    running_id = submit(session_path, "print('interrupted')")
+    pending_id = submit(session_path, "print('pending')")
+    source = session_path / "inbox" / f"{running_id}.py"
+    source.rename(session_path / "running" / source.name)
+    with subprocess.Popen([sys.executable, "-c", "pass"]) as process:
+        process.wait(timeout=5)
+        dead_pid = process.pid
+    write_json(
+        session_path / "status.json",
+        {"state": "running", "pid": dead_pid, "current_snippet": running_id},
+    )
+
+    assert main(["stop", "--session", str(session_path), "--timeout", "0.1"]) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "stopped"
+    assert "current_snippet" not in read_json(session_path / "status.json")
+    for snippet_id in (running_id, pending_id):
+        assert read_json(session_path / "results" / f"{snippet_id}.json")["state"] == "cancelled"
+        assert (session_path / "completed" / f"{snippet_id}.py").exists()
+    assert not list((session_path / "running").glob("*.py"))
+    assert not list((session_path / "inbox").glob("*.py"))
+
+
+def test_backup_refuses_live_process_even_with_stopped_status(session_path, tmp_path, capsys):
+    write_json(session_path / "status.json", {"state": "stopped", "pid": os.getpid()})
+    destination = tmp_path / "backup.tar.gz"
+    assert main(["backup", "--session", str(session_path), "--output", str(destination)]) != 0
+    assert "stop the worker" in capsys.readouterr().err
+    assert not destination.exists()
+
+
+def test_backup_refuses_symlink_to_external_file(session_path, tmp_path, capsys):
+    write_json(session_path / "status.json", {"state": "stopped"})
+    external = tmp_path / "external.txt"
+    external.write_text("outside the session")
+    (session_path / "artifacts" / "linked.txt").symlink_to(external)
+    destination = tmp_path / "backup.tar.gz"
+    assert main(["backup", "--session", str(session_path), "--output", str(destination)]) != 0
+    assert "symbolic links" in capsys.readouterr().err
+    assert not destination.exists()
