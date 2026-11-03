@@ -469,13 +469,43 @@ class SkyPilotLauncher:
             raise ValueError("cluster must contain lowercase letters, digits, and hyphens")
         self.cluster, self.python, self.runner = cluster, python, runner
 
+    @staticmethod
+    def _path(path):
+        """Resolve relative remote paths against Sky's workdir without using local HOME."""
+        path = str(path)
+        if PurePosixPath(path).is_absolute() or path.startswith("~"):
+            return path
+        return str(PurePosixPath("~/sky_workdir") / path)
+
     def start(
-        self, model, session, *, source=None, accelerators="A100:1", idle_minutes=15, **config
+        self,
+        model,
+        session,
+        *,
+        source=None,
+        accelerators="A100:1",
+        idle_minutes=15,
+        bootstrap_timeout=900,
+        bootstrap_poll_interval=0.5,
+        **config,
     ):
         if not isinstance(idle_minutes, int) or idle_minutes < 1:
             raise ValueError("idle_minutes must be a positive integer")
+        for name, value in (
+            ("bootstrap_timeout", bootstrap_timeout),
+            ("bootstrap_poll_interval", bootstrap_poll_interval),
+        ):
+            try:
+                valid = (
+                    not isinstance(value, bool) and math.isfinite(float(value)) and float(value) > 0
+                )
+            except (TypeError, ValueError):
+                valid = False
+            if not valid:
+                raise ValueError(f"{name} must be finite and positive")
         source = _source_checkout(source)
         configuration = _configuration(model, config)
+        session = self._path(session)
         script = _worker_script(session, configuration)
         with tempfile.TemporaryDirectory(prefix="weights-lab-sky-") as temporary:
             root = Path(temporary)
@@ -506,6 +536,7 @@ class SkyPilotLauncher:
                 text=True,
                 capture_output=True,
             )
+        self._wait_session(session, float(bootstrap_timeout), float(bootstrap_poll_interval))
         return {
             "launcher": "sky",
             "cluster": self.cluster,
@@ -513,8 +544,75 @@ class SkyPilotLauncher:
             "state": "starting",
         }
 
+    def _wait_session(self, session, timeout, poll_interval):
+        """Detached Sky setup may still be installing Python after job submission."""
+        script = (
+            "import json,sys\nfrom pathlib import Path\n"
+            "p=Path(sys.argv[1]).expanduser().resolve()\n"
+            "try:\n"
+            "    json.loads((p/'config.json').read_text())\n"
+            "    status=json.loads((p/'status.json').read_text())\n"
+            "except (FileNotFoundError,json.JSONDecodeError):\n"
+            "    print('session files not created yet',file=sys.stderr)\n"
+            "    raise SystemExit(75)\n"
+            "if status.get('state') in {'failed','stopped','cancelled'}:\n"
+            "    print(json.dumps(status),file=sys.stderr)\n"
+            "    raise SystemExit(2)\n"
+        )
+        command = [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "--",
+            self.cluster,
+            shlex.join([self.python, "-c", script, self._path(session)]),
+        ]
+        deadline = time.monotonic() + timeout
+        diagnostic = "no readiness response"
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"SkyPilot bootstrap timed out after {timeout:g}s: {diagnostic}")
+            try:
+                result = self.runner(
+                    command, check=False, text=True, capture_output=True, timeout=min(15, remaining)
+                )
+                diagnostic = (
+                    result.stderr or result.stdout or f"probe exited {result.returncode}"
+                ).strip()[-2000:]
+                if result.returncode == 0:
+                    return
+                if result.returncode == 2:
+                    raise RuntimeError(f"SkyPilot worker failed during bootstrap: {diagnostic}")
+                if result.returncode == 255 and any(
+                    message in diagnostic.lower()
+                    for message in (
+                        "permission denied",
+                        "host key verification failed",
+                        "remote host identification has changed",
+                    )
+                ):
+                    raise RuntimeError(
+                        f"SkyPilot bootstrap SSH authentication failed: {diagnostic}"
+                    )
+            except subprocess.TimeoutExpired:
+                diagnostic = "SSH readiness probe timed out"
+            time.sleep(min(poll_interval, max(0, deadline - time.monotonic())))
+
     def run(self, args, *, input=None):
         # Bypass the GPU job queue occupied by the resident worker.
+        args = list(map(str, args))
+        path_options = {"--session", "--output", "--file"}
+        for index, argument in enumerate(args):
+            option, separator, value = argument.partition("=")
+            if option not in path_options:
+                continue
+            if separator:
+                args[index] = f"{option}={self._path(value)}"
+            elif index + 1 < len(args) and not args[index + 1].startswith("-"):
+                args[index + 1] = self._path(args[index + 1])
         return SSHLauncher(self.cluster, self.python, runner=self.runner).run(args, input=input)
 
     def stop(self, session, timeout=10):
@@ -522,7 +620,7 @@ class SkyPilotLauncher:
 
     def download(self, remote_path, destination):
         return SSHLauncher(self.cluster, self.python, runner=self.runner).download(
-            remote_path, destination
+            self._path(remote_path), destination
         )
 
     def teardown(self):

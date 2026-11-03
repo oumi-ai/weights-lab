@@ -2,6 +2,7 @@ import base64
 import hashlib
 import io
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -254,6 +255,154 @@ def test_sky_syncs_sanitized_package_and_keeps_foreground_worker(tmp_path):
     assert "--down" in runner.calls[0][0] and "-d" in runner.calls[0][0]
     launcher.teardown()
     assert runner.calls[-1][0] == ["sky", "down", "-y", "weights-test"]
+
+
+def test_sky_start_waits_for_python_and_session_files_with_quoted_home_path(tmp_path):
+    from weights_lab.session import create_session
+
+    source = package_source(tmp_path)
+    path = tmp_path / "session ' $(false); spaces"
+    remote_path = "~/" + os.path.relpath(path, Path.home())
+    probes = []
+
+    def bootstrap(args, **kwargs):
+        if args[:2] == ["sky", "launch"]:
+            return subprocess.CompletedProcess(args, 0, "Setup detached; Job submitted", "")
+        assert args[0] == "ssh" and args[-2] == "weights-test"
+        assert kwargs["check"] is False and 0 < kwargs["timeout"] <= 15
+        probes.append(args)
+        if len(probes) == 1:
+            return subprocess.CompletedProcess(args, 127, "", "Python does not exist yet")
+        if len(probes) == 3:
+            create_session(path, {"model": "model"})
+        return subprocess.run(["sh", "-c", args[-1]], **kwargs)
+
+    result = SkyPilotLauncher("weights-test", python=sys.executable, runner=bootstrap).start(
+        "model", remote_path, source=source, bootstrap_timeout=2, bootstrap_poll_interval=0.001
+    )
+    assert len(probes) == 3
+    assert result["session"] == remote_path
+    assert read_json(path / "status.json")["state"] == "starting"
+
+
+def test_sky_relative_start_metadata_and_probe_use_remote_workdir(tmp_path):
+    runner = Recorder()
+    relative = Path("sessions") / "session ' $(false); spaces"
+    expected = "~/sky_workdir/" + relative.as_posix()
+    launcher = SkyPilotLauncher("weights-test", runner=runner)
+    result = launcher.start("model", relative, source=package_source(tmp_path))
+    assert result["session"] == expected
+    command = shlex.split(runner.task["run"])
+    assert repr(expected) in command[2]
+    probe = runner.calls[-1][0]
+    assert shlex.split(probe[-1])[-1] == expected
+    assert str(Path.home()) not in runner.task["run"]
+
+
+def test_sky_relative_session_readiness_send_peek_and_stop_shell_roundtrip(tmp_path):
+    from weights_lab.session import create_session
+
+    path = create_session(tmp_path / "session ' $(false); spaces", {"model": "unused"})
+    # Exercise remote HOME expansion without changing this machine's HOME or writing there.
+    relative = os.path.relpath(path, Path.home() / "sky_workdir")
+
+    def remote_shell(args, **kwargs):
+        assert args[0] == "ssh" and args[-2] == "weights-test"
+        return subprocess.run(["sh", "-c", args[-1]], cwd=tmp_path, **kwargs)
+
+    launcher = SkyPilotLauncher("weights-test", python=sys.executable, runner=remote_shell)
+    launcher._wait_session(relative, timeout=2, poll_interval=0.001)
+    queued = json.loads(launcher.run(["send", "--session", relative], input="print(1)").stdout)
+    assert (path / "inbox" / f"{queued['id']}.py").read_text() == "print(1)"
+    peeked = json.loads(launcher.run(["peek", f"--session={relative}"]).stdout)
+    assert peeked["state"] == "starting"
+    stopped = json.loads(launcher.stop(relative).stdout)
+    assert stopped["state"] == "stopped"
+    assert read_json(path / "results" / f"{queued['id']}.json")["state"] == "cancelled"
+
+
+def test_sky_relative_backup_and_download_use_same_remote_workdir(tmp_path, monkeypatch):
+    runner = Recorder()
+    launcher = SkyPilotLauncher("weights-test", runner=runner)
+    launcher.run(["backup", "--session", "sessions/test", "--output=backups/test.tar.gz"])
+    args = shlex.split(runner.calls[-1][0][-1])
+    assert args[args.index("--session") + 1] == "~/sky_workdir/sessions/test"
+    assert "--output=~/sky_workdir/backups/test.tar.gz" in args
+    copied = []
+
+    def download(self, source, destination):
+        copied.append((source, destination))
+        return destination
+
+    monkeypatch.setattr(SSHLauncher, "download", download)
+    target = tmp_path / "downloaded.tar.gz"
+    assert launcher.download(Path("backups/test.tar.gz"), target) == target
+    assert copied == [("~/sky_workdir/backups/test.tar.gz", target)]
+
+
+@pytest.mark.parametrize("path", ["/tmp/session", "~/session", "~remoteuser/session"])
+def test_sky_explicit_remote_paths_are_preserved(path):
+    assert SkyPilotLauncher._path(path) == path
+
+
+def test_sky_bootstrap_timeout_preserves_last_diagnostic(monkeypatch):
+    clock = SimpleNamespace(now=0.0)
+    attempts = []
+
+    def probe(args, **kwargs):
+        attempts.append(kwargs["timeout"])
+        return subprocess.CompletedProcess(args, 75, "", "package setup still running")
+
+    monkeypatch.setattr("weights_lab.launchers.time.monotonic", lambda: clock.now)
+    monkeypatch.setattr(
+        "weights_lab.launchers.time.sleep",
+        lambda seconds: setattr(clock, "now", clock.now + seconds),
+    )
+    launcher = SkyPilotLauncher("weights-test", runner=probe)
+    with pytest.raises(TimeoutError, match="package setup still running"):
+        launcher._wait_session("/session", timeout=1, poll_interval=0.3)
+    assert clock.now == 1
+    assert attempts and all(0 < value <= 1 for value in attempts)
+
+
+@pytest.mark.parametrize(
+    "code,diagnostic",
+    [
+        (2, '{"state":"failed","error":"setup failed"}'),
+        (255, "Permission denied (publickey)"),
+        (255, "Host key verification failed"),
+    ],
+)
+def test_sky_bootstrap_reports_worker_or_auth_failure_immediately(code, diagnostic):
+    calls = []
+
+    def probe(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, code, "", diagnostic)
+
+    launcher = SkyPilotLauncher("weights-test", runner=probe)
+    with pytest.raises(RuntimeError, match="bootstrap"):
+        launcher._wait_session("/session", timeout=100, poll_interval=1)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "option,value",
+    [
+        ("bootstrap_timeout", 0),
+        ("bootstrap_timeout", float("inf")),
+        ("bootstrap_poll_interval", float("nan")),
+        ("bootstrap_timeout", None),
+    ],
+)
+def test_sky_bootstrap_options_rejected_before_launch(option, value, tmp_path):
+    def never_launch(*args, **kwargs):
+        raise AssertionError("invalid bootstrap options reached a launcher")
+
+    with pytest.raises(ValueError, match=option):
+        SkyPilotLauncher("weights-test", runner=never_launch).start(
+            "model", "/session", source=tmp_path, **{option: value}
+        )
 
 
 def test_sky_stdin_snippet_survives_remote_shell_roundtrip(tmp_path):
