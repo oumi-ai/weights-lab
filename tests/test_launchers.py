@@ -80,7 +80,8 @@ def test_ssh_transport_uses_stdin_and_runs_commands_remotely():
     args, kwargs = runner.calls[-1]
     assert code not in args[-1] and kwargs["input"] == code
     launcher.run(["stop", "--session", "/remote/session", "--timeout", "10"])
-    assert shlex.split(runner.calls[-1][0][-1]) == [
+    command = shlex.split(runner.calls[-1][0][-1])
+    assert command[command.index("exec") + 1 :] == [
         "python3",
         "-m",
         "weights_lab",
@@ -286,6 +287,45 @@ def test_sky_relative_session_readiness_send_peek_and_stop_shell_roundtrip(tmp_p
     stopped = json.loads(launcher.stop(relative).stdout)
     assert stopped["state"] == "stopped"
     assert read_json(path / "results" / f"{queued['id']}.json")["state"] == "cancelled"
+
+
+def test_sky_slurm_commands_load_cluster_home_after_noninteractive_bashrc(tmp_path):
+    from weights_lab.session import create_session
+
+    login_home = tmp_path / "login home"
+    cluster_home = login_home / ".sky_clusters" / "fixture"
+    relative = "sessions/session ' $(false); spaces"
+    path = create_session(cluster_home / "sky_workdir" / relative, {"model": "unused"})
+    (login_home / ".bashrc").write_text('[ -z "$PS1" ] && return\n. "$HOME/.sky_ssh_rc"\n')
+    (login_home / ".sky_ssh_rc").write_text(
+        'if [ -n "$SKY_CLUSTER_NAME" ]; then\n'
+        '    cd "$HOME/.sky_clusters/$SKY_CLUSTER_NAME"\n'
+        '    export HOME="$PWD"\n'
+        "fi\n"
+    )
+    environment = {**os.environ, "HOME": str(login_home), "SKY_CLUSTER_NAME": "fixture"}
+
+    def remote_shell(args, **kwargs):
+        assert args[0] == "ssh" and args[-2] == "weights-test"
+        return subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c", '. "$HOME/.bashrc"; ' + args[-1]],
+            env=environment,
+            **kwargs,
+        )
+
+    launcher = SkyPilotLauncher("weights-test", python=sys.executable, runner=remote_shell)
+    launcher._wait_session(relative, timeout=2, poll_interval=0.1)
+    queued = json.loads(
+        launcher.run(["send", "--session", relative], input="print('literal $(false)')").stdout
+    )
+    assert (path / "inbox" / f"{queued['id']}.py").read_text() == "print('literal $(false)')"
+    assert json.loads(launcher.run(["peek", "--session", relative]).stdout)["state"] == "starting"
+    assert json.loads(launcher.stop(relative).stdout)["state"] == "stopped"
+    backup = "sessions/backup ' $(false); spaces.tar.gz"
+    launcher.run(["backup", "--session", relative, "--output", backup])
+    destination = launcher.download(backup, tmp_path / "downloaded.tar.gz")
+    assert destination.read_bytes() == (cluster_home / "sky_workdir" / backup).read_bytes()
+    assert not (login_home / "sky_workdir").exists()
 
 
 def test_sky_relative_backup_and_download_use_same_remote_workdir(tmp_path, monkeypatch):

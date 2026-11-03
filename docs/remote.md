@@ -60,6 +60,10 @@ home paths are preserved. Commands use SkyPilot's SSH alias to reach the residen
 worker without queueing behind its running job. Local session paths still resolve
 on the local machine.
 
+On Slurm, transport and readiness commands load SkyPilot's `.sky_ssh_rc` hook so
+they use the same per-cluster home as the worker, including with noninteractive
+shells whose `.bashrc` returns early.
+
 ## Slurm through SkyPilot
 
 Configure the Slurm connection in `~/.slurm/config` using the upstream

@@ -118,7 +118,12 @@ class _SSHTransport:
         self.host, self.python, self.runner = str(host), python, runner
 
     def _command(self, args):
-        return ["ssh", "--", self.host, shlex.join([self.python, *map(str, args)])]
+        # Noninteractive .bashrc can return before SkyPilot's Slurm HOME hook.
+        command = (
+            'if [ -r "$HOME/.sky_ssh_rc" ]; then . "$HOME/.sky_ssh_rc"; fi; exec '
+            + shlex.join([self.python, *map(str, args)])
+        )
+        return ["ssh", "--", self.host, command]
 
     def run(self, args, *, input=None):
         return _checked(
@@ -327,16 +332,10 @@ class SkyPilotLauncher:
 
     def _wait_session(self, session, timeout, poll_interval):
         """Detached Sky setup may still be installing Python after job submission."""
-        command = [
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            "--",
-            self.cluster,
-            shlex.join([self.python, "-c", _SESSION_PROBE, self._path(session)]),
-        ]
+        command = _SSHTransport(self.cluster, self.python)._command(
+            ["-c", _SESSION_PROBE, self._path(session)]
+        )
+        command[1:1] = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
         deadline = time.monotonic() + timeout
         diagnostic = "no readiness response"
         while True:

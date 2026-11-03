@@ -7,10 +7,14 @@ the test suite creates its own small models and does not download weights.
 
 | Environment | Result |
 | --- | --- |
-| macOS, Python 3.12, Torch 2.15.0, Transformers 5.22.1 | 230 tests passed, including actual Apple MPS checks |
+| macOS, Python 3.12, Torch 2.15.0, Transformers 5.22.1 | 231 tests passed, including actual Apple MPS checks |
 | Linux, Python 3.11.15, Torch 2.14.0, Transformers 5.20.2 | 225 passed, five MPS-only cases skipped; uploaded source hashes verified |
 | NVIDIA H200, Torch 2.14.0+cu130, Transformers 5.20.2 | Full worker runtime harness passed on CUDA |
+| Upstream SkyPilot 0.12.3.post1 through a real single-node Slurm scheduler | Relative-path CPU worker, inference, backup, and teardown passed |
 | Source distribution, wheel, installed CLI and API | Build and installation checks passed |
+
+The Linux and H200 runtime reports cover `5995bb0`; the subsequent Slurm transport
+fix is covered by the live check below.
 
 The CUDA harness used a local random GPT-2 and a nonzero LoRA adapter. It checked
 actual input/output device placement, generation accounting, activation recording
@@ -122,10 +126,29 @@ checks. Relative paths are anchored to the remote work directory. Command routin
 Slurm infrastructure selection, transfers, and teardown failure paths have local
 regression coverage.
 
-Slurm through SkyPilot has not been live-validated. Its upstream bootstrap invokes
-`ray stop`, which would disrupt the active SkyPilot workload on the same disposable
-VM. That test needs a separate cluster or isolated host. Earlier single-node tests
-of the removed direct Slurm launcher passed, but do not validate the new route.
+The live SkyPilot-through-Slurm check used a dedicated CPU VM, a real scheduler,
+and `infra="slurm/fixture/validation"`. Worker job ID 4 matched the live scheduler
+allocation. A relative session path became ready, a model forward ran on CPU, and
+send, peek, stop, backup, and checksum-verified download succeeded. All seven backup
+files were retained in the archive, whose remote SHA-256 was verified. Normal
+`sky down` returned success and the scheduler confirmed
+the allocation was gone, without forced cancellation. The complete lifecycle took
+77.55 seconds. Evidence is retained under `sessions/validation-20261103/sky-slurm/`.
+The passing report SHA-256 is
+`30a14680e045819dd3761a802ef1d8cdfa5275cad3df16a5b480ceda9b52bd45`.
+
+This exposed a real path bug: Slurm jobs use a per-cluster home, but raw SSH can
+retain the login home when `.bashrc` returns early for noninteractive shells. Before
+the fix, the worker was ready while our readiness check timed out in the wrong
+directory. Transport and readiness commands now explicitly load SkyPilot's
+`.sky_ssh_rc` hook. The local regression reproduces the early return and checks
+readiness, send, peek, stop, and binary backup transfer with quoted paths.
+
+The earlier concern about Slurm running `ray stop` was incorrect: upstream's Slurm
+backend skips Ray setup. The test used an isolated SkyPilot environment with
+FastAPI 0.135.3 and Starlette 0.47.2 because the older SkyPilot version failed with
+a fresh FastAPI 0.162.0 installation. No SkyPilot fork or vendor patch was used.
+
 The original cloud-controller report retains its first direct-Slurm harness failure;
 the benchmark comparison and final runtime reports are separate results.
 
@@ -135,8 +158,9 @@ adds its executable directory before starting vLLM. Failed cloud attempts were
 torn down. Each cloud validation run has an independent teardown watchdog, a finite
 worker lifetime, and SkyPilot autodown as additional cleanup mechanisms.
 
-All three validation instances were terminated. A final provider-side inventory
+All four validation instances were terminated. A final provider-side inventory
 found no remaining validation instances, disks, or GPU clusters. Estimated compute
-across all attempts was $12.68 at the launch-time $4.50/hour quote, below the $50
-cap. This is an estimate from controller durations, excludes storage, and is not a
-billing statement.
+across all attempts was $12.72, including $0.04 for the Slurm CPU fixture, below the
+$50 cap. The H200 and CPU launch-time quotes were $4.50/hour and $0.0992/hour.
+These estimates use controller durations, exclude storage, and are not a billing
+statement.
