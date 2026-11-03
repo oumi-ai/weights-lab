@@ -34,6 +34,24 @@ _SLURM_TERMINAL = {
     "SPECIAL_EXIT",
 }
 
+_SESSION_PROBE = (
+    "import json,sys\nfrom pathlib import Path\n"
+    "p=Path(sys.argv[1]).expanduser().resolve()\n"
+    "try:\n"
+    "    config=json.loads((p/'config.json').read_text())\n"
+    "    status=json.loads((p/'status.json').read_text())\n"
+    "except (FileNotFoundError,json.JSONDecodeError):\n"
+    "    print('session files not created yet',file=sys.stderr)\n"
+    "    raise SystemExit(75)\n"
+    "if (not isinstance(config,dict) or not config.get('model')\n"
+    "    or not isinstance(status,dict) or not status.get('state')):\n"
+    "    print('invalid session configuration or status',file=sys.stderr)\n"
+    "    raise SystemExit(2)\n"
+    "if status.get('state') in {'failed','stopped','cancelled'}:\n"
+    "    print(json.dumps(status),file=sys.stderr)\n"
+    "    raise SystemExit(2)\n"
+)
+
 
 def _scheduler_states(runner, query):
     try:
@@ -362,7 +380,7 @@ class SlurmLauncher:
         self.python, self.runner = python, runner
 
     def start(self, model, session, *, partition=None, gres="gpu:1", time_limit=None, **config):
-        path = Path(session).resolve()
+        path = Path(session).expanduser().resolve()
         create_session(path, _configuration(model, config))
         args = [
             "sbatch",
@@ -422,7 +440,7 @@ class SlurmLauncher:
         return any(state not in _SLURM_TERMINAL for state in _scheduler_states(self.runner, query))
 
     def stop(self, session, timeout=10):
-        path = Path(session).resolve()
+        path = Path(session).expanduser().resolve()
         if not isinstance(timeout, (int, float)) or not 0 < timeout < float("inf"):
             raise ValueError("timeout must be finite and positive")
         metadata = read_json(path / "launcher.json")
@@ -546,19 +564,6 @@ class SkyPilotLauncher:
 
     def _wait_session(self, session, timeout, poll_interval):
         """Detached Sky setup may still be installing Python after job submission."""
-        script = (
-            "import json,sys\nfrom pathlib import Path\n"
-            "p=Path(sys.argv[1]).expanduser().resolve()\n"
-            "try:\n"
-            "    json.loads((p/'config.json').read_text())\n"
-            "    status=json.loads((p/'status.json').read_text())\n"
-            "except (FileNotFoundError,json.JSONDecodeError):\n"
-            "    print('session files not created yet',file=sys.stderr)\n"
-            "    raise SystemExit(75)\n"
-            "if status.get('state') in {'failed','stopped','cancelled'}:\n"
-            "    print(json.dumps(status),file=sys.stderr)\n"
-            "    raise SystemExit(2)\n"
-        )
         command = [
             "ssh",
             "-o",
@@ -567,7 +572,7 @@ class SkyPilotLauncher:
             "ConnectTimeout=10",
             "--",
             self.cluster,
-            shlex.join([self.python, "-c", script, self._path(session)]),
+            shlex.join([self.python, "-c", _SESSION_PROBE, self._path(session)]),
         ]
         deadline = time.monotonic() + timeout
         diagnostic = "no readiness response"
@@ -647,9 +652,32 @@ class ModalLauncher:
             self._sdk = modal
         return self._sdk
 
-    def start(self, model, session, *, source=None, gpu="A100", lifetime=3600, **config):
+    def start(
+        self,
+        model,
+        session,
+        *,
+        source=None,
+        gpu="A100",
+        lifetime=3600,
+        bootstrap_timeout=900,
+        bootstrap_poll_interval=0.5,
+        **config,
+    ):
         if not isinstance(lifetime, int) or lifetime < 1:
             raise ValueError("lifetime must be a positive number of seconds")
+        for name, value in (
+            ("bootstrap_timeout", bootstrap_timeout),
+            ("bootstrap_poll_interval", bootstrap_poll_interval),
+        ):
+            try:
+                valid = (
+                    not isinstance(value, bool) and math.isfinite(float(value)) and float(value) > 0
+                )
+            except (TypeError, ValueError):
+                valid = False
+            if not valid:
+                raise ValueError(f"{name} must be finite and positive")
         configuration = _configuration(model, config)
         modal = self._modal()
         source = _source_checkout(source)
@@ -674,12 +702,45 @@ class ModalLauncher:
                 runtime="gvisor",
             )
             self.sandbox_id = sandbox.object_id
+        self._wait_session(session, float(bootstrap_timeout), float(bootstrap_poll_interval))
         return {
             "launcher": "modal",
             "sandbox_id": self.sandbox_id,
             "session": str(session),
             "state": "starting",
         }
+
+    def _wait_session(self, session, timeout, poll_interval):
+        sandbox = self._sandbox()
+        deadline = time.monotonic() + timeout
+        diagnostic = "no readiness response"
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Modal sandbox {self.sandbox_id} bootstrap timed out after {timeout:g}s: "
+                    f"{diagnostic}"
+                )
+            if sandbox.poll() is not None:
+                raise RuntimeError(f"Modal sandbox {self.sandbox_id} exited during bootstrap")
+            process = sandbox.exec(
+                self.python,
+                "-c",
+                _SESSION_PROBE,
+                str(session),
+                timeout=max(1, math.ceil(min(15, remaining))),
+            )
+            code = process.wait()
+            diagnostic = (
+                process.stderr.read() or process.stdout.read() or f"probe exited {code}"
+            ).strip()[-2000:]
+            if code == 0:
+                return
+            if code != 75:
+                raise RuntimeError(
+                    f"Modal sandbox {self.sandbox_id} failed during bootstrap: {diagnostic}"
+                )
+            time.sleep(min(poll_interval, max(0, deadline - time.monotonic())))
 
     def _sandbox(self):
         if not self.sandbox_id:

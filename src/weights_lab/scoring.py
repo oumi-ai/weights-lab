@@ -199,11 +199,20 @@ class ScoringMixin:
         if config.get("num_return_sequences", 1) != 1:
             raise ValueError("sampled scoring requires num_return_sequences=1")
         devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
-        with torch.random.fork_rng(devices=devices), self._evaluation_mode():
-            torch.manual_seed(seed)
-            generated = self.model.generate(
-                input_ids=ids, attention_mask=torch.ones_like(ids), **config
-            )
+        # manual_seed also changes MPS state when the model runs on CPU.
+        mps_state = torch.mps.get_rng_state() if torch.backends.mps.is_available() else None
+        try:
+            with (
+                torch.random.fork_rng(devices=devices, device_type="cuda"),
+                self._evaluation_mode(),
+            ):
+                torch.manual_seed(seed)
+                generated = self.model.generate(
+                    input_ids=ids, attention_mask=torch.ones_like(ids), **config
+                )
+        finally:
+            if mps_state is not None:
+                torch.mps.set_rng_state(mps_state)
         sequences = generated.sequences if hasattr(generated, "sequences") else generated
         return self.tokenizer.decode(sequences[0, ids.shape[1] :], skip_special_tokens=True)
 

@@ -472,7 +472,10 @@ def test_modal_sandbox_lifecycle_uses_stdin_and_explicit_teardown(tmp_path):
             assert identifier == "sb-test"
             return cls()
 
-        def exec(self, *args):
+        def poll(self):
+            return None
+
+        def exec(self, *args, **kwargs):
             state["exec"] = args
             return SimpleNamespace(
                 stdin=Stdin(),
@@ -576,3 +579,173 @@ def test_slurm_stop_already_finished_job_reconciles_session(tmp_path):
     path = tmp_path / "session"
     launcher.start("model", path)
     assert launcher.stop(path)["state"] == "stopped"
+
+
+def test_slurm_tilde_session_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    launcher = SlurmLauncher(runner=Recorder("42"))
+    info = launcher.start("model", "~/session")
+    assert info["session"] == str(tmp_path / "session")
+    assert not launcher.is_active("~/session")
+    assert launcher.stop("~/session")["state"] == "stopped"
+
+
+@pytest.fixture
+def modal_local_sdk():
+    state = SimpleNamespace(probes=0, commands=[], before_exec=lambda: None, returncode=None)
+
+    class Image:
+        @classmethod
+        def debian_slim(cls, **kwargs):
+            return cls()
+
+        def add_local_dir(self, *args, **kwargs):
+            return self
+
+        def run_commands(self, *args):
+            return self
+
+    class Stdin:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def write(self, data):
+            self.stream.write(data)
+
+        def write_eof(self):
+            self.stream.close()
+
+        def drain(self):
+            pass
+
+    class Sandbox:
+        object_id = "sb-local"
+
+        @classmethod
+        def create(cls, *args, **kwargs):
+            state.script = args[2]
+            return cls()
+
+        @classmethod
+        def from_id(cls, identifier):
+            assert identifier == cls.object_id
+            return cls()
+
+        def poll(self):
+            return state.returncode
+
+        def exec(self, *args, **kwargs):
+            state.commands.append((args, kwargs))
+            if "-c" in args:
+                state.probes += 1
+            state.before_exec()
+            process = subprocess.Popen(
+                args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            return SimpleNamespace(
+                stdin=Stdin(process.stdin),
+                stdout=io.TextIOWrapper(process.stdout),
+                stderr=io.TextIOWrapper(process.stderr),
+                wait=process.wait,
+            )
+
+        def terminate(self, *, wait):
+            state.terminated = wait
+
+    sdk = SimpleNamespace(
+        Image=Image, Sandbox=Sandbox, App=SimpleNamespace(lookup=lambda *args, **kwargs: "app")
+    )
+    return sdk, state
+
+
+def test_modal_waits_for_session_before_immediate_send(tmp_path, modal_local_sdk):
+    from weights_lab.session import create_session
+
+    sdk, state = modal_local_sdk
+    path = tmp_path / "session"
+
+    def delayed_creation():
+        if state.probes == 2 and not path.exists():
+            create_session(path, {"model": "unused"})
+
+    state.before_exec = delayed_creation
+    launcher = ModalLauncher(python=sys.executable, sdk=sdk)
+    info = launcher.start(
+        "unused",
+        path,
+        source=package_source(tmp_path),
+        bootstrap_timeout=5,
+        bootstrap_poll_interval=0.001,
+    )
+    assert state.probes == 2
+    assert all(0 < kwargs["timeout"] <= 5 for _, kwargs in state.commands)
+    assert "bootstrap_timeout" not in state.script
+    result = launcher.run(["send", "--session", info["session"]], input="print('ready')")
+    snippet_id = json.loads(result.stdout)["id"]
+    assert (path / "inbox" / f"{snippet_id}.py").read_text() == "print('ready')"
+
+
+@pytest.mark.parametrize("failure", ["failed", "invalid", "exited"])
+def test_modal_bootstrap_failure_keeps_sandbox_available_for_teardown(
+    tmp_path, modal_local_sdk, failure
+):
+    from weights_lab.session import create_session, write_json
+
+    sdk, state = modal_local_sdk
+    path = create_session(tmp_path / "session", {"model": "unused"})
+    if failure == "exited":
+        state.returncode = 1
+    else:
+        write_json(
+            path / "status.json",
+            {"state": "failed", "error": "load failed"} if failure == "failed" else [],
+        )
+    launcher = ModalLauncher(python=sys.executable, sdk=sdk)
+    with pytest.raises(RuntimeError, match="sb-local.*bootstrap"):
+        launcher.start("unused", path, source=package_source(tmp_path))
+    assert state.probes == (0 if failure == "exited" else 1)
+    assert launcher.sandbox_id == "sb-local"
+    launcher.teardown()
+    assert state.terminated
+
+
+def test_modal_bootstrap_timeout_retains_diagnostic_and_sandbox(
+    tmp_path, modal_local_sdk, monkeypatch
+):
+    sdk, state = modal_local_sdk
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr("weights_lab.launchers.time.monotonic", lambda: clock.now)
+    monkeypatch.setattr(
+        "weights_lab.launchers.time.sleep",
+        lambda seconds: setattr(clock, "now", clock.now + seconds),
+    )
+    launcher = ModalLauncher(python=sys.executable, sdk=sdk)
+    with pytest.raises(TimeoutError, match="sb-local.*session files not created yet"):
+        launcher.start(
+            "unused",
+            tmp_path / "session",
+            source=package_source(tmp_path),
+            bootstrap_timeout=1,
+            bootstrap_poll_interval=0.3,
+        )
+    assert clock.now == 1
+    assert all(kwargs["timeout"] == 1 for _, kwargs in state.commands)
+    launcher.teardown()
+    assert state.terminated
+
+
+@pytest.mark.parametrize(
+    "option,value",
+    [
+        ("bootstrap_timeout", 0),
+        ("bootstrap_timeout", float("inf")),
+        ("bootstrap_poll_interval", float("nan")),
+        ("bootstrap_timeout", None),
+        ("bootstrap_poll_interval", True),
+    ],
+)
+def test_modal_invalid_bootstrap_options_rejected_before_sdk(option, value):
+    launcher = ModalLauncher()
+    with pytest.raises(ValueError, match=option):
+        launcher.start("model", "/session", **{option: value})
+    assert launcher._sdk is None

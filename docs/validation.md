@@ -7,8 +7,8 @@ the test suite creates its own small models and does not download weights.
 
 | Environment | Result |
 | --- | --- |
-| macOS, Python 3.12, Torch 2.15.0, Transformers 5.22.1 | 248 tests passed, including actual Apple MPS checks |
-| Linux, Python 3.11.15, Torch 2.14.0, Transformers 5.20.2 | 246 passed, one MPS-only test skipped; uploaded source hashes verified |
+| macOS, Python 3.12, Torch 2.15.0, Transformers 5.22.1 | 263 tests passed, including actual Apple MPS checks |
+| Linux, Python 3.11.15, Torch 2.14.0, Transformers 5.20.2 | 258 passed, five MPS-only cases skipped; uploaded source hashes verified |
 | NVIDIA H200, Torch 2.15.0+cu132, Transformers 5.22.1 | Full worker runtime harness passed on CUDA |
 | Source distribution, wheel, installed CLI and API | Build and installation checks passed |
 
@@ -24,6 +24,14 @@ The downloaded CUDA report includes SHA-256 fingerprints of every installed
 `weights_lab` Python source file. All matched the local sources used for validation.
 The Linux compatibility run used GPUs hidden and one CPU thread; it did not change
 the benchmark environment's packages or consume GPU compute.
+
+The parallel branch review found and fixed three additional bugs: Slurm session
+paths now expand `~` consistently, Modal waits for valid session files before
+returning, and sampled scoring restores Apple MPS random state even when the model
+runs on CPU or generation fails. All four new CPU/MPS success/failure regression
+cases failed before the RNG fix and passed afterward. Launcher regressions execute
+the readiness probe and immediate send against local subprocesses; live Modal
+execution remains blocked as described below.
 
 Run the reusable harness in an installed package environment with the adapters extra:
 

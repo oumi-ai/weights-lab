@@ -161,7 +161,13 @@ modal.teardown()
 
 Save `sandbox_id` from the start result to reconnect with
 `ModalLauncher(sandbox_id=...)`. The image contains only the sanitized package and
-its dependencies. Snippet source is written to the exec process stdin. The sandbox
+its dependencies. `start()` waits for valid session files before returning, so an
+immediate `send` can queue work while the model loads. `bootstrap_timeout` defaults
+to 900 seconds and `bootstrap_poll_interval` to 0.5 seconds. On bootstrap failure,
+the exception includes the sandbox ID; `modal.sandbox_id` remains available for
+reconnection or `modal.teardown()`.
+
+Snippet source is written to the exec process stdin. The sandbox
 stays alive after its worker stops so files can be retrieved; its total lifetime
 is bounded by `lifetime` seconds. `teardown()` terminates it explicitly and waits.
 Files are ephemeral: retrieve artifacts with `download()` before terminating or

@@ -92,8 +92,9 @@ run = lab.evaluate(
 )
 ```
 
-Sampled evaluation defaults to greedy decoding. Explicit seeds are restored around
-generation; stochastic comparisons need matching decoding settings as well as a
+Sampled evaluation defaults to greedy decoding. Generation uses the supplied seed
+and restores the caller's CPU, CUDA, and Apple MPS random states, including after
+failure. Stochastic comparisons need matching decoding settings as well as a
 matching seed. A Python checker can grade a sampled answer; the default is stripped
 exact equality. Scoring preserves each module's train/eval mode.
 
