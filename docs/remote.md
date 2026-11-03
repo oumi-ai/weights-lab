@@ -76,7 +76,9 @@ weights-lab start --cluster lab-slurm --source . \
   --infra slurm/mycluster/mypartition --accelerators A100:1 \
   --model Qwen/Qwen3-0.6B --session /tmp/lab --device cuda
 weights-lab send --cluster lab-slurm --session /tmp/lab --code 'print(model.config)' --wait
-weights-lab stop --cluster lab-slurm --session /tmp/lab --teardown
+weights-lab stop --cluster lab-slurm --session /tmp/lab
+weights-lab backup --cluster lab-slurm --session /tmp/lab --output ./slurm-lab.tar.gz
+sky down lab-slurm
 ```
 
 SkyPilot handles scheduler submission, environment setup, and cluster lifecycle.

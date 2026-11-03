@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "validated_on": "2026-11-03",
+  "validated_code_revision": "eb5a1e5",
+  "runtime_checks": {
+    "local": {
+      "state": "passed",
+      "tests_passed": 231
+    },
+    "linux_cpu": {
+      "state": "passed",
+      "tests_passed": 225,
+      "tests_skipped": 5,
+      "code_snapshot": "5995bb0",
+      "python": "3.11.15",
+      "torch": "2.14.0+cu130",
+      "transformers": "5.20.2",
+      "source_files_verified": 46,
+      "source_manifest_sha256": "618b403abcc4ccc550fe5dd080a70e8a61b773021c50bdd678995c772ab3face"
+    },
+    "cuda": {
+      "state": "passed",
+      "code_snapshot": "5995bb0",
+      "device": "NVIDIA H200",
+      "torch": "2.14.0+cu130",
+      "transformers": "5.20.2",
+      "forward_passes_accounted": 15,
+      "source_fingerprints_match": true,
+      "export_reload_max_logit_difference": 7.450580596923828e-09,
+      "backup_files_verified": 33,
+      "worker_stopped": true
+    },
+    "skypilot_slurm_cpu": {
+      "state": "passed",
+      "skypilot_version": "0.12.3.post1",
+      "slurm_version": "23.11.4",
+      "relative_session_path_ready": true,
+      "cpu_inference_passes": 1,
+      "lifecycle_seconds": 77.55,
+      "backup_files_verified": 7,
+      "backup_archive_sha256": "5ab61339a94bd13e9066f3e2c64704440cb5cd4eb828d3e1b9cdf5c882d74adf",
+      "backup_content_hashes_verified": true,
+      "normal_teardown_succeeded": true,
+      "scheduler_job_gone_after_teardown": true,
+      "forced_cancellation": false,
+      "report_sha256": "30a14680e045819dd3761a802ef1d8cdfa5275cad3df16a5b480ceda9b52bd45"
+    }
+  },
+  "math500_benchmark": {
+    "state": "passed",
+    "full_protocol": true,
+    "full_validated": true,
+    "qualitative_effect_reproduced": true,
+    "directional_criteria_passed": true,
+    "claim_scope": "This validates the directional effect under the recorded protocol; it does not test autonomous discovery or claim an exact published percentage.",
+    "problem_count": 500,
+    "samples_per_problem_per_arm": 4,
+    "sample_count_per_arm": 2000,
+    "hardware": "NVIDIA H200",
+    "dtype": "bfloat16",
+    "protocol": {
+      "thinking_enabled": true,
+      "temperature": 0.6,
+      "top_p": 0.95,
+      "top_k": 20,
+      "presence_penalty": 1.5,
+      "max_tokens": 32768,
+      "seed": 0,
+      "versions": {
+        "torch": "2.14.0+cu130",
+        "vllm": "0.33.0",
+        "transformers": "5.20.2",
+        "math-verify": "0.9.0",
+        "latex2sympy2_extended": "1.11.0",
+        "antlr4-python3-runtime": "4.13.2"
+      }
+    },
+    "max_model_len": 34816,
+    "gpu_memory_utilization": 0.85,
+    "dataset": {
+      "id": "HuggingFaceH4/MATH-500",
+      "split": "test",
+      "revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be",
+      "revision_was_unpinned_upstream": true,
+      "frozen_dataset_sha256": "0baf4950c69ab971f1b45437b965927e5a2a8fda0d2c884c408c9b9c087fca84",
+      "frozen_prompts_sha256": "a38ba9ec49931e8160c05165e769670572e83934872edb575b5cf63e8053d633"
+    },
+    "models": {
+      "base": {
+        "id": "Qwen/Qwen3.5-0.8B",
+        "revision": "2fc06364715b967f1860aea9cf38778875588b17"
+      },
+      "edited": {
+        "id": "RikiyaT/Qwen3.5-0.8B-weight-space-programming",
+        "revision": "d1671a178705bcab7644806d23c535517f35723b"
+      }
+    },
+    "grader": {
+      "source_url": "https://raw.githubusercontent.com/RikiyaT/lm_understand-logs/4d09ba6d6a7e891dd8063974dfe81b3d78e3494f/exp8_math/code/mathqa.py",
+      "source_revision": "4d09ba6d6a7e891dd8063974dfe81b3d78e3494f",
+      "sha256": "f0d576a1adc625dede7bff749b3bf8c9a5a8f6bae43d51e2d0ee36d694e89843",
+      "omitted_unused_loop_diagnostic_shim": true
+    },
+    "arms": {
+      "base": {
+        "correct": 157,
+        "accuracy": 0.0785,
+        "token_cap_samples": 1858,
+        "token_cap_share": 0.929,
+        "generated_tokens_total": 61690541,
+        "mean_generated_tokens": 30845.2705
+      },
+      "edited": {
+        "correct": 1025,
+        "accuracy": 0.5125,
+        "token_cap_samples": 611,
+        "token_cap_share": 0.3055,
+        "generated_tokens_total": 43399591,
+        "mean_generated_tokens": 21699.7955
+      }
+    },
+    "raw_data_audit": {
+      "state": "passed",
+      "all_samples_and_aggregates_verified": true,
+      "comparison_summary_sha256": "34ff6a8d5e182b382f5858e05945d3efd8e36928d70f26fe6934e6d0ce837c50",
+      "base_samples_sha256": "aa245aded2ef47c7429f92d30b3b01697fd9dae0a7ff2a7ecaa837722193b6e3",
+      "edited_samples_sha256": "b8ba0533054f4b70e552d83318d74f2712edb0c86a5bec6b6b9d97137f11522d"
+    }
+  },
+  "cleanup": {
+    "validation_owned_instances": 0,
+    "validation_owned_disks": 0,
+    "validation_owned_gpu_clusters": 0,
+    "validation_owned_snapshots": 0,
+    "unrelated_resources_untouched": true
+  },
+  "evidence": {
+    "summary": "../sessions/validation-20261103/summary.json",
+    "benchmark_manifest": "../sessions/validation-20261103/sky/benchmark/manifest.json",
+    "benchmark_summary": "../sessions/validation-20261103/sky/benchmark/summary.json",
+    "benchmark_raw_audit": "../sessions/validation-20261103/sky/raw-audit.json",
+    "linux_cpu_report": "../sessions/validation-20261103/final-source/cpu-evidence/report.json",
+    "cuda_runtime_report": "../sessions/validation-20261103/final-source/runtime-evidence/report.json",
+    "slurm_report": "../sessions/validation-20261103/sky-slurm/wl-inner-evidence-v6/report.json",
+    "slurm_audit": "../sessions/validation-20261103/sky-slurm/audit.json",
+    "slurm_controller_version_log": "../sessions/validation-20261103/sky-slurm/wl-ctld.log",
+    "skypilot_version_record": "../sessions/validation-20261103/sky-slurm/wl-versions.txt"
+  }
+}

@@ -151,8 +151,31 @@ def run(output_dir: Path) -> dict:
     return evidence
 
 
+def summary(evidence: dict) -> str:
+    """Format the measured workflow for a terminal; retain JSON as the default."""
+    lines = [f"Model: {evidence['model']} ({evidence['device']}, float32)"]
+    for label, key in (("Baseline", "baseline"), ("After edit", "edited")):
+        result = evidence[key]
+        lines.append(f"{label}: {result['correct']}/{result['total']} dev answers correct")
+    lines += [
+        f"Edit: zero {evidence['parameter']}",
+        f"Score maps changed: {len(evidence['score_changes'])}/{len(evidence['baseline_items'])}",
+        f"Predictions changed: {len(evidence['prediction_changes'])}",
+        f"Undo: weights exact={evidence['undo_weights_exact']}, "
+        f"scores exact={evidence['undo_scores_exact']}",
+        f"Export: all reloaded weights exact={evidence['exported_weights_exact']}",
+        f"Forward passes: {evidence['forward_passes']}/32",
+        f"Worker: {evidence['session_state']}",
+        f"Checkpoint: {evidence['export']}",
+        f"Backup: {evidence['backup']}",
+    ]
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--summary", action="store_true", help="print a concise measured report")
     args = parser.parse_args()
-    print(json.dumps(run(args.output_dir.resolve()), indent=2))
+    evidence = run(args.output_dir.resolve())
+    print(summary(evidence) if args.summary else json.dumps(evidence, indent=2))

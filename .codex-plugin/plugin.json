@@ -1,0 +1,15 @@
+{
+  "name": "weights-lab",
+  "version": "0.1.0",
+  "description": "Persistent model experiments with reversible edits and controlled local evaluations.",
+  "repository": "https://github.com/oumi-ai/weights-lab",
+  "license": "Apache-2.0",
+  "skills": "./skills/",
+  "requires_local_executor": true,
+  "interface": {
+    "displayName": "Weights Lab",
+    "shortDescription": "Inspect and edit model weights",
+    "longDescription": "Persistent model experiments with reversible edits and controlled local evaluations.",
+    "category": "Productivity"
+  }
+}

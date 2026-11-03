@@ -5,6 +5,8 @@ description: Investigate an open-weights language model with a persistent Python
 
 Keep one model loaded while investigating one concrete question. Use the `weights-lab` CLI and the `lab` object in its shared Python namespace. Snippets are trusted Python with normal filesystem and network access.
 
+This skill supplies instructions, not the Python package. Use an agent execution environment where `weights-lab` is installed separately; installing the skill or plugin does not install the CLI. A plugin cache or copied skill folder is not a source checkout.
+
 1. Write the question, expected observation, model/adapter IDs, device/dtype, dev examples, reserved held-out examples, and pass budget in experiment notes. Separate held-out data before searching. Start a fresh session directory; an old process's Python namespace cannot be resumed from disk.
 2. Start once, then submit saved snippet files. `start` returns while loading; `send --follow` waits and streams output. `peek` distinguishes loading, running, and failure. Save notes under the worker-created `artifacts` directory after startup.
 
@@ -41,9 +43,4 @@ Read only the recipe needed:
 - [Hand-built parts](references/hand-built.md): temporary logit modules or prompt transformations.
 - [Worked example](references/worked-example.md): baseline, first-layer ablation, exact undo, and a saved report.
 
-For remote sessions, use upstream SkyPilot: `weights-lab start --cluster NAME
---source . --model MODEL --session /tmp/lab`. Include `--cluster NAME` on every
-later command. For Slurm, configure `~/.slurm/config`, run `sky check`, then add
-`--infra slurm/mycluster/mypartition` to `start`. See [remote setup](../../docs/remote.md).
-Stop and download results before `sky down NAME`, or use `stop --teardown` after
-preserving them. Local sessions need no SkyPilot installation.
+For remote sessions, read [remote workers](references/remote.md) for the SkyPilot workflow, source-checkout prerequisites, and backup before teardown. Local sessions need no SkyPilot installation.

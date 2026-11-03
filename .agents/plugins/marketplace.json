@@ -1,0 +1,20 @@
+{
+  "name": "weights-lab-local",
+  "interface": {
+    "displayName": "Weights Lab Local"
+  },
+  "plugins": [
+    {
+      "name": "weights-lab",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

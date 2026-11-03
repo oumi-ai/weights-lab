@@ -1,150 +1,114 @@
 # Weights Lab
 
-Keep an open language model loaded while a coding agent inspects it through Python.
-Each local session runs snippets in one shared namespace and saves their source,
-output, timing, and forward-pass counts.
+Load a language model once, then let a coding agent inspect and edit it through
+Python snippets in a persistent worker. Compare a baseline, change a weight,
+measure the effect, undo it exactly, and export the checkpoint you want to keep.
+Every snippet's source, output, timing, and forward-pass count is saved.
 
-The package includes exact weight undo and checkpoint export, likelihood and
-sampled evaluation, pass budgets, activation recording and patching, per-row
-gradients, document-split probes, and experimental fixed-weight components.
-An [agent skill and plugin](docs/skill-install.md) guide experiments. Workers run
-locally or through upstream SkyPilot, including its Slurm integration.
+**Version 0.1 is experimental.** Snippets run as trusted Python with filesystem and
+network access. Use a fresh session for each experiment; a saved session records
+what happened but cannot restore the live Python namespace.
 
-## Install
+## Start on CPU
 
-Python 3.11 or later on Linux or macOS is required. A GPU is optional for small models.
+Requires Python 3.11+ on Linux or macOS and [uv](https://docs.astral.sh/uv/).
+The first run downloads a small public model; no GPU or cloud account is needed.
 
 ```sh
+git clone https://github.com/oumi-ai/weights-lab.git
+cd weights-lab
 uv sync --python 3.12
-uv run weights-lab --help
+uv run weights-lab start --session sessions/first --model HuggingFaceTB/SmolLM2-135M --device cpu
+uv run weights-lab send --session sessions/first --code 'print(model.config)' --follow
+uv run weights-lab send --session sessions/first --file examples/inspect_model.py --follow
 ```
 
-For use outside this checkout, run `pip install .` in a virtual environment.
-To load LoRA adapters, install `pip install '.[adapters]'` or use `uv sync --extra adapters`.
+`start` returns while the model loads. Snippets queue during loading and share
+`lab`, `model`, `tokenizer`, `Path`, and `artifacts`. Variables and edits persist.
+`--follow` waits and streams output to stderr; stdout contains a JSON result.
+Use `peek --session sessions/first` for status, or `send --wait` without streaming.
 
-## Run a session
+## Measure an edit
 
-Choose a new session directory. `start` returns immediately; loading continues in
-the background. The model can be a Hugging Face model ID or a local checkpoint.
-
-```sh
-uv run weights-lab start --session /tmp/my-lab --model HuggingFaceTB/SmolLM2-135M --device cpu
-uv run weights-lab peek --session /tmp/my-lab
-uv run weights-lab send --session /tmp/my-lab --file examples/inspect_model.py --follow
-uv run weights-lab send --session /tmp/my-lab --code 'print(lab.forward_passes)' --wait
-uv run weights-lab stop --session /tmp/my-lab
-uv run weights-lab backup --session /tmp/my-lab --output /tmp/my-lab.tar.gz
-```
-
-Snippets submitted during loading wait in the inbox. `--follow` streams snippet
-output to stderr and waits for completion; stdout contains a JSON result. `--wait`
-waits without streaming. Both return a nonzero exit code for failed or cancelled
-snippets. The wait timeout controls the CLI, not the running snippet.
-
-`send` also reads Python from stdin or `--code`. Use `peek --id ID` to read a saved
-result and output, or add `--follow` to watch a pending snippet. `peek --follow`
-without an ID watches worker status and the startup log.
-
-## Inside a snippet
-
-The namespace contains `lab`, `model`, `tokenizer`, `Path`, and `artifacts`.
-Variables and model changes persist between snippets, including changes made
-before a snippet raises an exception. Import any other modules you need.
+Save this as `edit.py`, then submit it with
+`uv run weights-lab send --session sessions/first --file edit.py --follow`:
 
 ```python
-import torch
-
-inputs = tokenizer("The capital of France is", return_tensors="pt").to(lab.device)
-with torch.no_grad():
-    logits = model(**inputs).logits
-print(tokenizer.decode(logits[0, -1].argmax()))
-print(lab.forward_passes)
-```
-
-The worker loads an eager model in eval mode and seeds the random generators.
-Use `torch.no_grad()` for inference; gradients remain available for inspection.
-The pass counter counts calls to the base language model, including each generation
-step. One batched call counts once. A call that raises also counts. Each snippet's
-result records its own pass count; `lab.forward_passes` is the session total.
-
-`start` accepts `--adapter PATH_OR_ID`, `--device auto|cpu|cuda|cuda:N|mps`,
-`--dtype auto|float32|float16|bfloat16`, and `--snippet-timeout SECONDS` (default 300).
-Automatic device selection prefers CUDA, then MPS, then CPU. Custom Hub code is
-disabled. Snippets themselves run as trusted Python with the worker's filesystem
-and network access.
-
-Use `--revision COMMIT` to pin a Hub checkpoint and `--pass-limit N` to cap the
-whole session. See the [Python API](docs/api.md) for editing, evaluation, inspection,
-and attachment signatures, and the [worked experiment](docs/dogfood.md) for an
-actual public-model baseline, edit, undo, export, and backup.
-
-```python
-baseline = lab.evaluate("/path/dev.jsonl", name="baseline")
+rows = [{"prompt": "France's capital is", "options": [" Paris", " Rome"], "answer": 0}]
+baseline = lab.evaluate(rows, name="baseline")
 name = lab.parts("*mlp*weight")[0]["name"]
 lab.zero(name)
-changed = lab.evaluate("/path/dev.jsonl", name="zeroed")
-print(lab.diff(baseline, changed))
+edited = lab.evaluate(rows, name="zeroed")
+print(lab.diff(baseline, edited))
 lab.undo()
-checkpoint = lab.export("restored")  # under artifacts/
+checkpoint = lab.export("restored")  # saved under artifacts/
 ```
 
-Keep fast dev data separate from held-out data. A held-out evaluation requires
-`held_out=True, max_passes=N`, and its dataset can run once per session, including
-failed attempts. The registry prevents reusing held-out data as dev data. Compare
-against an unedited baseline in the same live session.
+This is a workflow check, not evidence of a useful edit. Inspect parameter names
+for your model, compare in the same session, and keep held-out data separate from
+dev data. `--pass-limit N` caps session forwards; `lab.limit_passes(n)` narrows a
+snippet's budget. Use `torch.no_grad()` for inference when gradients are unnecessary.
 
-## Remote workers
+Export weights before stopping, then archive the session:
+
+```sh
+uv run weights-lab stop --session sessions/first
+uv run weights-lab backup --session sessions/first --output sessions/first.tar.gz
+```
+
+The backup includes snippets, results, logs, and artifacts. It saves weights only
+when you export them into `artifacts/` first. Stop interrupts active Python and
+escalates after its grace period; native model operations may delay cancellation.
+
+## Run the complete demo
+
+```sh
+uv run python -m examples.dogfood --output-dir sessions/tiny-demo --summary
+```
+
+The pinned tiny GPT-2 demo runs baseline → edit → exact undo → export → stop →
+backup on CPU. In the measured run, all three continuation-score maps changed,
+zero predictions changed, undo restored exact weights and scores, and the worker
+used 21 forward passes. See the [terminal transcript and detailed results](docs/dogfood.md).
+Choose an unused output directory each time.
+
+## Give an agent a model workspace
+
+The [agent skill and plugin](docs/skill-install.md) guide experiments, including
+[checkpoint comparisons, activation patching, gradients, and probes](skills/weights-lab/references/).
+Install as a Claude Code or Codex plugin, or as a standalone skill for Codex,
+Claude Code, Cursor, Copilot CLI, and OpenCode; see the
+[per-harness install commands](docs/skill-install.md).
+The [Python API](docs/api.md) covers reversible edits, evaluation, pass budgets,
+and experimental fixed-weight components. LoRA loading requires `uv sync --extra adapters`.
+
+For a remote worker, use upstream SkyPilot:
 
 ```sh
 uv run weights-lab start --cluster my-lab --source . --accelerators L4:1 --model Qwen/Qwen3-0.6B --session /tmp/lab
-uv run weights-lab send --cluster my-lab --session /tmp/lab --code 'print(lab.parts()[0])' --wait
+uv run weights-lab send --cluster my-lab --session /tmp/lab --code 'print(lab.forward_passes)' --wait
 uv run weights-lab stop --cluster my-lab --session /tmp/lab
 uv run weights-lab backup --cluster my-lab --session /tmp/lab --output ./lab.tar.gz
-uv run sky down my-lab
+sky down my-lab
 ```
 
-`--cluster` selects SkyPilot automatically; `--launcher sky` is also accepted.
-Use `--infra slurm/mycluster/mypartition` for a configured Slurm cluster.
-Remote commands capture output and return it at completion. Read
-[remote setup and teardown](docs/remote.md) for prerequisites, artifact downloads,
-and resource cleanup. Cloud workers incur charges until torn down.
+`--cluster` selects SkyPilot. It also supports Slurm through
+`--infra slurm/mycluster/mypartition`. Read [remote setup and cleanup](docs/remote.md)
+before provisioning; export and download results before teardown destroys the disk.
 
-## Records and shutdown
+## What has been measured
 
-Session directories contain:
+CPU, Apple MPS, NVIDIA H200 CUDA, SkyPilot cloud execution, and upstream SkyPilot
+through a real single-node Slurm scheduler have passed checks. See
+[validation evidence and limits](docs/validation.md) and the
+[machine-readable results](docs/validation-results.json).
 
-- `config.json`, `status.json`, and `worker.log`: configuration, status, and startup output.
-- `inbox/`, `running/`, and `completed/`: original snippet source throughout its lifecycle.
-- `outputs/ID.log` and `results/ID.json`: combined stdout/stderr and execution results.
-- `artifacts/`: a directory created for files written by snippets.
-
-Snippet errors and Python timeouts leave the worker available for more work.
-Touching the session's `STOP` file interrupts active Python code and stops the
-worker. Native GPU operations can delay Python signal handling; `stop` escalates
-to process termination after its grace period. Pending or interrupted snippets
-are marked cancelled. After an abrupt process death, run `stop` to finalize records.
-Create a new session to load again: Python memory and model changes are not restored.
-
-Backups require a stopped worker and include records and files in `artifacts/`.
-They do not automatically save live model weights or the Python namespace. Export
-a checkpoint into `artifacts/` before stopping if those weights should be backed
-up. Seeds alone do not guarantee the same results across devices or setups.
-
-## Examples and validation
-
-- [Published GPT-2 generation parity and HF likelihood parity](docs/parity.md).
-- [Measured tiny GPT-2 worker experiment](docs/dogfood.md).
-- [Pinned replay of the released Qwen weight edit](docs/qwen-replay.md).
-- `uv run python examples/calendar_circuit.py --verify`: check the fixed calendar
-  circuit against all 36,525 valid dates in 2000–2099.
-- [Seven agent recipes](skills/weights-lab/references/) for common interventions.
-
-CPU, Apple MPS, and NVIDIA H200 CUDA checks have passed, along with real
-SkyPilot execution and public-model experiments.
-See [measured validation evidence and provider limits](docs/validation.md).
-The Qwen example replays a
-released edit and does not claim to rediscover it or reproduce its benchmark.
-Optional Oumi training-step integration remains outside this standalone release.
+Evaluating the base Qwen checkpoint and a **released edited checkpoint** measured
+7.85% versus 51.25% accuracy on the full MATH-500 comparison; samples hitting the
+32,768-token limit fell from 92.90% to 30.55%. This validates the released edit,
+not autonomous discovery. See the [benchmark protocol and limits](docs/validation.md),
+the separate [exact tensor replay](docs/qwen-replay.md), and
+[GPT-2 generation and likelihood parity](docs/parity.md).
 
 ## Development
 
@@ -155,8 +119,5 @@ uv run ruff format --check .
 uv build
 ```
 
-Tests create tiny random Hugging Face models locally and exercise editing,
-scoring, budgets, hooks, probes, gradients, circuits, adapters, worker lifecycle,
-and remote routing. They do not download pretrained weights. CI runs the suite
-on Python 3.11 and 3.12 with CPU PyTorch. The public-model examples download their
-pinned checkpoints separately.
+Tests build tiny random models locally; public-model demos download pinned weights.
+See [contribution instructions](CONTRIBUTING.md) and the [documentation index](docs/README.md).

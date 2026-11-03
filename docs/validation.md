@@ -1,94 +1,40 @@
 # Validation evidence
 
-Validation was performed on November 3, 2026. Public model checkpoints are pinned;
-the test suite creates its own small models and does not download weights.
+Measured on November 3, 2026. The [result summary](validation-results.json) records
+checkpoint and dataset pins, runtime versions, exact counts, and report hashes.
+The Qwen experiment evaluates a released edit; it does not test autonomous discovery.
 
 ## Runtime and package checks
 
 | Environment | Result |
 | --- | --- |
-| macOS, Python 3.12, Torch 2.15.0, Transformers 5.22.1 | 231 tests passed, including actual Apple MPS checks |
-| Linux, Python 3.11.15, Torch 2.14.0, Transformers 5.20.2 | 225 passed, five MPS-only cases skipped; uploaded source hashes verified |
-| NVIDIA H200, Torch 2.14.0+cu130, Transformers 5.20.2 | Full worker runtime harness passed on CUDA |
-| Upstream SkyPilot 0.12.3.post1 through a real single-node Slurm scheduler | Relative-path CPU worker, inference, backup, and teardown passed |
+| macOS, Python 3.12, Torch 2.15.0, Transformers 5.22.1 | 231 tests passed, including Apple MPS checks |
+| Linux, Python 3.11.15, Torch 2.14.0, Transformers 5.20.2 | 225 passed, five MPS-only cases skipped |
+| NVIDIA H200, Torch 2.14.0+cu130, Transformers 5.20.2 | CUDA worker, inspection, editing, scoring, and export checks passed |
+| Upstream SkyPilot 0.12.3.post1 and Slurm 23.11.4 | Relative-path CPU worker, inference, backup, and normal teardown passed |
 | Source distribution, wheel, installed CLI and API | Build and installation checks passed |
 
-The Linux and H200 runtime reports cover `5995bb0`; the subsequent Slurm transport
-fix is covered by the live check below.
+The Linux and H200 reports cover `5995bb0`. The later Slurm transport fix and its
+regression are covered by `eb5a1e5` and the live check below. The unit suite creates
+tiny random models locally; public-model examples download their pinned checkpoints.
+These recorded engine-validation counts precede the added plugin-packaging checks
+in the current suite.
 
-The CUDA harness used a local random GPT-2 and a nonzero LoRA adapter. It checked
-actual input/output device placement, generation accounting, activation recording
-and patch cleanup, per-row gradients, dev and held-out scoring, budget exhaustion,
-bit-exact edit/undo, and merged checkpoint reload. All 15 accepted forward calls
-were accounted for. The largest export/reload logit difference was
-`7.450580596923828e-09`; all 33 backup files matched their source SHA-256 digests.
-The harness stopped its worker and confirmed that it was dead.
+The CUDA harness exercised a random GPT-2 with a nonzero LoRA adapter. All 15
+accepted forwards were accounted for. Edit/undo restored weights and scores exactly;
+the largest export/reload logit difference was `7.450580596923828e-09`. All 33 backup
+files matched their source digests, installed source fingerprints matched the
+validation checkout, and the harness confirmed its worker had stopped.
 
-The downloaded CUDA report includes SHA-256 fingerprints of every installed
-`weights_lab` Python source file. All matched the local sources used for validation.
-The Linux compatibility run used GPUs hidden and one CPU thread; it did not change
-the benchmark environment's packages or consume GPU compute.
+For a short, measured baseline/edit/undo/export walkthrough, use the
+[CPU demo](dogfood.md).
 
-The branch review also found an Apple MPS random-state leak in sampled scoring.
-All four CPU/MPS success/failure regression cases failed before the fix and passed
-afterward. Sampled evaluation now preserves the caller's random state on all three
-backends. A separate regression executes the generated SkyPilot bootstrap with a
-`Path` model argument, ensuring that its configuration is serializable before
-provisioning.
+## Full MATH-500 comparison
 
-Run the reusable harness in an installed package environment with the adapters extra:
+Both pinned checkpoints ran on the same NVIDIA H200 with all 500 problems and four
+samples per problem, for 4,000 generations total.
 
-```sh
-python scripts/validate_runtime.py --device cpu --output-dir /tmp/runtime-cpu
-python scripts/validate_runtime.py --device mps --output-dir /tmp/runtime-mps
-python scripts/validate_runtime.py --device cuda --output-dir /tmp/runtime-cuda
-```
-
-Each output directory must be new. The harness creates model assets, records CLI
-calls and results, exports and reloads the checkpoint, verifies the backup, and
-stops its worker even if an assertion fails.
-
-## Real Qwen checkpoint replay
-
-The actual pinned checkpoints were downloaded and all 488 tensors audited on CPU
-in BF16. Exactly the two published MLP tensors differed. Their released raw-byte
-hashes matched, with 130,188 changed entries across 64 columns in each tensor.
-Both slice edits were applied through `Lab`, the resulting live tensor hashes
-were checked, and undo restored the pinned base hashes exactly. The replay used
-zero forward calls. Its worker was stopped and confirmed dead.
-
-The full replay took 63.86 seconds, including the edited-checkpoint download wait.
-See [the pinned recipe and provenance](qwen-replay.md). The replay's raw report
-SHA-256 was `f639da9ad7a24e3e4e779d13a05bb298894f3d9f3424b7e838eeccb855cd7fe4`.
-
-## Full MATH-500 protocol
-
-`scripts/validate_qwen_benchmark.py` freezes all 500 MATH-500 test problems and
-their thinking-enabled prompts, dataset revision, checkpoint revisions, and grader
-hash before running either arm. It uses the pinned upstream grader, vLLM 0.33.0,
-Transformers 5.20.2, BF16, and four samples per problem per arm. The protocol is
-`think35`: temperature 0.6, top-p 0.95, top-k 20, presence penalty 1.5, a 32,768-token
-cap, and seed 0. See the [upstream evaluator](https://github.com/RikiyaT/lm_understand-logs/blob/4d09ba6d6a7e891dd8063974dfe81b3d78e3494f/exp8_math/code/evaluate.py).
-
-The runner starts separate child processes for the base and edited checkpoints on
-the same GPU, preserving raw samples and sample-level grades. Full validation
-requires both complete 2,000-sample arms, higher edited accuracy, and a lower
-edited token-cap share. These criteria are saved before scoring. Diagnostic runs
-with fewer than 500 problems cannot report full validation.
-
-The upstream dataset revision was not pinned. This validation resolves and freezes
-the current revision and records it, so it does not promise identical scores to
-the published run. The upstream math module imports a missing loop-diagnostic
-helper; an explicit shim raises if that unused diagnostic is called. The prompt,
-answer extraction, and mathematical grading functions are loaded unchanged and
-verified against the pinned source hash.
-
-## Measured MATH-500 result
-
-Both full 500-problem arms completed with four samples per problem on the same
-NVIDIA H200. The predeclared directional criteria passed (`full_validated=true`).
-
-| Metric | Base | Edited |
+| Metric | Base | Released edit |
 | --- | ---: | ---: |
 | Correct samples | 157 / 2,000 | 1,025 / 2,000 |
 | Accuracy | 7.85% | 51.25% |
@@ -96,71 +42,67 @@ NVIDIA H200. The predeclared directional criteria passed (`full_validated=true`)
 | Mean generated tokens | 30,845.27 | 21,699.80 |
 | Arm duration, including initialization and grading | 88.03 min | 55.98 min |
 
-Accuracy increased by 43.4 percentage points and token-cap share decreased by
-62.35 percentage points. These are sample-level metrics, rather than pass@4.
+The predeclared criteria passed: both arms completed, edited accuracy was higher,
+and edited token-cap share was lower. Accuracy increased by 43.4 percentage points;
+token-cap share decreased by 62.35 points. These are sample-level metrics, not pass@4.
 
-The dataset revision was `6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be`. Checkpoints
-were pinned to base `2fc06364715b967f1860aea9cf38778875588b17` and edited
-`d1671a178705bcab7644806d23c535517f35723b`. The grader SHA-256 was
-`f0d576a1adc625dede7bff749b3bf8c9a5a8f6bae43d51e2d0ee36d694e89843`.
+The runner uses the upstream `think35` protocol: thinking-enabled prompts, BF16,
+temperature 0.6, top-p 0.95, top-k 20, presence penalty 1.5, seed 0, and a
+32,768-token generation cap. It starts a fresh vLLM process for each checkpoint.
+Model pins, dataset revision, frozen input hashes, grader hash, and exact dependency
+versions are recorded in the [JSON summary](validation-results.json). See the
+[pinned upstream evaluator](https://github.com/RikiyaT/lm_understand-logs/blob/4d09ba6d6a7e891dd8063974dfe81b3d78e3494f/exp8_math/code/evaluate.py)
+and [benchmark runner](../scripts/validate_qwen_benchmark.py).
 
-An independent audit of the raw files verified exactly four unique samples for
-every problem in each arm, unchanged frozen inputs, valid finish reasons and token
-counts, and agreement with every reported aggregate. The comparison report SHA-256
-is `34ff6a8d5e182b382f5858e05945d3efd8e36928d70f26fe6934e6d0ce837c50`.
-Raw outputs, runtime reports, source fingerprints, and the audit are retained in
-this checkout under `sessions/validation-20261103/`, which is ignored by Git.
+The upstream dataset revision was unpinned. This run froze the resolved revision,
+so identical published percentages are not a validation requirement. The unchanged
+upstream math grader imports an unavailable loop diagnostic; an explicit shim
+raises if that unused diagnostic is called. Prompt construction, answer extraction,
+and mathematical grading use the pinned source unchanged.
 
-## Remote coverage and limits
+An independent raw-file audit checked four unique samples per problem in each arm,
+frozen input hashes, valid finish reasons and token counts, and agreement with all
+reported aggregates. Diagnostic runs with fewer than 500 problems cannot report
+full validation.
 
-Remote sessions now use upstream SkyPilot exclusively. The CLI and Python API
-forward `infra` selectors, including `slurm/CLUSTER/PARTITION`, to `sky launch`.
-Direct SSH, Slurm, and Modal launchers and their validation scripts were removed;
-SSH remains a private transport for SkyPilot's cluster alias. Modal is unsupported.
-SkyPilot's CLI is installed separately from the model worker.
+## Checkpoint replay
 
-Live SkyPilot provisioning and SSH CUDA execution succeeded on a dedicated Nebius
-H200 instance. Validation exposed and fixed a detached-startup race: the launcher
-now waits for the remote environment and session files with bounded readiness
-checks. Relative paths are anchored to the remote work directory. Command routing,
-Slurm infrastructure selection, transfers, and teardown failure paths have local
-regression coverage.
+The [Qwen replay](qwen-replay.md) audited all 488 tensors across both real BF16
+checkpoints. Exactly the two published MLP tensors differed: 130,188 entries across
+64 columns in each. Released raw-byte hashes matched. Applying both edits through
+`lab.swap` produced the expected live tensor hashes; undo restored the base exactly.
+The replay used zero forward calls and stopped its worker.
 
-The live SkyPilot-through-Slurm check used a dedicated CPU VM, a real scheduler,
-and `infra="slurm/fixture/validation"`. Worker job ID 4 matched the live scheduler
-allocation. A relative session path became ready, a model forward ran on CPU, and
-send, peek, stop, backup, and checksum-verified download succeeded. All seven backup
-files were retained in the archive, whose remote SHA-256 was verified. Normal
-`sky down` returned success and the scheduler confirmed
-the allocation was gone, without forced cancellation. The complete lifecycle took
-77.55 seconds. Evidence is retained under `sessions/validation-20261103/sky-slurm/`.
-The passing report SHA-256 is
-`30a14680e045819dd3761a802ef1d8cdfa5275cad3df16a5b480ceda9b52bd45`.
+## Remote lifecycle
 
-This exposed a real path bug: Slurm jobs use a per-cluster home, but raw SSH can
-retain the login home when `.bashrc` returns early for noninteractive shells. Before
-the fix, the worker was ready while our readiness check timed out in the wrong
-directory. Transport and readiness commands now explicitly load SkyPilot's
-`.sky_ssh_rc` hook. The local regression reproduces the early return and checks
-readiness, send, peek, stop, and binary backup transfer with quoted paths.
+Live SkyPilot provisioning and SSH execution passed on the H200. The independent
+Slurm check used a dedicated CPU host and `infra="slurm/fixture/validation"`.
+Its worker reported the same job ID as the live scheduler allocation. A relative
+session path became ready, a model forward ran on CPU, and send, peek, stop,
+backup, and verified download all succeeded.
 
-The earlier concern about Slurm running `ray stop` was incorrect: upstream's Slurm
-backend skips Ray setup. The test used an isolated SkyPilot environment with
-FastAPI 0.135.3 and Starlette 0.47.2 because the older SkyPilot version failed with
-a fresh FastAPI 0.162.0 installation. No SkyPilot fork or vendor patch was used.
+The downloaded archive contained seven files and matched its remote SHA-256.
+Normal `sky down` succeeded; the scheduler confirmed the allocation was gone
+without forced cancellation. The full lifecycle took 77.55 seconds. This validates
+a single-node CPU Slurm lifecycle; GPU execution was tested separately on the H200.
+Modal is unsupported. Remote sessions use upstream SkyPilot without a fork.
 
-The original cloud-controller report retains its first direct-Slurm harness failure;
-the benchmark comparison and final runtime reports are separate results.
+## Repeat checks and inspect evidence
 
-The benchmark's first attempt exposed a virtualenv issue: invoking Python by
-absolute path does not expose compiler executables on PATH. The benchmark child now
-adds its executable directory before starting vLLM. Failed cloud attempts were
-torn down. Each cloud validation run has an independent teardown watchdog, a finite
-worker lifetime, and SkyPilot autodown as additional cleanup mechanisms.
+Run the reusable runtime harness in an environment with the adapters extra:
 
-All four validation instances were terminated. A final provider-side inventory
-found no remaining validation instances, disks, or GPU clusters. Estimated compute
-across all attempts was $12.72, including $0.04 for the Slurm CPU fixture, below the
-$50 cap. The H200 and CPU launch-time quotes were $4.50/hour and $0.0992/hour.
-These estimates use controller durations, exclude storage, and are not a billing
-statement.
+```sh
+python scripts/validate_runtime.py --device cpu --output-dir /tmp/runtime-cpu
+python scripts/validate_runtime.py --device mps --output-dir /tmp/runtime-mps
+python scripts/validate_runtime.py --device cuda --output-dir /tmp/runtime-cuda
+```
+
+Each output directory must be new. The harness records results, exports and reloads
+the checkpoint, verifies its backup, and stops its worker even after an assertion
+failure. The full MATH-500 runner requires CUDA and the pinned benchmark dependencies.
+
+The original validation workspace retains raw samples, reports, source fingerprints,
+and audit files under `sessions/validation-20261103/`. Those files are ignored by Git;
+a fresh checkout includes the compact JSON summary rather than the raw artifacts.
+See [validation notes](validation-notes.md) for regression reproductions, environment
+details, report provenance, and resource cleanup.
