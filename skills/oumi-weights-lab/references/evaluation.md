@@ -64,3 +64,11 @@ reserve their whole source as dev; do not report a screen result as a full-suite
 held-out improvement. Reuse fixed pins and run the full regression suite before
 promoting an edit. Repeated dev selection invalidates a naive interpretation of
 p-values as evidence of unseen-data gains. No calibration fitting is provided.
+
+To evaluate on a Hugging Face benchmark, build rows with
+`lab.hf_rows("org/name", split="test", to_row=..., revision=...)`. Each row
+records its source and pinned commit under `metadata.hf`. Those rows are dev data
+unless you pass them to `evaluate(..., held_out=True, max_passes=...)`, and dev
+and held-out data can never trade roles. So decide a benchmark's role before any
+screen or dev run: screening a test split reserves it as dev for the session and
+blocks its held-out evaluation.

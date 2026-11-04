@@ -62,8 +62,9 @@ uv tool install git+https://github.com/oumi-ai/weights-lab
 Then ask your agent, for example: "Use oumi-weights-lab to check whether zeroing
 layer 3's MLP in Qwen/Qwen3-0.6B changes its answers to the questions in caps.jsonl."
 
-To load LoRA adapters, install the CLI as
-`uv tool install 'oumi-weights-lab[adapters] @ git+https://github.com/oumi-ai/weights-lab'`.
+To load LoRA adapters, or Hugging Face datasets with `lab.hf_rows`, install the CLI
+as `uv tool install 'oumi-weights-lab[adapters,datasets] @ git+https://github.com/oumi-ai/weights-lab'`.
+The Claude Code plugin includes both.
 Append `@<tag>` to a `git+https://` URL to pin a release.
 
 ## Use the CLI directly

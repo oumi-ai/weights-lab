@@ -6,6 +6,7 @@ from typing import Any
 from .attachments import AttachmentMixin
 from .budget import PassBudget
 from .editing import EditingMixin
+from .hf_data import hf_rows
 from .inspection import InspectionMixin
 from .persistence import PersistenceMixin
 from .scoring import ScoringMixin
@@ -66,6 +67,9 @@ class Lab(EditingMixin, ScoringMixin, InspectionMixin, AttachmentMixin, Persiste
     def forward_passes(self) -> int:
         """Sequences run through the base model since loading, including generation steps."""
         return self._forward_passes
+
+    # Evaluation rows from a Hugging Face dataset split; needs the datasets extra.
+    hf_rows = staticmethod(hf_rows)
 
 
 def load_lab(config: dict[str, Any], session_path: Path) -> Lab:

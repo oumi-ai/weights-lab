@@ -113,6 +113,13 @@ report = lab.compare_runs(before, after)
   it also compares truncation share and mean generated length.
 - `evaluate_suite` and `compare_suites` gate a candidate on per-dataset accuracy and
   NLL tolerances. `create_screen` and `verify_screen` pin a stratified dev subset.
+- `hf_rows(path, *, split, to_row, name=None, revision=None, limit=None)` loads a
+  Hugging Face dataset split (with the `datasets` extra) and turns each example
+  into a row with `to_row`. A Hub revision is resolved to its commit, and each
+  row records its source under `metadata.hf` and gets a default `id`. A Hub
+  "test" split is not treated as held-out data; pass `held_out=True` to
+  `evaluate` when you mean it. A full 40-character commit hash as `revision` is
+  used as given, which also works offline (`HF_HUB_OFFLINE=1`) from the cache.
 
 Held-out data needs `held_out=True` and `max_passes`, runs once per session, and
 stays reserved even if the run fails. Dev and held-out data can never trade roles;
