@@ -466,7 +466,11 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--device", default="auto")
     start.add_argument("--dtype", default="auto", choices=session.DTYPES)
     start.add_argument("--snippet-timeout", type=_positive, default=session.DEFAULT_SNIPPET_TIMEOUT)
-    start.add_argument("--pass-limit", type=int, help="maximum total model forward calls")
+    start.add_argument(
+        "--pass-limit",
+        type=int,
+        help="maximum total passes: one per sequence in each base-model forward",
+    )
     start.add_argument(
         "--idle-timeout",
         type=float,

@@ -66,7 +66,9 @@ registry files directly.
 
 ## Pass budget
 
-Every base-model forward counts, including each generation step and calls that fail.
+Every base-model forward counts one pass per sequence in the batch, including each
+generation step and calls that fail. Within `generate`, a prompt's beams count as one
+sequence, while each of several sampled return sequences counts on its own.
 `start --pass-limit N` or `lab.budget.limit` caps the session, and
 `with lab.limit_passes(n):` adds a temporary cap. Calls over a cap raise
 `BudgetExceeded` before running.
@@ -83,6 +85,7 @@ with lab.patch("transformer.h.0", hidden, positions=[-1]), torch.no_grad():
 gradients = lab.gradient("hello world", parameters=[name], max_tokens=64)
 ```
 
+- `lab.device` is the device of the input embeddings; move tokenizer outputs there.
 - `record` captures activations on CPU at the chosen positions, the last token by
   default. `patch` replaces them with a tensor or a callable's result. Both remove
   their hooks on exit.

@@ -121,3 +121,19 @@ def test_loader_preserves_declared_qwen_multimodal_architecture(tiny_lab, tmp_pa
     assert image_text.call_args.kwargs["revision"] == "checkpoint-revision"
     assert loaded.model is tiny_lab.model
     causal.assert_not_called()
+
+
+def test_lab_device_follows_input_embeddings(tiny_lab, monkeypatch):
+    torch = pytest.importorskip("torch")
+    assert tiny_lab.device == tiny_lab.model.get_input_embeddings().weight.device
+    elsewhere = torch.nn.Embedding(6, 8, device="meta")
+    monkeypatch.setattr(tiny_lab.model, "get_input_embeddings", lambda: elsewhere)
+    assert tiny_lab.device.type == "meta"
+
+
+def test_lab_device_falls_back_to_model_device(tiny_lab, monkeypatch):
+    def missing():
+        raise NotImplementedError
+
+    monkeypatch.setattr(tiny_lab.model, "get_input_embeddings", missing)
+    assert tiny_lab.device == tiny_lab.model.device

@@ -66,11 +66,7 @@ class ScoringLab(ScoringMixin):
         self.revision = 0
         self.active_edit_ids = []
         self._forward_passes = 0
-        self.model.register_forward_pre_hook(self._count)
-
-    def _count(self, model, inputs):
-        self._before_forward()
-        self._forward_passes += 1
+        self.model.register_forward_pre_hook(self._count_forward, with_kwargs=True)
 
     @property
     def forward_passes(self):
@@ -84,6 +80,88 @@ def lab(tmp_path):
 
 def tasks(answer="A"):
     return [{"prompt": "p", "options": [" x", " y"], "answer": answer}]
+
+
+def test_batched_call_costs_one_pass_per_sequence(lab):
+    ids = torch.zeros(3, 2, dtype=torch.long)
+    lab.model(input_ids=ids)
+    lab.model(ids)  # positional
+    assert lab.forward_passes == lab.budget.used == 6
+
+
+def test_batch_over_session_cap_is_refused_before_running(lab):
+    lab.budget.limit = 2
+    with pytest.raises(BudgetExceeded):
+        lab.model(input_ids=torch.zeros(3, 2, dtype=torch.long))
+    assert lab.model.calls == [] and lab.budget.used == lab.forward_passes == 0
+
+
+def test_local_cap_smaller_than_batch_refuses_and_charges_nothing(lab):
+    with lab.limit_passes(2) as local:
+        with pytest.raises(BudgetExceeded):
+            lab.model(input_ids=torch.zeros(3, 2, dtype=torch.long))
+        assert local.used == lab.budget.used == 0
+    assert lab.model.calls == []
+
+
+def test_failed_batched_call_charges_the_whole_batch(lab):
+    lab.model.fail = True
+    with pytest.raises(RuntimeError, match="intentional"):
+        lab.model(input_ids=torch.zeros(4, 2, dtype=torch.long))
+    assert lab.forward_passes == lab.budget.used == 4
+
+
+def test_generation_charges_each_step_per_sequence_and_stops_whole_steps(lab):
+    prompts = torch.zeros(2, 2, dtype=torch.long)
+    lab.model.generate(prompts, max_new_tokens=2)
+    assert lab.forward_passes == lab.budget.used == 4  # 2 steps x 2 sequences
+    lab.budget.limit = 7  # room for one more step, not two
+    with pytest.raises(BudgetExceeded):
+        lab.model.generate(prompts, max_new_tokens=2)
+    assert lab.forward_passes == lab.budget.used == 6
+
+
+def _generate_three(lab, **kwargs):
+    inputs = lab.tokenizer("hello world", return_tensors="pt")
+    with torch.no_grad():
+        return lab.model.generate(**inputs, min_new_tokens=3, max_new_tokens=3, **kwargs)
+
+
+def test_beam_search_counts_a_prompts_beams_once_per_step(tiny_lab):
+    _generate_three(tiny_lab, num_beams=2, do_sample=False)
+    assert tiny_lab.forward_passes == tiny_lab.budget.used == 3
+
+
+def test_beam_width_from_generation_config_counts_once(tiny_lab):
+    from transformers import GenerationConfig
+
+    _generate_three(tiny_lab, generation_config=GenerationConfig(num_beams=2, do_sample=False))
+    assert tiny_lab.forward_passes == tiny_lab.budget.used == 3
+
+
+def test_sampled_return_sequences_each_count(tiny_lab):
+    _generate_three(tiny_lab, do_sample=True, num_return_sequences=2)
+    assert tiny_lab.forward_passes == tiny_lab.budget.used == 6  # 3 steps x 2 samples
+
+
+def test_beam_width_resets_after_a_failed_generate(tiny_lab):
+    tiny_lab.budget.limit = 2
+    with pytest.raises(BudgetExceeded):
+        _generate_three(tiny_lab, num_beams=2, do_sample=False)
+    tiny_lab.budget.limit = None
+    batch = tiny_lab.tokenizer(["hello world", "world hello"], return_tensors="pt")
+    with torch.no_grad():
+        tiny_lab.model(**batch)
+    assert tiny_lab.forward_passes == tiny_lab.budget.used == 2 + 2
+
+
+def test_sampled_evaluate_with_beams_fits_a_greedy_sized_cap(tiny_lab):
+    rows = [{"prompt": "hello", "answer": "world"}]
+    config = {"num_beams": 2, "min_new_tokens": 3, "max_new_tokens": 3}
+    result = tiny_lab.evaluate(
+        rows, name="beams", mode="sampled", max_passes=3, generation_config=config
+    )
+    assert result["forward_passes"] == 3
 
 
 def test_likelihood_scores_only_continuation_tokens_and_explicit_boundary(lab):

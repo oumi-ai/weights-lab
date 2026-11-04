@@ -10,6 +10,7 @@ desired leading whitespace in the answer itself. Scores are sums, not averages.
 
 from __future__ import annotations
 
+import functools
 import json
 import threading
 import time
@@ -18,7 +19,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .budget import PassBudget
+from .budget import PassBudget, sequences_in_call
 from .evaluation import EvaluationMixin
 from .evaluation_data import _choices, _digest, _reserve, _safe_name, _tasks
 from .session import write_json
@@ -79,7 +80,11 @@ def _generation_kwargs(
 
 
 class ScoringMixin(EvaluationMixin):
-    """Evaluation helpers for a Lab whose forward hook calls _before_forward."""
+    """Evaluation helpers and the pass-counting hook.
+
+    The host registers ``_count_forward`` as a forward pre-hook with kwargs, passes the
+    counted model to ``_count_beams_once``, and owns ``_forward_passes``.
+    """
 
     @property
     def budget(self) -> PassBudget:
@@ -92,14 +97,43 @@ class ScoringMixin(EvaluationMixin):
             self._evaluation_budgets: list[PassBudget] = []
             self._budget_guard = threading.RLock()
 
-    def _before_forward(self) -> None:
+    def _before_forward(self, count: int = 1) -> None:
         self._budget_state()
         with self._budget_guard:
             budgets = [self.budget, *self._evaluation_budgets]
             for budget in budgets:
-                budget.check()
+                budget.check(count)
             for budget in budgets:
-                budget.consume()
+                budget.consume(count)
+
+    def _count_forward(self, module: Any, args: tuple, kwargs: dict) -> None:
+        """Forward pre-hook: charge one pass per sequence before the model runs.
+
+        Inside beam search, a prompt's beams count as one sequence.
+        """
+        beams = getattr(self, "_beam_width", 1)
+        count = -(-sequences_in_call(args, kwargs) // beams)
+        self._before_forward(count)
+        self._forward_passes += count
+
+    def _count_beams_once(self, model: Any) -> None:
+        """Wrap ``model.generate`` so the counter divides beam-search batches by the beam width."""
+        original = getattr(model, "generate", None)
+        if original is None:
+            return
+
+        @functools.wraps(original)
+        def generate(*args: Any, **kwargs: Any) -> Any:
+            config = kwargs.get("generation_config") or getattr(model, "generation_config", None)
+            width = kwargs.get("num_beams") or getattr(config, "num_beams", None) or 1
+            previous = getattr(self, "_beam_width", 1)
+            self._beam_width = width
+            try:
+                return original(*args, **kwargs)
+            finally:
+                self._beam_width = previous
+
+        model.generate = generate
 
     @contextmanager
     def limit_passes(self, max_passes: int | None):

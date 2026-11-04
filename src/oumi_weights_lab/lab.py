@@ -15,10 +15,10 @@ from .session import DTYPES
 class Lab(EditingMixin, ScoringMixin, InspectionMixin, AttachmentMixin, PersistenceMixin):
     """A loaded model, tokenizer, and the session's artifact directory.
 
-    Forward passes count calls to the base language model, including generation
-    steps. A batched call counts once; a call that fails also counts. Snippets
-    retain control of gradient tracking and should use ``torch.no_grad()`` for
-    inference when they do not need gradients.
+    Forward passes count sequences run through the base language model, including
+    generation steps. A batched call counts once per sequence; a call that fails
+    also counts. Snippets retain control of gradient tracking and should use
+    ``torch.no_grad()`` for inference when they do not need gradients.
     """
 
     def __init__(
@@ -49,21 +49,23 @@ class Lab(EditingMixin, ScoringMixin, InspectionMixin, AttachmentMixin, Persiste
                     module.forward = module.model.__call__
         # PEFT generation calls the underlying language model directly.
         counted_model = model.get_base_model() if hasattr(model, "peft_config") else model
-        self._counter_hook = counted_model.register_forward_pre_hook(self._count_forward)
+        self._counter_hook = counted_model.register_forward_pre_hook(
+            self._count_forward, with_kwargs=True
+        )
+        self._count_beams_once(counted_model)
 
     @property
     def device(self) -> Any:
-        """The model's current device, suitable for moving tokenizer outputs."""
-        return self.model.device
+        """The input embeddings' device, where tokenizer outputs belong."""
+        try:
+            return self.model.get_input_embeddings().weight.device
+        except (AttributeError, NotImplementedError):
+            return self.model.device
 
     @property
     def forward_passes(self) -> int:
-        """Number of base-model forward calls since loading."""
+        """Sequences run through the base model since loading, including generation steps."""
         return self._forward_passes
-
-    def _count_forward(self, module: Any, inputs: Any) -> None:
-        self._before_forward()
-        self._forward_passes += 1
 
 
 def load_lab(config: dict[str, Any], session_path: Path) -> Lab:
