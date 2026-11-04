@@ -59,13 +59,21 @@ report = lab.compare_runs(before, after)
   before configs were recorded count as `legacy-v0.1`. While a logit attachment,
   or a `record` or `patch` at nonnegative positions, is active, use
   `batch_size=1` for the run and the runs you compare it with, because left
-  padding shifts what those hooks see. Sampled mode runs one row at a time.
+  padding shifts what those hooks see.
+- Sampled mode also generates up to `batch_size` rows at once. Row `i` draws from
+  its own generator seeded with `seed + i`, so seeded samples do not depend on the
+  batch size. Items record `finish_reason` (`eos`, `stop_string`, or `max_tokens`),
+  `generated_tokens`, and `sample_seed`; summaries report `truncation_share` and
+  `mean_generated_tokens`. Beam search, `max_time`, `min_length`,
+  `prefill_chunk_size`, watermarking, and `max_length` without `max_new_tokens`
+  run one row at a time, and a `batch_size` above 1 with them raises.
   Items record each option's token count as `option_tokens`. Batching multiplies
   eager attention memory, so settle `batch_size` on dev rows before a held-out
   run: an out-of-memory failure still uses up the reservation.
 - `diff(before, after)` and `compare_runs(before, after)` pair rows by position and
   need the same rows in the same order. `compare_runs` also checks row IDs and adds
-  McNemar p-values, bootstrap intervals, and the largest movers.
+  McNemar p-values, bootstrap intervals, and the largest movers. For sampled runs
+  it also compares truncation share and mean generated length.
 - `evaluate_suite` and `compare_suites` gate a candidate on per-dataset accuracy and
   NLL tolerances. `create_screen` and `verify_screen` pin a stratified dev subset.
 
