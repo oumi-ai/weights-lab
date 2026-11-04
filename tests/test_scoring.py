@@ -1,5 +1,6 @@
 import json
 import math
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -246,6 +247,68 @@ def test_cap_smaller_than_a_batch_raises_before_running(lab):
     assert lab.model.calls == []
 
 
+def _items(summary):
+    lines = (Path(summary["run_dir"]) / "items.jsonl").read_text().splitlines()
+    return [json.loads(line) for line in lines]
+
+
+def test_evaluate_records_scoring_config_and_option_tokens(lab):
+    batched = lab.evaluate(tasks(), name="batched")
+    assert batched["scoring_config"] == {
+        "scorer": "flat-left-pad-v1",
+        "batch_size": 8,
+        "padding_side": "left",
+        "logits": "last_k",
+    }
+    assert _items(batched)[0]["option_tokens"] == {"A": 2, "B": 1}
+    single = lab.evaluate(tasks(), name="single", batch_size=1)
+    assert single["scoring_config"] == {
+        "scorer": "flat-left-pad-v1",
+        "batch_size": 1,
+        "padding_side": "none",
+        "logits": "full",
+    }
+    assert _items(single)[0]["scores"] == pytest.approx(_items(batched)[0]["scores"], abs=1e-6)
+
+
+def test_runs_with_different_batch_sizes_refuse_to_pair(lab):
+    batched = lab.evaluate(tasks(), name="batched")
+    single = lab.evaluate(tasks(), name="single", batch_size=1)
+    with pytest.raises(ValueError, match="scoring_config"):
+        lab.diff(batched, single)
+    with pytest.raises(ValueError, match="scoring_config"):
+        lab.compare_runs(batched, single)
+
+
+def test_legacy_run_without_scoring_config_refuses_with_a_clear_message(lab):
+    current = lab.evaluate(tasks(), name="current")
+    legacy = lab.evaluate(tasks(), name="legacy")
+    path = Path(legacy["run_dir"]) / "summary.json"
+    summary = json.loads(path.read_text())
+    del summary["scoring_config"]
+    path.write_text(json.dumps(summary))
+    with pytest.raises(ValueError, match="legacy-v0.1"):
+        lab.diff(current, legacy)
+
+
+def test_sampled_mode_rejects_batching_before_reserving_held_out_rows(lab):
+    rows = [{"prompt": "p", "answer": "2 3"}]
+    config = {"max_new_tokens": 2}
+    with pytest.raises(ValueError, match="batch_size"):
+        lab.evaluate(
+            rows,
+            mode="sampled",
+            batch_size=2,
+            held_out=True,
+            max_passes=4,
+            generation_config=config,
+        )
+    result = lab.evaluate(
+        rows, name="single", mode="sampled", held_out=True, max_passes=4, generation_config=config
+    )
+    assert result["scoring_config"] == {"sampler": "hf-generate-v0.1", "batch_size": 1}
+
+
 def test_likelihood_scores_only_continuation_tokens_and_explicit_boundary(lab):
     scores = lab.score("p", [" x", " y"], batch_size=1)
     expected_x = 2 * (4 - math.log(math.exp(4) + 5))
@@ -367,7 +430,7 @@ def test_dev_data_cannot_be_reclassified_as_held_out(lab):
 
 def test_budget_failure_is_auditable_and_consumes_held_out_reservation(lab):
     with pytest.raises(BudgetExceeded):
-        lab.evaluate(tasks(), name="too-small", held_out=True, max_passes=1)
+        lab.evaluate(tasks(), name="too-small", held_out=True, max_passes=1, batch_size=1)
     summary = json.loads((lab.artifacts / "evaluations/too-small/summary.json").read_text())
     assert summary["state"] == "failed"
     assert summary["accuracy"] is None
@@ -379,7 +442,8 @@ def test_budget_failure_is_auditable_and_consumes_held_out_reservation(lab):
 
 def test_partial_run_failure_never_reports_partial_accuracy(lab):
     with pytest.raises(BudgetExceeded):
-        lab.evaluate(tasks() + tasks(), name="partial", max_passes=2)
+        # Two-sequence batches: the first row's batch runs, the second is refused whole.
+        lab.evaluate(tasks() + tasks(), name="partial", max_passes=2, batch_size=2)
     summary = json.loads((lab.artifacts / "evaluations/partial/summary.json").read_text())
     assert summary["state"] == "failed"
     assert summary["correct"] == summary["completed"] == 1
@@ -477,10 +541,10 @@ def test_package_does_not_export_a_forwarding_scorer():
 
 
 def test_prompt_attachments_affect_scores_without_changing_dataset_identity(lab):
-    baseline = lab.evaluate(tasks(), name="baseline")
+    baseline = lab.evaluate(tasks(), name="baseline", batch_size=1)
     lab._prepare_prompt = lambda prompt: ""
     lab.attachments = lambda: [{"name": "empty-prompt"}]
-    modified = lab.evaluate(tasks(), name="modified")
+    modified = lab.evaluate(tasks(), name="modified", batch_size=1)
     assert baseline["dataset_hash"] == modified["dataset_hash"]
     assert modified["attachments"] == [{"name": "empty-prompt"}]
     assert lab.model.calls[-2][0] == [[0, 2, 3]]

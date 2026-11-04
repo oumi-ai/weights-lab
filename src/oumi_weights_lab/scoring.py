@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -267,6 +267,27 @@ class ScoringMixin(EvaluationMixin):
                 return scores
         raise AssertionError("unreachable: one row always yields scores")
 
+    def _scoring_config(self, mode: str, batch_size: int) -> dict[str, Any]:
+        """Describe how a run scores, so only runs scored the same way pair."""
+        if mode == "sampled":
+            return {"sampler": "hf-generate-v0.1", "batch_size": 1}
+        from .inspection import _accepts
+
+        model = getattr(self, "model", None)
+        keeps = batch_size > 1 and model is not None and _accepts(model, "logits_to_keep")
+        return {
+            "scorer": "flat-left-pad-v1",
+            "batch_size": batch_size,
+            "padding_side": "left" if batch_size > 1 else "none",
+            "logits": "last_k" if keeps else "full",
+        }
+
+    def _option_tokens(self, options: dict[str, str]) -> dict[str, int]:
+        return {
+            label: len(self.tokenizer.encode(text, add_special_tokens=False))
+            for label, text in options.items()
+        }
+
     def _score_rows(
         self, tasks: list[dict[str, Any]], batch_size: int
     ) -> Iterator[tuple[int, dict[str, float]]]:
@@ -406,10 +427,14 @@ class ScoringMixin(EvaluationMixin):
         checker_id: str | None = None,
         generation_config: dict[str, Any] | None = None,
         seed: int = 0,
+        batch_size: int | None = None,
     ) -> dict[str, Any]:
         """Save per-item results and a summary; failures are saved and then re-raised.
 
-        Modes are likelihood, yes_no, and sampled. The sampled checker receives
+        Modes are likelihood, yes_no, and sampled. Likelihood modes score up to
+        ``batch_size`` sequences per forward (default 8); sampled mode runs one row
+        at a time. Runs pair only when their recorded scoring_config matches.
+        The sampled checker receives
         (generated_text, expected_answer); exact stripped equality is the default.
         A held-out dataset requires an explicit max_passes and can be used only
         once, even after edits or a failed evaluation. Dev datasets cannot later
@@ -429,6 +454,13 @@ class ScoringMixin(EvaluationMixin):
         if generation_config is not None and not isinstance(generation_config, dict):
             raise ValueError("generation_config must be a dictionary")
         json.dumps(generation_config or {}, allow_nan=False)
+        if mode == "sampled":
+            if batch_size not in (None, 1):
+                raise ValueError("sampled mode scores one row at a time; use batch_size=1")
+            batch_size = 1
+        elif batch_size is None:
+            batch_size = DEFAULT_BATCH_SIZE
+        _check_batch_size(batch_size)
         tasks, identities = _tasks(data, mode)
         if mode == "sampled":
             generate = getattr(getattr(self, "model", None), "generate", None)
@@ -474,6 +506,7 @@ class ScoringMixin(EvaluationMixin):
                 "checker_id": checker_id,
                 "seed": seed,
                 "generation_config": generation_config or {},
+                "scoring_config": self._scoring_config(mode, batch_size),
                 "tokenizer_policy": "separate_prompt_continuation_no_special_tokens_sum",
                 "max_passes": max_passes,
                 "started_at": started,
@@ -490,7 +523,9 @@ class ScoringMixin(EvaluationMixin):
                 with (
                     self.limit_passes(max_passes),
                     (run_dir / "items.jsonl").open("x", encoding="utf-8") as stream,
+                    nullcontext() if mode == "sampled" else self._evaluation_mode(),
                 ):
+                    scored = None if mode == "sampled" else self._score_rows(tasks, batch_size)
                     for index, task in enumerate(tasks):
                         item = {"index": index, **task}
                         if mode == "sampled":
@@ -506,7 +541,9 @@ class ScoringMixin(EvaluationMixin):
                                 generated=generated, prediction=generated, correct=bool(correct)
                             )
                         else:
-                            scores = self.score(task["prompt"], task["options"], batch_size=1)
+                            row, scores = next(scored)
+                            if row != index:
+                                raise AssertionError("rows were scored out of order")
                             best = max(scores.values())
                             leaders = [label for label, value in scores.items() if value == best]
                             # An exact tie names no prediction, so it is never correct.
@@ -516,6 +553,7 @@ class ScoringMixin(EvaluationMixin):
                                 prediction=prediction,
                                 tie=prediction is None,
                                 correct=prediction == task["answer"],
+                                option_tokens=self._option_tokens(task["options"]),
                             )
                         stream.write(json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n")
                         stream.flush()

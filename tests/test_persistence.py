@@ -88,13 +88,15 @@ def test_resume_carries_dev_and_failed_heldout_reservations(tmp_path):
     base = {k: v.clone() for k, v in lab.model.state_dict().items()}
     dev = [{"prompt": "dev", "options": [" a", " b"], "answer": 0}]
     held = [{"prompt": "held", "options": [" a", " b"], "answer": 0}]
-    lab.score = lambda *args, **kwargs: {"A": 0.0, "B": -1.0}
+    lab._score_rows = lambda tasks, batch_size: (
+        (index, {"A": 0.0, "B": -1.0}) for index, _ in enumerate(tasks)
+    )
     lab.evaluate(dev, name="dev")
 
     def fail(*args, **kwargs):
         raise RuntimeError("grader failed")
 
-    lab.score = fail
+    lab._score_rows = fail
     with pytest.raises(RuntimeError, match="grader"):
         lab.evaluate(held, name="held", held_out=True, max_passes=2)
     bundle = lab.save_edits("candidate")
