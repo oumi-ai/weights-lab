@@ -64,6 +64,13 @@ class Lab(EditingMixin, ScoringMixin, InspectionMixin, AttachmentMixin, Persiste
             return self.model.device
 
     @property
+    def device_map(self) -> dict[str, Any] | None:
+        """A copy of the module-to-device map the model was dispatched with, if any."""
+        model = self.model.get_base_model() if hasattr(self.model, "peft_config") else self.model
+        device_map = getattr(model, "hf_device_map", None)
+        return dict(device_map) if device_map else None
+
+    @property
     def forward_passes(self) -> int:
         """Sequences run through the base model since loading, including generation steps."""
         return self._forward_passes

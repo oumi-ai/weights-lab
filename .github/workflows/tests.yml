@@ -109,4 +109,4 @@ jobs:
         run: >-
           .venv/bin/pytest -q tests/test_local_model.py tests/test_adapter.py tests/test_loading.py
           tests/test_persistence.py tests/test_scoring.py tests/test_interventions.py
-          tests/test_budget.py
+          tests/test_budget.py tests/test_device_map.py

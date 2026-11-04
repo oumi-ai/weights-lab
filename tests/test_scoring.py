@@ -89,6 +89,10 @@ class ScoringLab(ScoringMixin):
         self.model.register_forward_pre_hook(self._count_forward, with_kwargs=True)
 
     @property
+    def device(self):
+        return self.model.device
+
+    @property
     def forward_passes(self):
         return self._forward_passes
 

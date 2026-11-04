@@ -548,7 +548,7 @@ class ScoringMixin(EvaluationMixin):
 
         from .inspection import _accepts
 
-        device = self.model.device
+        device = self.device
         if not padded:
             ((prompt_ids, answer_ids),) = batch
             ids = torch.tensor([prompt_ids + answer_ids], device=device)
@@ -731,7 +731,7 @@ class ScoringMixin(EvaluationMixin):
         if any(-index > min(map(len, prompts)) for index in self._hook_positions() if index < 0):
             raise ValueError("token position is outside the module output")
         pad = _pad_token(self.tokenizer)
-        device = self.model.device
+        device = self.device
         ids = torch.tensor([[pad] * (length - len(row)) + row for row in prompts], device=device)
         mask = torch.tensor(
             [[0] * (length - len(row)) + [1] * len(row) for row in prompts], device=device
