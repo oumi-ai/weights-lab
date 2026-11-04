@@ -67,6 +67,24 @@ class Lab(EditingMixin, ScoringMixin, InspectionMixin, AttachmentMixin, Persiste
         """Sequences run through the base model since loading, including generation steps."""
         return self._forward_passes
 
+    def hf_rows(
+        self,
+        path: str,
+        *,
+        split: str,
+        to_row: Any,
+        name: str | None = None,
+        revision: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Evaluation rows from a Hugging Face dataset split, pinned to its commit.
+
+        Needs the ``datasets`` extra. See ``oumi_weights_lab.hf_data.hf_rows``.
+        """
+        from .hf_data import hf_rows
+
+        return hf_rows(path, split=split, to_row=to_row, name=name, revision=revision, limit=limit)
+
 
 def load_lab(config: dict[str, Any], session_path: Path) -> Lab:
     """Load one eager Hugging Face causal language model, optionally with PEFT.
