@@ -20,6 +20,10 @@ and network access.
 
 Tested on CPU, Apple MPS, NVIDIA H200, and SkyPilot with Slurm.
 
+![Your coding agent edits a running model's weights: GPT-2's next word changes from Paris to banana, then undo restores Paris. The same model stays loaded throughout.](docs/assets/agent-workbench.svg)
+
+A deliberately silly weight edit, with exact undo. [Try the example](examples/banana.py).
+
 ## Install in your coding agent
 
 Requires Linux or macOS, git, and [uv](https://docs.astral.sh/uv/).

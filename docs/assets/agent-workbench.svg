@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="500" viewBox="0 0 1000 500" style="max-width:100%;height:auto" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">Your agent can edit the model.</title>
+  <desc id="description">A coding agent changes a running model's weights. For one fixed prompt, GPT-2's next word changes from Paris to banana. Undo restores Paris. The model stays loaded throughout. This is a real, deliberately forced next-word experiment, illustrated schematically.</desc>
+  <style>
+    text { font-family: 'Avenir Next', Avenir, 'Segoe UI', sans-serif; fill: #152039; }
+    .heading { font-size: 38px; font-weight: 700; letter-spacing: -1px; }
+    .label { font-size: 22px; font-weight: 600; }
+    .quiet { fill: #61708A; }
+    .code { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 21px; fill: #034ADA; }
+    .goal { font-size: 28px; font-weight: 600; }
+    .answer { font-size: 66px; font-weight: 700; letter-spacing: -2px; }
+    .phase { font-size: 20px; fill: #61708A; }
+    .before { animation: before 12s linear infinite; }
+    .edited { opacity: 0; animation: edited 12s linear infinite; }
+    .restored { opacity: 0; animation: restored 12s linear infinite; }
+    .changed-weight { stroke: #034ADA; animation: weight 12s linear infinite; }
+    .reach { stroke-dasharray: 10 9; stroke-dashoffset: 0; animation: reach 12s linear infinite; }
+    .cursor { opacity: 0; animation: cursor 12s linear infinite; }
+    .static-summary { display: none; }
+    @keyframes before {
+      0%, 23% { opacity: 1; }
+      25%, 100% { opacity: 0; }
+    }
+    @keyframes edited {
+      0%, 25% { opacity: 0; }
+      27%, 65% { opacity: 1; }
+      67%, 100% { opacity: 0; }
+    }
+    @keyframes restored {
+      0%, 67% { opacity: 0; }
+      69%, 98% { opacity: 1; }
+      100% { opacity: 0; }
+    }
+    @keyframes weight {
+      0%, 23%, 69%, 100% { stroke: #034ADA; stroke-width: 4; }
+      27%, 65% { stroke: #D59B00; stroke-width: 7; }
+    }
+    @keyframes reach {
+      0%, 16% { opacity: .15; stroke-dashoffset: 0; }
+      22%, 28% { opacity: 1; }
+      34%, 59% { opacity: .15; }
+      65%, 71% { opacity: 1; }
+      77%, 100% { opacity: .15; stroke-dashoffset: -180; }
+    }
+    @keyframes cursor {
+      0%, 17% { opacity: 0; transform: translate(-60px, 25px); }
+      22%, 29% { opacity: 1; transform: translate(0, 0); }
+      34%, 60% { opacity: 0; transform: translate(-60px, 25px); }
+      65%, 72% { opacity: 1; transform: translate(0, 0); }
+      77%, 100% { opacity: 0; transform: translate(-60px, 25px); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { animation: none !important; }
+      .before, .edited, .restored, .cursor, .reach { display: none; }
+      .static-summary { display: block; }
+      .changed-weight { stroke: #D59B00; stroke-width: 6; }
+    }
+  </style>
+
+  <rect width="1000" height="500" fill="white"/>
+  <text x="40" y="62" class="heading">Your agent can edit the model.</text>
+
+  <!-- The agent's intention remains visible as its code changes. -->
+  <text x="40" y="135" class="label">Your coding agent</text>
+  <path d="m42 179 14 13-14 13m24 0h18" stroke="#034ADA" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="40" y="247" class="goal">Make it say banana.</text>
+  <text x="40" y="284" class="goal">Then put it back.</text>
+  <rect x="40" y="316" width="271" height="58" rx="5" fill="#EDF3FF"/>
+  <text x="57" y="352" class="code before">model.generate(…)</text>
+  <text x="57" y="352" class="code edited">lab.edit(…)</text>
+  <text x="57" y="352" class="code restored">lab.undo()</text>
+  <text x="57" y="352" class="code static-summary">lab.edit(…)</text>
+
+  <!-- One persistent model. The graph is a schematic, not GPT-2's topology. -->
+  <text x="423" y="135" class="label">Running model</text>
+  <path d="M413 164h174a20 20 0 0 1 20 20v152a20 20 0 0 1-20 20H413a20 20 0 0 1-20-20V184a20 20 0 0 1 20-20Z" fill="#F6F8FC"/>
+  <g stroke="#BCC8D9" stroke-width="2">
+    <path d="m425 203 74 14m-74-14 74 86m-74-21 74-51m-74 51 74 21m-74 44 74-116m-74 116 74-44"/>
+    <path d="m499 217 74-14m-74 14 74 65m-74 7 74-86m-74 86 74-7m-74 7 74 44"/>
+  </g>
+  <path d="m425 268 74-51" class="changed-weight" stroke-linecap="round"/>
+  <g fill="white" stroke="#9AACC2" stroke-width="2">
+    <circle cx="425" cy="203" r="9"/>
+    <circle cx="425" cy="268" r="9"/>
+    <circle cx="425" cy="333" r="9"/>
+    <circle cx="499" cy="217" r="9"/>
+    <circle cx="499" cy="289" r="9"/>
+    <circle cx="573" cy="203" r="9"/>
+    <circle cx="573" cy="282" r="9"/>
+    <circle cx="573" cy="333" r="9"/>
+  </g>
+  <path class="reach" d="M311 345c56 0 48-98 132-98" stroke="#034ADA" stroke-width="2"/>
+  <g class="cursor">
+    <path d="m455 239 4 31 9-9 12 2-25-24Z" fill="#034ADA" stroke="white" stroke-width="3" stroke-linejoin="round"/>
+  </g>
+  <text x="500" y="398" text-anchor="middle" class="quiet" font-size="21">Stays loaded.</text>
+
+  <text x="674" y="135" class="label">Same prompt</text>
+  <text x="674" y="181" font-size="20" class="quiet">The capital of Italy is Rome.</text>
+  <text x="674" y="210" font-size="20" class="quiet">The capital of France is</text>
+  <path d="M620 254h31m-8-7 8 7-8 7" stroke="#BCC8D9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <g class="before">
+    <text x="674" y="289" class="answer">Paris</text>
+    <text x="677" y="335" class="phase">Before the edit</text>
+  </g>
+  <g class="edited">
+    <text x="674" y="289" class="answer" style="fill:#034ADA">banana</text>
+    <text x="677" y="335" class="phase">After the weight edit</text>
+  </g>
+  <g class="restored">
+    <text x="674" y="289" class="answer">Paris</text>
+    <text x="677" y="335" class="phase">After undo</text>
+  </g>
+  <g class="static-summary">
+    <text x="674" y="280" class="answer" style="fill:#034ADA">banana</text>
+    <text x="677" y="328" class="phase">Edit, test, undo.</text>
+  </g>
+
+  <path d="M40 431h920" stroke="#E0E6EF"/>
+  <text x="40" y="473" font-size="22" class="quiet">A real next-word experiment.</text>
+  <text x="566" y="474" font-size="30" font-weight="600">Paris <tspan fill="#9AACC2">→</tspan> <tspan style="fill:#034ADA">banana</tspan> <tspan fill="#9AACC2">→</tspan> Paris</text>
+</svg>
