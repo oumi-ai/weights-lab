@@ -24,12 +24,24 @@ def _activation(output):
     return value
 
 
-def _absolute(positions):
-    """Whether any position counts from the sequence start, which left padding would shift."""
+def _listed(positions):
+    """Positions as given, with an iterable read once so every hook call sees the same list."""
+    if positions is None or isinstance(positions, int):
+        return positions
+    try:
+        return list(positions)
+    except TypeError:
+        return positions  # _positions reports the invalid value on the first forward.
+
+
+def _integer_positions(positions):
+    """The integer positions a hook will select, for batched scoring's padding checks."""
     if positions is None:
-        return False
-    values = [positions] if isinstance(positions, int) else list(positions)
-    return any(isinstance(index, int) and index >= 0 for index in values)
+        return [-1]
+    values = [positions] if isinstance(positions, int) else positions
+    if not isinstance(values, list):
+        return []
+    return [index for index in values if isinstance(index, int) and not isinstance(index, bool)]
 
 
 def _positions(value, positions):
@@ -119,21 +131,17 @@ class InspectionMixin:
         return lora_diagnostics(self.model, pattern, adapter, top_k)
 
     @contextmanager
-    def _absolute_positions(self, positions):
-        """While active, mark a hook whose positions batched scoring's left padding would shift."""
-        if not _absolute(positions):
-            yield
-            return
-        if not hasattr(self, "_absolute_position_hooks"):
-            self._absolute_position_hooks = []
-        token = object()
-        self._absolute_position_hooks.append(token)
+    def _track_positions(self, positions):
+        """List an active hook's positions so batched scoring can refuse padding that moves them."""
+        entry = (object(), _integer_positions(positions))
+        if not hasattr(self, "_position_hooks"):
+            self._position_hooks = []
         try:
+            # Inside try: a timeout right after appending still removes the entry.
+            self._position_hooks.append(entry)
             yield
         finally:
-            self._absolute_position_hooks = [
-                item for item in self._absolute_position_hooks if item is not token
-            ]
+            self._position_hooks = [item for item in self._position_hooks if item is not entry]
 
     def patches(self):
         """Describe active activation interventions without retaining tensor copies."""
@@ -143,6 +151,7 @@ class InspectionMixin:
     def record(self, modules, positions=None):
         """Capture selected output positions as detached CPU tensors for each call."""
         _eager(self.model)
+        positions = _listed(positions)
         names = [modules] if isinstance(modules, str) else list(modules)
         if not names or len(set(names)) != len(names):
             raise ValueError("choose a nonempty list of distinct module names")
@@ -161,7 +170,7 @@ class InspectionMixin:
                 # Track before registering so an interrupt cannot orphan the hook.
                 hooks.append(_TemporaryHook(target, capture))
                 hooks[-1].register()
-            with self._absolute_positions(positions):
+            with self._track_positions(positions):
                 yield captured
         finally:
             for hook in hooks:
@@ -177,6 +186,7 @@ class InspectionMixin:
         import torch
 
         _eager(self.model)
+        positions = _listed(positions)
         target = self.model.get_submodule(module)
 
         def replace(hooked, inputs, output):
@@ -206,7 +216,7 @@ class InspectionMixin:
         try:
             hook.register()
             self._patches.append(metadata)
-            with self._absolute_positions(positions):
+            with self._track_positions(positions):
                 yield
         finally:
             hook.remove()

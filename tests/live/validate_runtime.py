@@ -67,7 +67,7 @@ else:
 assert lab.forward_passes == before
 try:
     lab.evaluate([{"prompt": "hello world", "options": [" yes", " no"], "answer": 0}],
-                 name="exhausted", held_out=True, max_passes=1)
+                 name="exhausted", held_out=True, max_passes=1, batch_size=1)
 except BudgetExceeded:
     pass
 else:

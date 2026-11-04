@@ -252,13 +252,15 @@ class ScoringMixin(EvaluationMixin):
         options: list[str] | dict[str, str],
         *,
         max_passes: int | None = None,
-        batch_size: int = DEFAULT_BATCH_SIZE,
+        batch_size: int | None = None,
     ) -> dict[str, float]:
         """Return summed continuation log probabilities using the module's token-boundary policy.
 
-        Options are scored in left-padded batches of up to ``batch_size`` sequences;
-        ``batch_size=1`` scores each option alone, exactly as v0.1 did.
+        Options are scored in left-padded batches of up to ``batch_size`` sequences
+        (default 8, or 1 for a model that cannot take position ids); ``batch_size=1``
+        scores each option alone, exactly as v0.1 did.
         """
+        batch_size = self._default_batch_size() if batch_size is None else batch_size
         _check_batch_size(batch_size)
         self._check_batching(batch_size)
         with self.limit_passes(max_passes), self._evaluation_mode():
@@ -268,21 +270,31 @@ class ScoringMixin(EvaluationMixin):
                 return scores
         raise AssertionError("unreachable: one row always yields scores")
 
+    def _takes_position_ids(self) -> bool:
+        from .inspection import _accepts
+
+        model = getattr(self, "model", None)
+        return model is None or _accepts(model, "position_ids")
+
+    def _default_batch_size(self) -> int:
+        """Batch by default only where left padding can be corrected with position ids."""
+        return DEFAULT_BATCH_SIZE if self._takes_position_ids() else 1
+
+    def _hook_positions(self) -> list[int]:
+        return [index for _, indices in getattr(self, "_position_hooks", []) for index in indices]
+
     def _check_batching(self, batch_size: int) -> None:
         """Refuse padded batches where left padding would change what a model or hook sees."""
         if batch_size == 1:
             return
-        from .inspection import _accepts
-
-        model = getattr(self, "model", None)
-        if model is not None and not _accepts(model, "position_ids"):
+        if not self._takes_position_ids():
             raise ValueError(
                 "batch_size>1 needs a model whose forward accepts position_ids; use batch_size=1"
             )
         same = "use batch_size=1 for this run and the runs you compare it with"
         if any(item.active and item.mode == "logits" for item in getattr(self, "_attachments", [])):
             raise ValueError(f"a logit attachment would see padded batches; {same}")
-        if getattr(self, "_absolute_position_hooks", None):
+        if any(index >= 0 for index in self._hook_positions()):
             raise ValueError(
                 f"an active record or patch uses token positions that left padding shifts; {same}"
             )
@@ -336,7 +348,7 @@ class ScoringMixin(EvaluationMixin):
                 pending.setdefault(index, {})[label] = value
                 remaining[index] -= 1
             while next_row < len(sequences) and remaining[next_row] == 0:
-                # Preserve option order, which a split row may have scored out of order.
+                # Return labels in the row's option order, however its batches were split.
                 order = [label for _, label, _, _ in sequences[next_row]]
                 row_scores = pending.pop(next_row)
                 yield next_row, {label: row_scores[label] for label in order}
@@ -358,6 +370,11 @@ class ScoringMixin(EvaluationMixin):
             start = len(prompt_ids) - 1
             return [_summed(output.logits[0, start : start + len(answer_ids)], answer_ids)]
         length = max(len(prompt_ids) + len(answer_ids) for prompt_ids, answer_ids in batch)
+        shortest = min(len(prompt_ids) + len(answer_ids) for prompt_ids, answer_ids in batch)
+        # A negative hook position past a short sequence would select left padding;
+        # refuse it the way an unpadded forward does.
+        if any(-index > shortest for index in self._hook_positions() if index < 0):
+            raise ValueError("token position is outside the module output")
         keep = max(len(answer_ids) for _, answer_ids in batch) + 1
         pad = _pad_token(self.tokenizer)
         rows, masks = [], []
@@ -479,7 +496,7 @@ class ScoringMixin(EvaluationMixin):
                 raise ValueError("sampled mode scores one row at a time; use batch_size=1")
             batch_size = 1
         elif batch_size is None:
-            batch_size = DEFAULT_BATCH_SIZE
+            batch_size = self._default_batch_size()
         _check_batch_size(batch_size)
         self._check_batching(batch_size)
         tasks, identities = _tasks(data, mode)

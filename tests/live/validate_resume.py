@@ -44,7 +44,7 @@ assert model.get_parameter(adapter_name).abs().sum() > 0
 baseline_weights = weights()
 baseline_logits = digest(logits())
 try:
-    lab.evaluate(heldout,name='failed-heldout',held_out=True,max_passes=1)
+    lab.evaluate(heldout,name='failed-heldout',held_out=True,max_passes=1,batch_size=1)
 except BudgetExceeded:
     pass
 else:

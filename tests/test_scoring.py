@@ -339,13 +339,27 @@ class NoPositionModel(ControlledModel):
         return super().forward(input_ids, attention_mask)
 
 
-def test_model_without_position_ids_refuses_batching_before_reserving(tmp_path):
+def test_model_without_position_ids_defaults_to_one_and_refuses_explicit_batching(tmp_path):
     lab = ScoringLab(tmp_path, NoPositionModel())
     with pytest.raises(ValueError, match="position_ids"):
-        lab.evaluate(tasks(), held_out=True, max_passes=10)
+        lab.evaluate(tasks(), held_out=True, max_passes=10, batch_size=8)
     assert lab.model.calls == []
-    result = lab.evaluate(tasks(), held_out=True, max_passes=10, batch_size=1)
+    result = lab.evaluate(tasks(), held_out=True, max_passes=10)
     assert result["state"] == "succeeded"
+    assert result["scoring_config"]["batch_size"] == 1
+    assert set(lab.score("p", [" x", " y"])) == {"A", "B"}
+
+
+def test_negative_position_deeper_than_a_short_row_raises_like_batch_one(tiny_lab):
+    options = [" yes", " no world hello world yes"]
+    with tiny_lab.patch("transformer.h.0", lambda value: value, positions=[-5]):
+        with pytest.raises(ValueError, match="outside the module output"):
+            tiny_lab.score("hello", options, batch_size=1)
+        with pytest.raises(ValueError, match="outside the module output"):
+            tiny_lab.score("hello", options, batch_size=8)
+    with tiny_lab.record("transformer.h.0", positions=-5):
+        with pytest.raises(ValueError, match="outside the module output"):
+            tiny_lab.score("hello", options, batch_size=8)
 
 
 def test_likelihood_scores_only_continuation_tokens_and_explicit_boundary(lab):
