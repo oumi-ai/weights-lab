@@ -22,7 +22,7 @@ with unchanged winners. It ignores row IDs but checks ordered content, metadata,
 settings, and complete results. `compare_runs` and suite pairing are strict: same
 ordered tasks, IDs, metadata, session, mode, seed, scoring policy, scoring
 config (including `batch_size`), and generation settings. Explicit IDs must be unique and complete. Custom sampled
-checkers require a matching explicit `checker_id` for comparison.
+checkers and `answer_key` extractors require a matching explicit `checker_id` for comparison.
 
 Inspect accuracy **and** candidate-set NLL/Brier/ECE overall and per source. For
 sampled runs, also inspect `truncation_share` and `mean_generated_tokens`: an edit
@@ -31,7 +31,8 @@ With several samples per row (`num_samples`), `fixed` and `broken` count rows
 whose fraction of correct samples rose or fell, and `permutation_p` replaces
 the McNemar test.
 Probabilities are softmax over supplied continuation log scores, not calibrated
-open-answer confidence. `fixed`, `broken`, and exact McNemar describe paired flips.
+open-answer confidence. In single-sample runs, `fixed`, `broken`, and exact McNemar describe paired
+flips.
 Bootstrap intervals use source documents (`document_id`, `source_doc`, or
 `source_document`, top-level or nested under `metadata`) when present; override
 with `bootstrap_group_by`. Missing requested groups/documents must be corrected,

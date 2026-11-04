@@ -132,15 +132,29 @@ def majority(keys: list[Any]) -> tuple[Any, bool]:
     return (leaders[0], False) if len(leaders) == 1 else (None, True)
 
 
+EXACT_PERMUTATION_LIMIT = 16  # Up to 2**16 sign patterns are enumerated exactly.
+
+
 def _sign_flip_p(differences: list[float], samples: int, seed: int) -> float:
-    """Two-sided paired permutation p-value: randomly flip the sign of each row's change."""
-    observed = abs(sum(differences))
+    """Two-sided paired permutation p-value over sign flips of each unit's change.
+
+    Units are whole document clusters, so related rows flip together. With at most
+    EXACT_PERMUTATION_LIMIT nonzero changes every sign pattern is counted exactly;
+    beyond that ``samples`` seeded random patterns estimate the p-value.
+    """
+    observed = abs(sum(differences)) - 1e-12
     nonzero = [d for d in differences if d]
     if not nonzero:
         return 1.0
+    if len(nonzero) <= EXACT_PERMUTATION_LIMIT:
+        extreme = sum(
+            abs(sum(d if pattern >> i & 1 else -d for i, d in enumerate(nonzero))) >= observed
+            for pattern in range(2 ** len(nonzero))
+        )
+        return extreme / 2 ** len(nonzero)
     rng = random.Random(seed)
     extreme = sum(
-        abs(sum(d if rng.random() < 0.5 else -d for d in nonzero)) >= observed - 1e-12
+        abs(sum(d if rng.random() < 0.5 else -d for d in nonzero)) >= observed
         for _ in range(samples)
     )
     return (1 + extreme) / (1 + samples)
@@ -253,14 +267,19 @@ def _percentile(values: list[float], q: float) -> float:
 
 
 def _paired_report(
-    pairs: list[tuple[dict, dict]], clusters: list[str], samples: int, seed: int
+    pairs: list[tuple[dict, dict]],
+    clusters: list[str],
+    samples: int,
+    seed: int,
+    fractional: bool | None = None,
 ) -> dict:
     left, right = [p[0] for p in pairs], [p[1] for p in pairs]
     # Decide from both sides: a run whose rows all failed records no finish reasons.
     measured = _has_lengths(left + right)
     before, after = _metrics(left, measured), _metrics(right, measured)
     # With several samples per row, a row is fixed or broken when its fraction moves.
-    fractional = any(r.get("fractional") for r in left + right)
+    if fractional is None:  # compare_runs passes it from the runs' num_samples.
+        fractional = any(r.get("fractional") for r in left + right)
     fixed = sum(float(b["correct"]) > float(a["correct"]) for a, b in pairs)
     broken = sum(float(a["correct"]) > float(b["correct"]) for a, b in pairs)
     lengths = LENGTH_METRICS if measured else ()
@@ -305,17 +324,10 @@ def _paired_report(
         "broken": broken,
         # McNemar needs pass/fail rows; fractions use a paired sign-flip permutation test.
         "mcnemar_p": None if fractional else mcnemar(fixed, broken),
-        **(
-            {
-                "permutation_p": _sign_flip_p(
-                    [_value(b, "accuracy") - _value(a, "accuracy") for a, b in pairs],
-                    samples,
-                    seed,
-                )
-            }
-            if fractional
-            else {}
-        ),
+        # Flip whole documents, as the bootstrap resamples them.
+        "permutation_p": _sign_flip_p([totals[key]["accuracy"] for key in keys], samples, seed)
+        if fractional
+        else None,
         "bootstrap": {
             "seed": seed,
             "samples": samples,
@@ -406,7 +418,8 @@ class EvaluationMixin:
                 continue
             kind = "score_changed" if same_prediction else "changed"
             if old["correct"] != new["correct"]:
-                kind = "improved" if new["correct"] else "regressed"
+                # With several samples, correctness is a fraction; label by its direction.
+                kind = "improved" if new["correct"] > old["correct"] else "regressed"
             changes.append({"index": old["index"], "change": kind, "before": old, "after": new})
         return changes
 
@@ -475,14 +488,20 @@ class EvaluationMixin:
             _digest(_field(task, cluster_by)) if cluster_by else str(i)
             for i, task in enumerate(tasks_a)
         ]
-        report = _paired_report(pairs, clusters, bootstrap_samples, seed)
+        # Decide from the runs, so a group whose rows all failed reports the same tests.
+        fractional = a.get("num_samples", 1) > 1
+        report = _paired_report(pairs, clusters, bootstrap_samples, seed, fractional)
         groups: dict[str, list[int]] = defaultdict(list)
         if group_by:
             for i, task in enumerate(tasks_a):
                 groups[_label(_field(task, group_by))].append(i)
         grouped = {
             key: _paired_report(
-                [pairs[i] for i in indices], [clusters[i] for i in indices], bootstrap_samples, seed
+                [pairs[i] for i in indices],
+                [clusters[i] for i in indices],
+                bootstrap_samples,
+                seed,
+                fractional,
             )
             for key, indices in sorted(groups.items())
         }

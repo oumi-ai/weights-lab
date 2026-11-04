@@ -722,4 +722,35 @@ def test_binary_rows_keep_mcnemar():
         for a, b in ((False, True), (True, True), (False, False))
     ]
     report = _paired_report(pairs, ["a", "b", "c"], 100, 0)
-    assert report["mcnemar_p"] == 1.0 and "permutation_p" not in report
+    assert report["mcnemar_p"] == 1.0 and report["permutation_p"] is None
+
+
+def test_permutation_test_flips_whole_document_clusters():
+    from oumi_weights_lab.evaluation import _observation, _paired_report, _sign_flip_p
+
+    before = [_fractional(0), _fractional(0), _fractional(4), _fractional(1)]
+    after = [_fractional(2), _fractional(2), _fractional(1), _fractional(1)]
+    pairs = [
+        (_observation(a, "sampled"), _observation(b, "sampled"))
+        for a, b in zip(before, after, strict=True)
+    ]
+    # Rows 0 and 1 share a document, so they flip together as one +1.0 change.
+    report = _paired_report(pairs, ["doc", "doc", "x", "y"], 500, 0, fractional=True)
+    assert report["permutation_p"] == _sign_flip_p([1.0, -0.75, 0.0], 500, 0)
+
+
+def test_small_permutation_tests_are_exact():
+    from oumi_weights_lab.evaluation import _sign_flip_p
+
+    # Two nonzero changes give four equally likely sign patterns; two are as extreme.
+    assert _sign_flip_p([0.5, 0.5], 10, 0) == 0.5
+    assert _sign_flip_p([0.5, -0.25, 0.0], 10, 0) == 1.0
+    assert _sign_flip_p([0.0, 0.0], 10, 0) == 1.0
+
+
+def test_binary_and_fractional_reports_share_one_shape():
+    from oumi_weights_lab.evaluation import _observation, _paired_report
+
+    pairs = [(_observation({"prediction": "x", "correct": True}, "sampled"),) * 2]
+    assert _paired_report(pairs, ["a"], 10, 0)["permutation_p"] is None
+    assert _paired_report(pairs, ["a"], 10, 0, fractional=True)["mcnemar_p"] is None

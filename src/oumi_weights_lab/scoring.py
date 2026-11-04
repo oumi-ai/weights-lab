@@ -89,27 +89,27 @@ def _pass_at_values(pass_at: Any, num_samples: int) -> list[int]:
 
 
 def _checker_call(checker: Any) -> Any:
-    """A grader taking (generated, answer, row); the row goes only to checkers that ask for it.
+    """A grader taking (generated, answer, row); the row goes only to checkers that name it.
 
-    A checker receives a copy of the row when its signature has a ``row``
-    parameter or ``**kwargs``; otherwise it is called as checker(generated, answer).
+    A checker receives a copy of the row only when its signature has a parameter
+    named ``row``. ``**kwargs`` alone does not count, so two-argument checkers that
+    forward keyword arguments keep working; everything else is called as
+    checker(generated, answer).
     """
     if checker is None:
         return None
     import inspect
 
     try:
-        parameters = inspect.signature(checker).parameters.values()
+        parameters = inspect.signature(checker).parameters
     except (TypeError, ValueError):  # Some builtins and C callables have no signature.
-        parameters = ()
-    takes_row = any(
-        parameter.kind is parameter.VAR_KEYWORD
-        or (parameter.name == "row" and parameter.kind is not parameter.VAR_POSITIONAL)
-        for parameter in parameters
-    )
-    if takes_row:
-        return lambda generated, answer, row: checker(generated, answer, row=copy.deepcopy(row))
-    return lambda generated, answer, row: checker(generated, answer)
+        parameters = {}
+    row = parameters.get("row")
+    if row is None or row.kind in (row.VAR_POSITIONAL, row.VAR_KEYWORD):
+        return lambda generated, answer, task: checker(generated, answer)
+    if row.kind is row.POSITIONAL_ONLY:
+        return lambda generated, answer, task: checker(generated, answer, copy.deepcopy(task))
+    return lambda generated, answer, task: checker(generated, answer, row=copy.deepcopy(task))
 
 
 def _graded(
@@ -131,6 +131,12 @@ def _graded(
         entry = {**sample, "correct": bool(correct)}
         if answer_key is not None:
             entry["key"] = answer_key(generated, copy.deepcopy(task))
+            try:
+                json.dumps(entry["key"], allow_nan=False)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f"answer_key must return JSON values; got {entry['key']!r}"
+                ) from error
         graded.append(entry)
     count = sum(entry["correct"] for entry in graded)
     if len(graded) == 1:
@@ -144,7 +150,6 @@ def _graded(
             "sample_seed": only["sample_seed"],
         }
     else:
-        # The row scores the fraction of its samples that were correct.
         fields = {
             "samples": graded,
             "prediction": None,
@@ -154,12 +159,15 @@ def _graded(
     if pass_ks:
         fields["pass_at"] = {str(k): pass_at_k(len(graded), count, k) for k in pass_ks}
     if answer_key is not None:
-        vote, tie = majority([entry["key"] for entry in graded])
+        # A key of None means the extractor found no answer: that sample abstains.
+        keys = [entry["key"] for entry in graded if entry["key"] is not None]
+        vote, tie = majority(keys) if keys else (None, False)
         fields.update(
             vote=vote,
             vote_tie=tie,
             # A tie names no answer, so it is never correct.
-            vote_correct=not tie
+            vote_correct=vote is not None
+            and not tie
             and any(entry["correct"] for entry in graded if entry["key"] == vote),
         )
         if len(graded) > 1:
@@ -728,8 +736,9 @@ class ScoringMixin(EvaluationMixin):
         sequences per forward (default 8), dropping to 1 for models without position
         ids and for padding-sensitive generation settings. Runs pair only when their
         recorded scoring_config matches.
-        The sampled checker receives
-        (generated_text, expected_answer); exact stripped equality is the default.
+        The sampled checker receives (generated_text, expected_answer), plus a copy
+        of the row when it names a ``row`` parameter; exact stripped equality is
+        the default.
         A held-out dataset requires an explicit max_passes and can be used only
         once, even after edits or a failed evaluation. Dev datasets cannot later
         become held-out datasets, and held-out datasets cannot become dev data.
@@ -741,7 +750,9 @@ class ScoringMixin(EvaluationMixin):
         PassBudget(max_passes)
         if isinstance(num_samples, bool) or not isinstance(num_samples, int) or num_samples < 1:
             raise ValueError("num_samples must be a positive integer")
-        if mode != "sampled" and (num_samples != 1 or pass_at is not None or answer_key):
+        if mode != "sampled" and (
+            num_samples != 1 or pass_at is not None or answer_key is not None
+        ):
             raise ValueError("num_samples, pass_at, and answer_key apply only to sampled mode")
         if answer_key is not None and not callable(answer_key):
             raise ValueError("answer_key must be callable")
@@ -838,11 +849,14 @@ class ScoringMixin(EvaluationMixin):
                 "correct": 0,
                 "accuracy": None,
                 "forward_passes": 0,
+                # Metrics set only on success start as unknown, so a failed run says so.
                 **(
                     {"truncation_share": None, "mean_generated_tokens": None}
                     if mode == "sampled"
                     else {}
                 ),
+                **({"pass_at": None} if pass_ks else {}),
+                **({"vote_accuracy": None} if answer_key is not None else {}),
             }
             write_json(run_dir / "summary.json", summary)
             try:

@@ -78,7 +78,11 @@ report = lab.compare_runs(before, after)
   `pass_at=[1, k]` adds unbiased pass@k per row and per run. With
   `answer_key(generated, row)`, each sample votes for the value it returns (JSON
   values only); the summary reports `vote_accuracy`, and a tie counts as
-  incorrect. A checker that takes `row` or `**kwargs` receives a copy of the
+  incorrect; a sample whose key is `None` abstains. With k>1, each item holds
+  its `samples` (each with `generated`, `correct`, `finish_reason`,
+  `generated_tokens`, `sample_seed`, and `key`), `correct_samples`, and the
+  fraction as `correct`; `prediction` is the vote, or `None` without an
+  `answer_key`. A checker that names a `row` parameter receives a copy of the
   row. A custom `answer_key`, like a custom checker, needs `checker_id` before
   runs can be compared.
 - Batching multiplies eager attention memory, so settle `batch_size` on dev rows
@@ -87,7 +91,9 @@ report = lab.compare_runs(before, after)
   need the same rows in the same order. `compare_runs` also checks row IDs and adds
   McNemar p-values, bootstrap intervals, and the largest movers. With several
   samples per row it reports a paired permutation test (`permutation_p`) on the
-  per-row fractions instead of McNemar. For sampled runs
+  per-row fractions instead of McNemar, flipping whole documents; it is exact
+  for up to 16 changed documents and estimated from `bootstrap_samples` random
+  flips beyond that. For sampled runs
   it also compares truncation share and mean generated length.
 - `evaluate_suite` and `compare_suites` gate a candidate on per-dataset accuracy and
   NLL tolerances. `create_screen` and `verify_screen` pin a stratified dev subset.

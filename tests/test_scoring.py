@@ -666,7 +666,7 @@ def test_checker_receives_a_copy_of_the_row_only_when_it_asks(tiny_lab, style):
         return True
 
     def with_kwargs(generated, answer, **kwargs):
-        seen.append(kwargs["row"]["prompt"])
+        seen.append(kwargs.get("row", "no row"))  # Forwarding **kwargs is not asking for row.
         return True
 
     def strict(generated, answer, strict=True):
@@ -681,8 +681,75 @@ def test_checker_receives_a_copy_of_the_row_only_when_it_asks(tiny_lab, style):
         checker=checker,
         checker_id=style,
     )
-    assert seen == ([True, True] if style == "strict" else ["hello", "hello world"])
+    expected = {"row": ["hello", "hello world"], "kwargs": ["no row"] * 2, "strict": [True] * 2}
+    assert seen == expected[style]
     assert [item["prompt"] for item in _items(summary)] == ["hello", "hello world"]
+
+
+def test_diff_labels_fractional_rows_by_direction(tiny_lab):
+    _several(tiny_lab, "base", 4)
+    path = tiny_lab.artifacts / "evaluations" / "base" / "items.jsonl"
+    items = [json.loads(line) for line in path.read_text().splitlines()]
+    row = next(i for i, item in enumerate(items) if item["correct"] >= 0.5)
+    _several(tiny_lab, "edited", 4)
+    edited = tiny_lab.artifacts / "evaluations" / "edited" / "items.jsonl"
+    changed = [json.loads(line) for line in edited.read_text().splitlines()]
+    changed[row]["correct"] = items[row]["correct"] - 0.25  # Falls, but stays above zero.
+    edited.write_text("".join(json.dumps(item) + "\n" for item in changed))
+    (change,) = tiny_lab.diff("base", "edited")
+    assert change["index"] == row and change["change"] == "regressed"
+
+
+def test_failed_several_sample_runs_report_unknown_pass_at_and_votes(tiny_lab):
+    with pytest.raises(BudgetExceeded):
+        _several(tiny_lab, "capped", 3, pass_at=[1], answer_key=first_word, max_passes=10)
+    summary = json.loads((tiny_lab.artifacts / "evaluations/capped/summary.json").read_text())
+    assert summary["pass_at"] is None and summary["vote_accuracy"] is None
+
+
+def test_unparsed_samples_abstain_from_the_vote(tiny_lab):
+    def parse_yes(generated, row):
+        return "yes" if "yes" in generated.split() else None
+
+    _, items = _several(tiny_lab, "abstain", 4, answer_key=parse_yes)
+    for item in items:
+        keys = [sample["key"] for sample in item["samples"]]
+        if all(key is None for key in keys):
+            assert item["vote"] is None and item["vote_correct"] is False
+        else:
+            assert item["vote"] == "yes" and not item["vote_tie"]
+
+
+def test_answer_key_results_must_be_json(tiny_lab):
+    with pytest.raises(ValueError, match="answer_key"):
+        _several(tiny_lab, "sets", 2, answer_key=lambda generated, row: {generated})
+
+
+def test_runs_saved_before_sample_counts_still_pair(tiny_lab):
+    _several(tiny_lab, "old", 1)
+    _several(tiny_lab, "new", 1)
+    path = tiny_lab.artifacts / "evaluations" / "old" / "summary.json"
+    summary = json.loads(path.read_text())
+    del summary["num_samples"], summary["answer_key_custom"]
+    path.write_text(json.dumps(summary))
+    tiny_lab.compare_runs("old", "new")
+    tiny_lab.diff("old", "new")
+
+
+def test_fractional_suite_gate_is_exact_at_the_tolerance(tiny_lab):
+    # Five samples per row (1/5 is not exact in binary), four rows: losing one sample on
+    # one row is a loss of exactly 1/5 / 4 = 0.05.
+    datasets = {"rows": {"data": SAMPLE_ROWS[:4], "mode": "sampled", "num_samples": 5}}
+    options = {"checker": has_yes, "checker_id": "has-yes", "generation_config": SAMPLING}
+    before = tiny_lab.evaluate_suite(datasets, name="before5", **options)
+    after = tiny_lab.evaluate_suite(datasets, name="after5", **options)
+    run = Path(after["datasets"]["rows"]["run_dir"])
+    items = [json.loads(line) for line in (run / "items.jsonl").read_text().splitlines()]
+    row = next(i for i, item in enumerate(items) if item["correct"] > 0)
+    items[row]["correct"] -= 1 / 5
+    (run / "items.jsonl").write_text("".join(json.dumps(item) + "\n" for item in items))
+    assert tiny_lab.compare_suites(before, after, accuracy_tolerance=0.05)["pass"] is True
+    assert tiny_lab.compare_suites(before, after, accuracy_tolerance=0.049)["pass"] is False
 
 
 def test_likelihood_scores_only_continuation_tokens_and_explicit_boundary(lab):
