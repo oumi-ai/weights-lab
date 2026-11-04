@@ -25,8 +25,13 @@ def layerwise_blocker(model: Any) -> str | None:
     if any(config.peft_type != "LORA" for config in model.peft_config.values()):
         return "only LoRA adapters merge layer by layer"
     base = model.get_base_model()
-    tied = getattr(getattr(base, "config", None), "tie_word_embeddings", False)
-    for embedding in (base.get_input_embeddings(), base.get_output_embeddings()):
+    embeddings = (base.get_input_embeddings(), base.get_output_embeddings())
+    weights = [_embedding_weight(embedding) for embedding in embeddings]
+    # Composite configs can leave the top-level flag unset while weights are shared.
+    tied = getattr(getattr(base, "config", None), "tie_word_embeddings", False) or (
+        weights[0] is not None and weights[0] is weights[1]
+    )
+    for embedding in embeddings:
         # Merging into a tied embedding unties it, which PEFT's own unload records.
         if tied and isinstance(embedding, (BaseTunerLayer, ModulesToSaveWrapper)):
             return "an adapter changes tied embeddings"
@@ -56,6 +61,18 @@ def layerwise_blocker(model: Any) -> str | None:
         ):
             return f"{name} is a {type(module).__name__}, which saves itself differently"
     return None
+
+
+def _embedding_weight(module: Any) -> Any:
+    """The weight an embedding or output head holds, under any adapter wrapping it."""
+    from peft.tuners.tuners_utils import BaseTunerLayer
+    from peft.utils import ModulesToSaveWrapper
+
+    if isinstance(module, BaseTunerLayer):
+        module = module.get_base_layer()
+    elif isinstance(module, ModulesToSaveWrapper):
+        module = module.original_module
+    return getattr(module, "weight", None)
 
 
 def merged_state_dict(model: Any) -> dict[str, Any]:

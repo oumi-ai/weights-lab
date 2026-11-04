@@ -248,3 +248,16 @@ def test_a_merge_that_replaces_weights_is_refused_and_undone(tmp_path, tiny_toke
         lab.export(tmp_path / "export")
     assert not (tmp_path / "export").exists()
     _assert_unchanged(lab.model, before)
+
+
+def test_embeddings_tied_without_the_config_flag_take_the_copy_path(tmp_path, tiny_tokenizer):
+    # Composite configs can leave the top-level flag unset while the weights are shared.
+    model = _llama(tie=False)
+    model.lm_head.weight = model.model.embed_tokens.weight
+    assert not model.config.tie_word_embeddings
+    lab = Lab(
+        _adapted(lambda: model, {"target_modules": ["embed_tokens"]}),
+        tiny_tokenizer,
+        tmp_path / "lab",
+    )
+    assert "tied embeddings" in layerwise_blocker(lab.model)
