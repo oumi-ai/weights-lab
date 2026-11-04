@@ -40,6 +40,17 @@ def _positions(value, positions):
 
 
 class InspectionMixin:
+    def lora_diagnostics(self, pattern="*", adapter=None, top_k=8):
+        """Measure scaled LoRA updates without materializing dense update matrices.
+
+        Return one JSON-compatible row per module and adapter. By default inspect
+        active adapters; a name or list of names selects adapters explicitly.
+        Multiple adapters are measured separately, never as their combined update.
+        """
+        from .diagnostics import lora_diagnostics
+
+        return lora_diagnostics(self.model, pattern, adapter, top_k)
+
     def patches(self):
         """Describe active activation interventions without retaining tensor copies."""
         return [dict(item) for item in getattr(self, "_patches", [])]
