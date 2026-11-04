@@ -91,20 +91,20 @@ def test_resume_carries_dev_and_failed_heldout_reservations(tmp_path):
     lab._score_rows = lambda tasks, batch_size: (
         (index, {"A": 0.0, "B": -1.0}) for index, _ in enumerate(tasks)
     )
-    lab.evaluate(dev, name="dev")
+    lab.evaluate(dev, name="dev", batch_size=1)
 
     def fail(*args, **kwargs):
         raise RuntimeError("grader failed")
 
     lab._score_rows = fail
     with pytest.raises(RuntimeError, match="grader"):
-        lab.evaluate(held, name="held", held_out=True, max_passes=2)
+        lab.evaluate(held, name="held", held_out=True, max_passes=2, batch_size=1)
     bundle = lab.save_edits("candidate")
     fresh = workspace(tmp_path / "new", base)
     fresh.load_edits(bundle)
     for rows, role in ((held, False), (held, True), (dev, True)):
         with pytest.raises(ValueError, match="reserved"):
-            fresh.evaluate(rows, held_out=role, max_passes=2)
+            fresh.evaluate(rows, held_out=role, max_passes=2, batch_size=1)
     assert json.loads((fresh.artifacts / "evaluations/_registry.json").read_text()) == json.loads(
         (lab.artifacts / "evaluations/_registry.json").read_text()
     )

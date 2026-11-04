@@ -260,12 +260,32 @@ class ScoringMixin(EvaluationMixin):
         ``batch_size=1`` scores each option alone, exactly as v0.1 did.
         """
         _check_batch_size(batch_size)
+        self._check_batching(batch_size)
         with self.limit_passes(max_passes), self._evaluation_mode():
             for _, scores in self._score_rows(
                 [{"prompt": prompt, "options": _choices(options)}], batch_size
             ):
                 return scores
         raise AssertionError("unreachable: one row always yields scores")
+
+    def _check_batching(self, batch_size: int) -> None:
+        """Refuse padded batches where left padding would change what a model or hook sees."""
+        if batch_size == 1:
+            return
+        from .inspection import _accepts
+
+        model = getattr(self, "model", None)
+        if model is not None and not _accepts(model, "position_ids"):
+            raise ValueError(
+                "batch_size>1 needs a model whose forward accepts position_ids; use batch_size=1"
+            )
+        same = "use batch_size=1 for this run and the runs you compare it with"
+        if any(item.active and item.mode == "logits" for item in getattr(self, "_attachments", [])):
+            raise ValueError(f"a logit attachment would see padded batches; {same}")
+        if getattr(self, "_absolute_position_hooks", None):
+            raise ValueError(
+                f"an active record or patch uses token positions that left padding shifts; {same}"
+            )
 
     def _scoring_config(self, mode: str, batch_size: int) -> dict[str, Any]:
         """Describe how a run scores, so only runs scored the same way pair."""
@@ -461,6 +481,7 @@ class ScoringMixin(EvaluationMixin):
         elif batch_size is None:
             batch_size = DEFAULT_BATCH_SIZE
         _check_batch_size(batch_size)
+        self._check_batching(batch_size)
         tasks, identities = _tasks(data, mode)
         if mode == "sampled":
             generate = getattr(getattr(self, "model", None), "generate", None)

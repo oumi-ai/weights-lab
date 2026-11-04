@@ -24,6 +24,14 @@ def _activation(output):
     return value
 
 
+def _absolute(positions):
+    """Whether any position counts from the sequence start, which left padding would shift."""
+    if positions is None:
+        return False
+    values = [positions] if isinstance(positions, int) else list(positions)
+    return any(isinstance(index, int) and index >= 0 for index in values)
+
+
 def _positions(value, positions):
     selected = (
         [-1]
@@ -110,6 +118,23 @@ class InspectionMixin:
 
         return lora_diagnostics(self.model, pattern, adapter, top_k)
 
+    @contextmanager
+    def _absolute_positions(self, positions):
+        """While active, mark a hook whose positions batched scoring's left padding would shift."""
+        if not _absolute(positions):
+            yield
+            return
+        if not hasattr(self, "_absolute_position_hooks"):
+            self._absolute_position_hooks = []
+        token = object()
+        self._absolute_position_hooks.append(token)
+        try:
+            yield
+        finally:
+            self._absolute_position_hooks = [
+                item for item in self._absolute_position_hooks if item is not token
+            ]
+
     def patches(self):
         """Describe active activation interventions without retaining tensor copies."""
         return [dict(item) for item in getattr(self, "_patches", [])]
@@ -136,7 +161,8 @@ class InspectionMixin:
                 # Track before registering so an interrupt cannot orphan the hook.
                 hooks.append(_TemporaryHook(target, capture))
                 hooks[-1].register()
-            yield captured
+            with self._absolute_positions(positions):
+                yield captured
         finally:
             for hook in hooks:
                 hook.remove()
@@ -180,7 +206,8 @@ class InspectionMixin:
         try:
             hook.register()
             self._patches.append(metadata)
-            yield
+            with self._absolute_positions(positions):
+                yield
         finally:
             hook.remove()
             for index, item in enumerate(self._patches):

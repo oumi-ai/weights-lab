@@ -309,6 +309,45 @@ def test_sampled_mode_rejects_batching_before_reserving_held_out_rows(lab):
     assert result["scoring_config"] == {"sampler": "hf-generate-v0.1", "batch_size": 1}
 
 
+def test_logit_attachment_refuses_batching(tiny_lab):
+    with tiny_lab.attach(lambda *_: torch.zeros(6), mode="logits"):
+        with pytest.raises(ValueError, match="batch_size=1"):
+            tiny_lab.score("hello", [" yes", " no"], batch_size=2)
+        assert set(tiny_lab.score("hello", [" yes", " no"], batch_size=1)) == {"A", "B"}
+
+
+@pytest.mark.parametrize("kind", ["patch", "record"])
+def test_absolute_positions_refuse_batching(tiny_lab, kind):
+    hook = (
+        tiny_lab.patch("transformer.h.0", lambda value: value, positions=[0])
+        if kind == "patch"
+        else tiny_lab.record("transformer.h.0", positions=[1])
+    )
+    with hook:
+        with pytest.raises(ValueError, match="batch_size=1"):
+            tiny_lab.score("hello", [" yes", " no"], batch_size=2)
+    tiny_lab.score("hello", [" yes", " no"], batch_size=2)  # Refusal ends with the hook.
+
+
+def test_negative_positions_batch_normally(tiny_lab):
+    with tiny_lab.patch("transformer.h.0", lambda value: value, positions=[-1]):
+        tiny_lab.score("hello", [" yes", " no"], batch_size=2)
+
+
+class NoPositionModel(ControlledModel):
+    def forward(self, input_ids, attention_mask=None):
+        return super().forward(input_ids, attention_mask)
+
+
+def test_model_without_position_ids_refuses_batching_before_reserving(tmp_path):
+    lab = ScoringLab(tmp_path, NoPositionModel())
+    with pytest.raises(ValueError, match="position_ids"):
+        lab.evaluate(tasks(), held_out=True, max_passes=10)
+    assert lab.model.calls == []
+    result = lab.evaluate(tasks(), held_out=True, max_passes=10, batch_size=1)
+    assert result["state"] == "succeeded"
+
+
 def test_likelihood_scores_only_continuation_tokens_and_explicit_boundary(lab):
     scores = lab.score("p", [" x", " y"], batch_size=1)
     expected_x = 2 * (4 - math.log(math.exp(4) + 5))
