@@ -1,0 +1,31 @@
+name: Feature Request
+description: Request a new feature for Oumi Weights Lab
+title: "[Feature] "
+labels: ["enhancement"]
+type: "Feature"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this feature request!
+  - type: textarea
+    id: feature-request
+    attributes:
+      label: Feature request
+      description: A clear and concise description of what you'd like the lab to do.
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation / references
+      description: |
+        The experiment or workflow this would enable. Link any relevant issues, PRs,
+        papers, or other resources.
+    validations:
+      required: true
+  - type: textarea
+    id: contribution
+    attributes:
+      label: Your contribution
+      description: Can you help with this feature request (submitting a PR, etc.)?

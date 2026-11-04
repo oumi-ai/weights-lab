@@ -1,0 +1,46 @@
+name: Bug Report
+description: Report a bug in Oumi Weights Lab
+title: "[Bug] "
+labels: ["bug"]
+type: "Bug"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report!
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you expected to happen, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction-steps
+    attributes:
+      label: Steps to reproduce the bug
+      description: |
+        Include the model, the commands or snippet that triggered the bug, and any
+        error messages or stack traces. If your agent was driving the lab, paste the
+        snippet it sent.
+      placeholder: |
+        1. oumi-weights-lab start --session sessions/bug --model HuggingFaceTB/SmolLM2-135M --device cpu
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: system-info
+    attributes:
+      label: System info
+      value: |
+        - Weights Lab version or commit:
+        - Installed via (Claude Code plugin, Codex plugin, uv tool, other):
+        - Coding agent and version:
+        - Operating system:
+        - Device (CPU, Apple MPS, NVIDIA GPU model):
+        - Python version:
+        - PyTorch version:
+        - Transformers version:
+    validations:
+      required: true
