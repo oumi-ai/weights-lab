@@ -10,7 +10,11 @@
 
 An agent skill and Python worker that let your coding agent experiment on an open
 language model: load it once, edit its weights reversibly, measure the effect, and
-export the result. Every snippet's source, output, and forward-pass count is saved.
+export the result. It is inspired by
+[weight-space programming](https://rikiyat.github.io/blog/weight-space-programming/)
+(Takehi, Teoh, Zhang, and Khattab), in which a general-purpose LLM reads and writes a
+network's weights directly instead of relying on an optimizer such as gradient
+descent. Every snippet's source, output, and forward-pass count is saved.
 Version 0.1 is experimental, and snippets run as trusted Python with your filesystem
 and network access.
 
