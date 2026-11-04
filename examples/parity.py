@@ -66,7 +66,14 @@ def run(output_dir: Path) -> dict:
     prompt_ids = lab.tokenizer.encode(prompt, add_special_tokens=False)
     continuation_ids = lab.tokenizer.encode(continuation, add_special_tokens=False)
     assert prompt_ids + continuation_ids == EXPECTED_IDS
-    score = lab.score(prompt, {"published_continuation": continuation})["published_continuation"]
+    # A shorter control option forces real left padding when both share one batch.
+    options = {"published_continuation": continuation, "short_control": " The"}
+    single = lab.score(prompt, options, batch_size=1)
+    batched = lab.score(prompt, options, batch_size=8)
+    batch_difference = max(abs(batched[label] - single[label]) for label in options)
+    if batch_difference > 1e-4:
+        raise AssertionError(f"padded batch differs from batch_size=1 by {batch_difference}")
+    score = single["published_continuation"]
     input_ids = torch.tensor([prompt_ids + continuation_ids], device=lab.device)
     labels = input_ids.clone()
     labels[:, : len(prompt_ids)] = -100
@@ -94,6 +101,8 @@ def run(output_dir: Path) -> dict:
         "hf_mean_continuation_loss": mean_loss,
         "hf_reference_score": reference_score,
         "absolute_score_difference": difference,
+        "batched_continuation_score": batched["published_continuation"],
+        "batched_vs_single_max_difference": batch_difference,
         "forward_passes": lab.forward_passes,
         "scope": "published generation tokens and implementation likelihood parity; no benchmark",
     }

@@ -1,5 +1,6 @@
 import json
 import math
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -31,6 +32,7 @@ class ControlledModel(torch.nn.Module):
         self.table[1, 2] = 4
         self.table[2, 3] = 4
         self.calls = []
+        self.call_kwargs = []
         self.fail = False
         self.dropout = torch.nn.Dropout(0.1)
 
@@ -38,11 +40,19 @@ class ControlledModel(torch.nn.Module):
     def device(self):
         return self.table.device
 
-    def forward(self, input_ids, attention_mask=None):
+    def forward(self, input_ids, attention_mask=None, position_ids=None, logits_to_keep=0):
         self.calls.append((input_ids.tolist(), self.training, torch.is_grad_enabled()))
+        self.call_kwargs.append(
+            {
+                "attention_mask": None if attention_mask is None else attention_mask.tolist(),
+                "position_ids": None if position_ids is None else position_ids.tolist(),
+                "logits_to_keep": logits_to_keep,
+            }
+        )
         if self.fail:
             raise RuntimeError("intentional forward failure")
-        return SimpleNamespace(logits=self.table[input_ids])
+        logits = self.table[input_ids]
+        return SimpleNamespace(logits=logits[:, -logits_to_keep:] if logits_to_keep else logits)
 
     def generate(self, input_ids, attention_mask=None, max_new_tokens=2, do_sample=False, **kwargs):
         ids = input_ids
@@ -164,8 +174,196 @@ def test_sampled_evaluate_with_beams_fits_a_greedy_sized_cap(tiny_lab):
     assert result["forward_passes"] == 3
 
 
+BATCH_ROWS = [
+    {"prompt": "hello", "options": {"A": " yes", "B": " no"}},
+    {"prompt": "hello world", "options": {"A": " yes no", "B": " no"}},
+    {"prompt": "world hello world", "options": {"A": " no yes no", "B": " yes", "C": " world"}},
+]
+
+
+def _scores(lab, rows, batch_size):
+    with lab._evaluation_mode():
+        return [scores for _, scores in lab._score_rows(rows, batch_size)]
+
+
+@pytest.mark.parametrize("batch_size", [2, 3, 8])
+def test_batched_scores_match_unbatched(tiny_lab, batch_size):
+    reference = _scores(tiny_lab, BATCH_ROWS, 1)
+    batched = _scores(tiny_lab, BATCH_ROWS, batch_size)
+    for expected, actual in zip(reference, batched, strict=True):
+        assert actual.keys() == expected.keys()
+        assert actual == pytest.approx(expected, abs=1e-5)
+        assert max(actual, key=actual.get) == max(expected, key=expected.get)
+
+
+def test_repeat_batched_scores_are_bitwise_identical(tiny_lab):
+    assert _scores(tiny_lab, BATCH_ROWS, 8) == _scores(tiny_lab, BATCH_ROWS, 8)
+
+
+def test_passes_equal_options_at_every_batch_size(tiny_lab):
+    for batch_size in (1, 2, 8):
+        before = tiny_lab.forward_passes
+        _scores(tiny_lab, BATCH_ROWS, batch_size)
+        assert tiny_lab.forward_passes - before == 7
+
+
+def test_batch_size_one_is_the_v01_call(lab):
+    lab.score("p", [" x", " y"], batch_size=1)
+    assert lab.model.calls[0][0] == [[0, 1, 2, 3]] and lab.model.calls[1][0] == [[0, 1, 4]]
+    for kwargs in lab.model.call_kwargs:
+        assert kwargs["position_ids"] is None and kwargs["logits_to_keep"] == 0
+        assert all(value == 1 for value in kwargs["attention_mask"][0])
+
+
+def test_padded_batch_left_pads_and_keeps_only_answer_logits(lab):
+    scores = lab.score("p", [" x", " y"], batch_size=8)
+    assert lab.model.calls[0][0] == [[0, 1, 2, 3], [0, 0, 1, 4]]
+    kwargs = lab.model.call_kwargs[0]
+    assert kwargs["attention_mask"] == [[1, 1, 1, 1], [0, 1, 1, 1]]
+    assert kwargs["position_ids"] == [[0, 1, 2, 3], [0, 0, 1, 2]]
+    assert kwargs["logits_to_keep"] == 3
+    assert scores == pytest.approx(lab.score("p", [" x", " y"], batch_size=1), abs=1e-6)
+
+
+def test_rows_pack_whole_in_order_and_split_only_when_too_big(lab):
+    rows = [
+        {"prompt": "p", "options": {"A": " x", "B": " y"}},
+        {"prompt": "p", "options": {"A": " y", "B": " z"}},
+        {"prompt": "", "options": {"A": " x", "B": " y", "C": " z"}},
+    ]
+    _scores(lab, rows, 4)
+    assert [len(ids) for ids, _, _ in lab.model.calls] == [4, 3]
+    lab.model.calls.clear()
+    split = _scores(lab, rows, 2)
+    assert [len(ids) for ids, _, _ in lab.model.calls] == [2, 2, 2, 1]
+    for actual, expected in zip(split, _scores(lab, rows, 1), strict=True):
+        assert list(actual) == list(expected)
+        assert actual == pytest.approx(expected, abs=1e-6)
+
+
+def test_cap_smaller_than_a_batch_raises_before_running(lab):
+    with pytest.raises(BudgetExceeded):
+        lab.score("p", [" x", " y"], max_passes=1, batch_size=8)
+    assert lab.model.calls == []
+
+
+def _items(summary):
+    lines = (Path(summary["run_dir"]) / "items.jsonl").read_text().splitlines()
+    return [json.loads(line) for line in lines]
+
+
+def test_evaluate_records_scoring_config_and_option_tokens(lab):
+    batched = lab.evaluate(tasks(), name="batched")
+    assert batched["scoring_config"] == {
+        "scorer": "flat-left-pad-v1",
+        "batch_size": 8,
+        "padding_side": "left",
+        "logits": "last_k",
+    }
+    assert _items(batched)[0]["option_tokens"] == {"A": 2, "B": 1}
+    single = lab.evaluate(tasks(), name="single", batch_size=1)
+    assert single["scoring_config"] == {
+        "scorer": "flat-left-pad-v1",
+        "batch_size": 1,
+        "padding_side": "none",
+        "logits": "full",
+    }
+    assert _items(single)[0]["scores"] == pytest.approx(_items(batched)[0]["scores"], abs=1e-6)
+
+
+def test_runs_with_different_batch_sizes_refuse_to_pair(lab):
+    batched = lab.evaluate(tasks(), name="batched")
+    single = lab.evaluate(tasks(), name="single", batch_size=1)
+    with pytest.raises(ValueError, match="scoring_config"):
+        lab.diff(batched, single)
+    with pytest.raises(ValueError, match="scoring_config"):
+        lab.compare_runs(batched, single)
+
+
+def test_legacy_run_without_scoring_config_refuses_with_a_clear_message(lab):
+    current = lab.evaluate(tasks(), name="current")
+    legacy = lab.evaluate(tasks(), name="legacy")
+    path = Path(legacy["run_dir"]) / "summary.json"
+    summary = json.loads(path.read_text())
+    del summary["scoring_config"]
+    path.write_text(json.dumps(summary))
+    with pytest.raises(ValueError, match="legacy-v0.1"):
+        lab.diff(current, legacy)
+
+
+def test_sampled_mode_rejects_batching_before_reserving_held_out_rows(lab):
+    rows = [{"prompt": "p", "answer": "2 3"}]
+    config = {"max_new_tokens": 2}
+    with pytest.raises(ValueError, match="batch_size"):
+        lab.evaluate(
+            rows,
+            mode="sampled",
+            batch_size=2,
+            held_out=True,
+            max_passes=4,
+            generation_config=config,
+        )
+    result = lab.evaluate(
+        rows, name="single", mode="sampled", held_out=True, max_passes=4, generation_config=config
+    )
+    assert result["scoring_config"] == {"sampler": "hf-generate-v0.1", "batch_size": 1}
+
+
+def test_logit_attachment_refuses_batching(tiny_lab):
+    with tiny_lab.attach(lambda *_: torch.zeros(6), mode="logits"):
+        with pytest.raises(ValueError, match="batch_size=1"):
+            tiny_lab.score("hello", [" yes", " no"], batch_size=2)
+        assert set(tiny_lab.score("hello", [" yes", " no"], batch_size=1)) == {"A", "B"}
+
+
+@pytest.mark.parametrize("kind", ["patch", "record"])
+def test_absolute_positions_refuse_batching(tiny_lab, kind):
+    hook = (
+        tiny_lab.patch("transformer.h.0", lambda value: value, positions=[0])
+        if kind == "patch"
+        else tiny_lab.record("transformer.h.0", positions=[1])
+    )
+    with hook:
+        with pytest.raises(ValueError, match="batch_size=1"):
+            tiny_lab.score("hello", [" yes", " no"], batch_size=2)
+    tiny_lab.score("hello", [" yes", " no"], batch_size=2)  # Refusal ends with the hook.
+
+
+def test_negative_positions_batch_normally(tiny_lab):
+    with tiny_lab.patch("transformer.h.0", lambda value: value, positions=[-1]):
+        tiny_lab.score("hello", [" yes", " no"], batch_size=2)
+
+
+class NoPositionModel(ControlledModel):
+    def forward(self, input_ids, attention_mask=None):
+        return super().forward(input_ids, attention_mask)
+
+
+def test_model_without_position_ids_defaults_to_one_and_refuses_explicit_batching(tmp_path):
+    lab = ScoringLab(tmp_path, NoPositionModel())
+    with pytest.raises(ValueError, match="position_ids"):
+        lab.evaluate(tasks(), held_out=True, max_passes=10, batch_size=8)
+    assert lab.model.calls == []
+    result = lab.evaluate(tasks(), held_out=True, max_passes=10)
+    assert result["state"] == "succeeded"
+    assert result["scoring_config"]["batch_size"] == 1
+    assert set(lab.score("p", [" x", " y"])) == {"A", "B"}
+
+
+def test_negative_position_deeper_than_a_short_row_raises_like_batch_one(tiny_lab):
+    options = [" yes", " no world hello world yes"]
+    with tiny_lab.patch("transformer.h.0", lambda value: value, positions=[-5]):
+        with pytest.raises(ValueError, match="outside the module output"):
+            tiny_lab.score("hello", options, batch_size=1)
+        with pytest.raises(ValueError, match="outside the module output"):
+            tiny_lab.score("hello", options, batch_size=8)
+    with tiny_lab.record("transformer.h.0", positions=-5):
+        with pytest.raises(ValueError, match="outside the module output"):
+            tiny_lab.score("hello", options, batch_size=8)
+
+
 def test_likelihood_scores_only_continuation_tokens_and_explicit_boundary(lab):
-    scores = lab.score("p", [" x", " y"])
+    scores = lab.score("p", [" x", " y"], batch_size=1)
     expected_x = 2 * (4 - math.log(math.exp(4) + 5))
     expected_y = -math.log(math.exp(4) + 5)
     assert scores == pytest.approx({"A": expected_x, "B": expected_y}, abs=1e-6)
@@ -202,7 +400,7 @@ def test_scoring_restores_each_modules_training_flag(lab):
 
 
 def test_empty_prompt_uses_bos_and_missing_special_token_is_rejected(lab):
-    lab.score("", {"answer": " x"})
+    lab.score("", {"answer": " x"}, batch_size=1)
     assert lab.model.calls[0][0] == [[0, 2, 3]]
     lab.tokenizer.bos_token_id = lab.tokenizer.eos_token_id = None
     with pytest.raises(ValueError, match="BOS or EOS"):
@@ -285,7 +483,7 @@ def test_dev_data_cannot_be_reclassified_as_held_out(lab):
 
 def test_budget_failure_is_auditable_and_consumes_held_out_reservation(lab):
     with pytest.raises(BudgetExceeded):
-        lab.evaluate(tasks(), name="too-small", held_out=True, max_passes=1)
+        lab.evaluate(tasks(), name="too-small", held_out=True, max_passes=1, batch_size=1)
     summary = json.loads((lab.artifacts / "evaluations/too-small/summary.json").read_text())
     assert summary["state"] == "failed"
     assert summary["accuracy"] is None
@@ -297,7 +495,8 @@ def test_budget_failure_is_auditable_and_consumes_held_out_reservation(lab):
 
 def test_partial_run_failure_never_reports_partial_accuracy(lab):
     with pytest.raises(BudgetExceeded):
-        lab.evaluate(tasks() + tasks(), name="partial", max_passes=2)
+        # Two-sequence batches: the first row's batch runs, the second is refused whole.
+        lab.evaluate(tasks() + tasks(), name="partial", max_passes=2, batch_size=2)
     summary = json.loads((lab.artifacts / "evaluations/partial/summary.json").read_text())
     assert summary["state"] == "failed"
     assert summary["correct"] == summary["completed"] == 1
@@ -395,10 +594,10 @@ def test_package_does_not_export_a_forwarding_scorer():
 
 
 def test_prompt_attachments_affect_scores_without_changing_dataset_identity(lab):
-    baseline = lab.evaluate(tasks(), name="baseline")
+    baseline = lab.evaluate(tasks(), name="baseline", batch_size=1)
     lab._prepare_prompt = lambda prompt: ""
     lab.attachments = lambda: [{"name": "empty-prompt"}]
-    modified = lab.evaluate(tasks(), name="modified")
+    modified = lab.evaluate(tasks(), name="modified", batch_size=1)
     assert baseline["dataset_hash"] == modified["dataset_hash"]
     assert modified["attachments"] == [{"name": "empty-prompt"}]
     assert lab.model.calls[-2][0] == [[0, 2, 3]]

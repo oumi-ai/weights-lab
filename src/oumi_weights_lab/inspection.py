@@ -24,6 +24,26 @@ def _activation(output):
     return value
 
 
+def _listed(positions):
+    """Positions as given, with an iterable read once so every hook call sees the same list."""
+    if positions is None or isinstance(positions, int):
+        return positions
+    try:
+        return list(positions)
+    except TypeError:
+        return positions  # _positions reports the invalid value on the first forward.
+
+
+def _integer_positions(positions):
+    """The integer positions a hook will select, for batched scoring's padding checks."""
+    if positions is None:
+        return [-1]
+    values = [positions] if isinstance(positions, int) else positions
+    if not isinstance(values, list):
+        return []
+    return [index for index in values if isinstance(index, int) and not isinstance(index, bool)]
+
+
 def _positions(value, positions):
     selected = (
         [-1]
@@ -86,11 +106,16 @@ class _TemporaryHook:
             self.handle.remove()
 
 
-def _accepts_position_ids(model):
+def _accepts(model, name):
+    """Whether the base model's forward takes a keyword argument called ``name``."""
     import inspect
 
     base = model.get_base_model() if hasattr(model, "peft_config") else model
-    return "position_ids" in inspect.signature(base.forward).parameters
+    return name in inspect.signature(base.forward).parameters
+
+
+def _accepts_position_ids(model):
+    return _accepts(model, "position_ids")
 
 
 class InspectionMixin:
@@ -105,6 +130,19 @@ class InspectionMixin:
 
         return lora_diagnostics(self.model, pattern, adapter, top_k)
 
+    @contextmanager
+    def _track_positions(self, positions):
+        """List an active hook's positions so batched scoring can refuse padding that moves them."""
+        entry = (object(), _integer_positions(positions))
+        if not hasattr(self, "_position_hooks"):
+            self._position_hooks = []
+        try:
+            # Inside try: a timeout right after appending still removes the entry.
+            self._position_hooks.append(entry)
+            yield
+        finally:
+            self._position_hooks = [item for item in self._position_hooks if item is not entry]
+
     def patches(self):
         """Describe active activation interventions without retaining tensor copies."""
         return [dict(item) for item in getattr(self, "_patches", [])]
@@ -113,6 +151,7 @@ class InspectionMixin:
     def record(self, modules, positions=None):
         """Capture selected output positions as detached CPU tensors for each call."""
         _eager(self.model)
+        positions = _listed(positions)
         names = [modules] if isinstance(modules, str) else list(modules)
         if not names or len(set(names)) != len(names):
             raise ValueError("choose a nonempty list of distinct module names")
@@ -131,7 +170,8 @@ class InspectionMixin:
                 # Track before registering so an interrupt cannot orphan the hook.
                 hooks.append(_TemporaryHook(target, capture))
                 hooks[-1].register()
-            yield captured
+            with self._track_positions(positions):
+                yield captured
         finally:
             for hook in hooks:
                 hook.remove()
@@ -146,6 +186,7 @@ class InspectionMixin:
         import torch
 
         _eager(self.model)
+        positions = _listed(positions)
         target = self.model.get_submodule(module)
 
         def replace(hooked, inputs, output):
@@ -175,7 +216,8 @@ class InspectionMixin:
         try:
             hook.register()
             self._patches.append(metadata)
-            yield
+            with self._track_positions(positions):
+                yield
         finally:
             hook.remove()
             for index, item in enumerate(self._patches):

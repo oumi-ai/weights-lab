@@ -12,7 +12,8 @@ def test_logit_attachment_changes_scores_then_removes_exactly(tiny_lab):
         with lab.attach(lambda *_: torch.tensor([0.0, 0.0, 0.0, 0.0, 10.0, 0.0]), name="yes-bias"):
             changed = lab.model(**inputs).logits
             torch.testing.assert_close(changed[..., 4], baseline[..., 4] + 10)
-            assert lab.score("hello", ["yes", "no"])["A"] > lab.score("hello", ["yes", "no"])["B"]
+            scores = lab.score("hello", ["yes", "no"], batch_size=1)
+            assert scores["A"] > scores["B"]
             assert lab.attachments()[0]["name"] == "yes-bias"
             with pytest.raises(ValueError, match="attachment"):
                 lab.export("attached")

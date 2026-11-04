@@ -5,6 +5,7 @@ import copy
 import json
 import math
 import unicodedata
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,14 @@ class OfflineLab(ScoringMixin):
             self._before_forward()
             self._forward_passes += 1
         return self.scores.get(prompt, {"A": 0.0, "B": -2.0}).copy()
+
+    @contextmanager
+    def _evaluation_mode(self):
+        yield
+
+    def _score_rows(self, tasks, batch_size):
+        for index, task in enumerate(tasks):
+            yield index, self.score(task["prompt"], task["options"])
 
     def _sample(self, prompt, generation_config, seed):
         return "A"

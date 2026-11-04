@@ -15,7 +15,8 @@ import json
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,50 @@ _SAMPLING_RANGES = {
     "typical_p": (lambda value: 0 < value <= 1, "must be in (0, 1]"),
     "min_p": (lambda value: 0 <= value <= 1, "must be in [0, 1]"),
 }
+
+
+DEFAULT_BATCH_SIZE = 8
+
+
+def _check_batch_size(batch_size: Any) -> None:
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+        raise ValueError("batch_size must be a positive integer")
+
+
+def _pack(rows: list[list[Any]], batch_size: int) -> Iterator[list[Any]]:
+    """Group rows' sequences into batches: whole rows in order, splitting only oversized rows."""
+    batch: list[Any] = []
+    for row in rows:
+        if len(row) > batch_size:
+            if batch:
+                yield batch
+                batch = []
+            for start in range(0, len(row), batch_size):
+                yield row[start : start + batch_size]
+            continue
+        if len(batch) + len(row) > batch_size:
+            yield batch
+            batch = []
+        batch.extend(row)
+    if batch:
+        yield batch
+
+
+def _summed(logits: Any, answer_ids: list[int]) -> float:
+    """Sum the answer tokens' log probabilities from the logits that predict them."""
+    import torch
+
+    logits = logits.float()
+    target = torch.tensor(answer_ids, device=logits.device)
+    return float(logits.log_softmax(-1).gather(-1, target[:, None]).squeeze(-1).sum().item())
+
+
+def _pad_token(tokenizer: Any) -> int:
+    for name in ("pad_token_id", "eos_token_id"):
+        token = getattr(tokenizer, name, None)
+        if token is not None:
+            return int(token)
+    return 0
 
 
 def _generation_kwargs(
@@ -202,23 +247,156 @@ class ScoringMixin(EvaluationMixin):
                     raise ValueError("options must encode to distinct token sequences")
 
     def score(
-        self, prompt: str, options: list[str] | dict[str, str], *, max_passes: int | None = None
+        self,
+        prompt: str,
+        options: list[str] | dict[str, str],
+        *,
+        max_passes: int | None = None,
+        batch_size: int | None = None,
     ) -> dict[str, float]:
-        """Return summed continuation log probabilities using the module's token-boundary policy."""
+        """Return summed continuation log probabilities using the module's token-boundary policy.
+
+        Options are scored in left-padded batches of up to ``batch_size`` sequences
+        (default 8, or 1 for a model that cannot take position ids); ``batch_size=1``
+        scores each option alone, exactly as v0.1 did.
+        """
+        batch_size = self._default_batch_size() if batch_size is None else batch_size
+        _check_batch_size(batch_size)
+        self._check_batching(batch_size)
+        with self.limit_passes(max_passes), self._evaluation_mode():
+            for _, scores in self._score_rows(
+                [{"prompt": prompt, "options": _choices(options)}], batch_size
+            ):
+                return scores
+        raise AssertionError("unreachable: one row always yields scores")
+
+    def _takes_position_ids(self) -> bool:
+        from .inspection import _accepts
+
+        model = getattr(self, "model", None)
+        return model is None or _accepts(model, "position_ids")
+
+    def _default_batch_size(self) -> int:
+        """Batch by default only where left padding can be corrected with position ids."""
+        return DEFAULT_BATCH_SIZE if self._takes_position_ids() else 1
+
+    def _hook_positions(self) -> list[int]:
+        return [index for _, indices in getattr(self, "_position_hooks", []) for index in indices]
+
+    def _check_batching(self, batch_size: int) -> None:
+        """Refuse padded batches where left padding would change what a model or hook sees."""
+        if batch_size == 1:
+            return
+        if not self._takes_position_ids():
+            raise ValueError(
+                "batch_size>1 needs a model whose forward accepts position_ids; use batch_size=1"
+            )
+        same = "use batch_size=1 for this run and the runs you compare it with"
+        if any(item.active and item.mode == "logits" for item in getattr(self, "_attachments", [])):
+            raise ValueError(f"a logit attachment would see padded batches; {same}")
+        if any(index >= 0 for index in self._hook_positions()):
+            raise ValueError(
+                f"an active record or patch uses token positions that left padding shifts; {same}"
+            )
+
+    def _scoring_config(self, mode: str, batch_size: int) -> dict[str, Any]:
+        """Describe how a run scores, so only runs scored the same way pair."""
+        if mode == "sampled":
+            return {"sampler": "hf-generate-v0.1", "batch_size": 1}
+        from .inspection import _accepts
+
+        model = getattr(self, "model", None)
+        keeps = batch_size > 1 and model is not None and _accepts(model, "logits_to_keep")
+        return {
+            "scorer": "flat-left-pad-v1",
+            "batch_size": batch_size,
+            "padding_side": "left" if batch_size > 1 else "none",
+            "logits": "last_k" if keeps else "full",
+        }
+
+    def _option_tokens(self, options: dict[str, str]) -> dict[str, int]:
+        return {
+            label: len(self.tokenizer.encode(text, add_special_tokens=False))
+            for label, text in options.items()
+        }
+
+    def _score_rows(
+        self, tasks: list[dict[str, Any]], batch_size: int
+    ) -> Iterator[tuple[int, dict[str, float]]]:
+        """Yield each row's option scores, in row order, as soon as the row is complete.
+
+        Whole rows are packed in order while they fit within ``batch_size``
+        sequences; a row with more options than that is split across forwards.
+        Batches are never reordered, so the same rows and batch size always run
+        the same forwards.
+        """
+        sequences = []
+        for index, task in enumerate(tasks):
+            prompt_ids, answers = self._encode(task["prompt"], task["options"])
+            sequences.append(
+                [(index, label, prompt_ids, answer_ids) for label, answer_ids in answers.items()]
+            )
+        pending: dict[int, dict[str, float]] = {}
+        remaining = {index: len(row) for index, row in enumerate(sequences)}
+        next_row = 0
+        for batch in _pack(sequences, batch_size):
+            values = self._score_batch(
+                [(prompt_ids, answer_ids) for _, _, prompt_ids, answer_ids in batch],
+                padded=batch_size > 1,
+            )
+            for (index, label, _, _), value in zip(batch, values, strict=True):
+                pending.setdefault(index, {})[label] = value
+                remaining[index] -= 1
+            while next_row < len(sequences) and remaining[next_row] == 0:
+                # Return labels in the row's option order, however its batches were split.
+                order = [label for _, label, _, _ in sequences[next_row]]
+                row_scores = pending.pop(next_row)
+                yield next_row, {label: row_scores[label] for label in order}
+                next_row += 1
+
+    def _score_batch(
+        self, batch: list[tuple[list[int], list[int]]], *, padded: bool
+    ) -> list[float]:
+        """Run one forward over (prompt, answer) token pairs and sum each answer's log probs."""
         import torch
 
-        prompt_ids, answers = self._encode(prompt, _choices(options))
-        scores = {}
-        with self.limit_passes(max_passes), self._evaluation_mode():
-            for label, answer_ids in answers.items():
-                ids = torch.tensor([prompt_ids + answer_ids], device=self.model.device)
-                output = self.model(input_ids=ids, attention_mask=torch.ones_like(ids))
-                start = len(prompt_ids) - 1
-                logits = output.logits[0, start : start + len(answer_ids)].float()
-                target = torch.tensor(answer_ids, device=logits.device)
-                token_scores = logits.log_softmax(-1).gather(-1, target[:, None]).squeeze(-1)
-                scores[label] = float(token_scores.sum().item())
-        return scores
+        from .inspection import _accepts
+
+        device = self.model.device
+        if not padded:
+            ((prompt_ids, answer_ids),) = batch
+            ids = torch.tensor([prompt_ids + answer_ids], device=device)
+            output = self.model(input_ids=ids, attention_mask=torch.ones_like(ids))
+            start = len(prompt_ids) - 1
+            return [_summed(output.logits[0, start : start + len(answer_ids)], answer_ids)]
+        length = max(len(prompt_ids) + len(answer_ids) for prompt_ids, answer_ids in batch)
+        shortest = min(len(prompt_ids) + len(answer_ids) for prompt_ids, answer_ids in batch)
+        # A negative hook position past a short sequence would select left padding;
+        # refuse it the way an unpadded forward does.
+        if any(-index > shortest for index in self._hook_positions() if index < 0):
+            raise ValueError("token position is outside the module output")
+        keep = max(len(answer_ids) for _, answer_ids in batch) + 1
+        pad = _pad_token(self.tokenizer)
+        rows, masks = [], []
+        for prompt_ids, answer_ids in batch:
+            padding = length - len(prompt_ids) - len(answer_ids)
+            rows.append([pad] * padding + prompt_ids + answer_ids)
+            masks.append([0] * padding + [1] * (length - padding))
+        ids = torch.tensor(rows, device=device)
+        mask = torch.tensor(masks, device=device)
+        inputs = {
+            "input_ids": ids,
+            "attention_mask": mask,
+            "position_ids": (mask.cumsum(-1) - 1).clamp(min=0),
+        }
+        if _accepts(self.model, "logits_to_keep"):
+            inputs["logits_to_keep"] = keep
+        # Left padding ends every answer at the right edge, so the last `keep` logits cover all.
+        logits = self.model(**inputs).logits[:, -keep:]
+        return [
+            _summed(logits[row, keep - len(answer_ids) - 1 : keep - 1], answer_ids)
+            for row, (_, answer_ids) in enumerate(batch)
+        ]
 
     @contextmanager
     def _prompts_prepared_once(self):
@@ -286,10 +464,14 @@ class ScoringMixin(EvaluationMixin):
         checker_id: str | None = None,
         generation_config: dict[str, Any] | None = None,
         seed: int = 0,
+        batch_size: int | None = None,
     ) -> dict[str, Any]:
         """Save per-item results and a summary; failures are saved and then re-raised.
 
-        Modes are likelihood, yes_no, and sampled. The sampled checker receives
+        Modes are likelihood, yes_no, and sampled. Likelihood modes score up to
+        ``batch_size`` sequences per forward (default 8); sampled mode runs one row
+        at a time. Runs pair only when their recorded scoring_config matches.
+        The sampled checker receives
         (generated_text, expected_answer); exact stripped equality is the default.
         A held-out dataset requires an explicit max_passes and can be used only
         once, even after edits or a failed evaluation. Dev datasets cannot later
@@ -309,6 +491,14 @@ class ScoringMixin(EvaluationMixin):
         if generation_config is not None and not isinstance(generation_config, dict):
             raise ValueError("generation_config must be a dictionary")
         json.dumps(generation_config or {}, allow_nan=False)
+        if mode == "sampled":
+            if batch_size not in (None, 1):
+                raise ValueError("sampled mode scores one row at a time; use batch_size=1")
+            batch_size = 1
+        elif batch_size is None:
+            batch_size = self._default_batch_size()
+        _check_batch_size(batch_size)
+        self._check_batching(batch_size)
         tasks, identities = _tasks(data, mode)
         if mode == "sampled":
             generate = getattr(getattr(self, "model", None), "generate", None)
@@ -354,6 +544,7 @@ class ScoringMixin(EvaluationMixin):
                 "checker_id": checker_id,
                 "seed": seed,
                 "generation_config": generation_config or {},
+                "scoring_config": self._scoring_config(mode, batch_size),
                 "tokenizer_policy": "separate_prompt_continuation_no_special_tokens_sum",
                 "max_passes": max_passes,
                 "started_at": started,
@@ -370,7 +561,9 @@ class ScoringMixin(EvaluationMixin):
                 with (
                     self.limit_passes(max_passes),
                     (run_dir / "items.jsonl").open("x", encoding="utf-8") as stream,
+                    nullcontext() if mode == "sampled" else self._evaluation_mode(),
                 ):
+                    scored = None if mode == "sampled" else self._score_rows(tasks, batch_size)
                     for index, task in enumerate(tasks):
                         item = {"index": index, **task}
                         if mode == "sampled":
@@ -386,7 +579,9 @@ class ScoringMixin(EvaluationMixin):
                                 generated=generated, prediction=generated, correct=bool(correct)
                             )
                         else:
-                            scores = self.score(task["prompt"], task["options"])
+                            row, scores = next(scored)
+                            if row != index:
+                                raise AssertionError("rows were scored out of order")
                             best = max(scores.values())
                             leaders = [label for label, value in scores.items() if value == best]
                             # An exact tie names no prediction, so it is never correct.
@@ -396,6 +591,7 @@ class ScoringMixin(EvaluationMixin):
                                 prediction=prediction,
                                 tie=prediction is None,
                                 correct=prediction == task["answer"],
+                                option_tokens=self._option_tokens(task["options"]),
                             )
                         stream.write(json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n")
                         stream.flush()

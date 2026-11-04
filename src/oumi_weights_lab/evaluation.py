@@ -36,7 +36,23 @@ PROTOCOL_KEYS = (
     "tokenizer_policy",
     "checker_custom",
     "checker_id",
+    "scoring_config",
 )
+# Runs saved before scoring configs were recorded scored one sequence per forward.
+LEGACY_SCORING_CONFIG = "legacy-v0.1"
+
+
+def _protocol_difference(left: dict, right: dict) -> str | None:
+    """Name the first protocol setting two run summaries disagree on, or None."""
+    for key in PROTOCOL_KEYS:
+        a, b = left.get(key), right.get(key)
+        if key == "scoring_config":
+            a, b = a or LEGACY_SCORING_CONFIG, b or LEGACY_SCORING_CONFIG
+        if a != b:
+            return f"{key} differs: {a!r} vs {b!r}"
+    return None
+
+
 # Fields that name a row's source document, checked in this order for bootstrap clusters.
 DOCUMENT_FIELDS = (
     "source_document",
@@ -252,8 +268,9 @@ class EvaluationMixin:
             raise ValueError("diff requires the same session, dataset, and scoring mode")
         _, left_tasks, left_items = _read_run(self, before)
         _, right_tasks, right_items = _read_run(self, after)
-        if any(left.get(key) != right.get(key) for key in PROTOCOL_KEYS):
-            raise ValueError("diff requires the same scoring protocol/settings")
+        difference = _protocol_difference(left, right)
+        if difference:
+            raise ValueError(f"diff requires the same scoring protocol/settings; {difference}")
         if left.get("checker_custom") and not left.get("checker_id"):
             raise ValueError("custom sampled checkers require explicit checker_id for comparison")
         comparable_left = [
@@ -305,9 +322,11 @@ class EvaluationMixin:
             raise ValueError("seed must be an integer")
         a, tasks_a, items_a = _read_run(self, before)
         b, tasks_b, items_b = _read_run(self, after)
-        if any(a.get(key) != b.get(key) for key in PROTOCOL_KEYS):
+        difference = _protocol_difference(a, b)
+        if difference:
             raise ValueError(
-                "comparison requires the same session, mode, and scoring protocol/settings"
+                "comparison requires the same session, mode, and scoring protocol/settings; "
+                + difference
             )
         if a.get("checker_custom") and not a.get("checker_id"):
             raise ValueError("custom sampled checkers require explicit checker_id for comparison")
