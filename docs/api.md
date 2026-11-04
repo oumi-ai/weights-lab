@@ -84,6 +84,7 @@ with lab.patch("transformer.h.0", hidden, positions=[-1]), torch.no_grad():
 gradients = lab.gradient("hello world", parameters=[name], max_tokens=64)
 ```
 
+- `lab.device` is the device of the input embeddings; move tokenizer outputs there.
 - `record` captures activations on CPU at the chosen positions, the last token by
   default. `patch` replaces them with a tensor or a callable's result. Both remove
   their hooks on exit.

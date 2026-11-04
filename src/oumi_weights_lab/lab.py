@@ -56,8 +56,11 @@ class Lab(EditingMixin, ScoringMixin, InspectionMixin, AttachmentMixin, Persiste
 
     @property
     def device(self) -> Any:
-        """The model's current device, suitable for moving tokenizer outputs."""
-        return self.model.device
+        """The input embeddings' device, where tokenizer outputs belong."""
+        try:
+            return self.model.get_input_embeddings().weight.device
+        except (AttributeError, NotImplementedError):
+            return self.model.device
 
     @property
     def forward_passes(self) -> int:
