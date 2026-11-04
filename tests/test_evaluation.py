@@ -54,8 +54,17 @@ class OfflineLab(ScoringMixin):
         for index, task in enumerate(tasks):
             yield index, self.score(task["prompt"], task["options"])
 
-    def _sample(self, prompt, generation_config, seed):
-        return "A"
+    def _sample_rows(self, tasks, generation_config, seed, batch_size):
+        for index, _ in enumerate(tasks):
+            yield (
+                index,
+                {
+                    "generated": "A",
+                    "finish_reason": "eos",
+                    "generated_tokens": 1,
+                    "sample_seed": seed + index,
+                },
+            )
 
 
 @pytest.fixture

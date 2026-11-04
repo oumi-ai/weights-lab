@@ -13,6 +13,7 @@ import copy
 from typing import Any
 
 import torch
+from transformers import GenerationConfig
 from transformers.generation import logits_process
 from transformers.generation.logits_process import LogitsProcessor
 from transformers.generation.stopping_criteria import (
@@ -40,12 +41,20 @@ def effective_config(model: Any, settings: dict[str, Any]) -> tuple[Any, dict[st
     Priority matches generate(): explicit settings, then the model's generation
     config, then transformers' global defaults for anything still unset.
     """
-    config = copy.deepcopy(model.generation_config)
+    base = getattr(model, "generation_config", None)
+    config = copy.deepcopy(base) if base is not None else GenerationConfig()
     defaults = getattr(type(config), "_get_default_generation_params", None)
     if defaults is not None:
         config.update(**defaults(), defaults_only=True)
     unused = config.update(**copy.deepcopy(settings))
     return config, unused
+
+
+def neutral_sampling_settings() -> dict[str, Any]:
+    """Sampling fields at values that apply no warper, for the greedy pass that takes the draw."""
+    defaults = getattr(GenerationConfig, "_get_default_generation_params", None)
+    values = defaults() if defaults is not None else vars(GenerationConfig())
+    return {field: values.get(field) for field in SAMPLING_FIELDS}
 
 
 def warpers(config: Any) -> list[LogitsProcessor]:

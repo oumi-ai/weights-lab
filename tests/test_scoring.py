@@ -54,14 +54,24 @@ class ControlledModel(torch.nn.Module):
         logits = self.table[input_ids]
         return SimpleNamespace(logits=logits[:, -logits_to_keep:] if logits_to_keep else logits)
 
-    def generate(self, input_ids, attention_mask=None, max_new_tokens=2, do_sample=False, **kwargs):
+    def generate(
+        self,
+        input_ids,
+        attention_mask=None,
+        max_new_tokens=2,
+        do_sample=False,
+        logits_processor=None,
+        **kwargs,
+    ):
         ids = input_ids
         for _ in range(max_new_tokens):
-            output = self(input_ids=ids)
+            scores = self(input_ids=ids).logits[:, -1]
+            for processor in logits_processor or []:  # As generate() does, before choosing.
+                scores = processor(ids, scores)
             if do_sample:
-                token = torch.multinomial(output.logits[:, -1].softmax(-1), num_samples=1)
+                token = torch.multinomial(scores.softmax(-1), num_samples=1)
             else:
-                token = output.logits[:, -1].argmax(-1, keepdim=True)
+                token = scores.argmax(-1, keepdim=True)
             ids = torch.cat([ids, token], dim=-1)
         return ids
 
@@ -291,24 +301,6 @@ def test_legacy_run_without_scoring_config_refuses_with_a_clear_message(lab):
         lab.diff(current, legacy)
 
 
-def test_sampled_mode_rejects_batching_before_reserving_held_out_rows(lab):
-    rows = [{"prompt": "p", "answer": "2 3"}]
-    config = {"max_new_tokens": 2}
-    with pytest.raises(ValueError, match="batch_size"):
-        lab.evaluate(
-            rows,
-            mode="sampled",
-            batch_size=2,
-            held_out=True,
-            max_passes=4,
-            generation_config=config,
-        )
-    result = lab.evaluate(
-        rows, name="single", mode="sampled", held_out=True, max_passes=4, generation_config=config
-    )
-    assert result["scoring_config"] == {"sampler": "hf-generate-v0.1", "batch_size": 1}
-
-
 def test_logit_attachment_refuses_batching(tiny_lab):
     with tiny_lab.attach(lambda *_: torch.zeros(6), mode="logits"):
         with pytest.raises(ValueError, match="batch_size=1"):
@@ -360,6 +352,115 @@ def test_negative_position_deeper_than_a_short_row_raises_like_batch_one(tiny_la
     with tiny_lab.record("transformer.h.0", positions=-5):
         with pytest.raises(ValueError, match="outside the module output"):
             tiny_lab.score("hello", options, batch_size=8)
+
+
+SAMPLE_PROMPTS = ["hello", "hello world", "world", "yes no hello", "no", "world world yes"]
+SAMPLE_ROWS = [{"prompt": prompt, "answer": "yes"} for prompt in SAMPLE_PROMPTS]
+# With "yes" as EOS, the tiny model's greedy rows finish after 4, 6, 6, 2, 6, and 1 tokens.
+STOP_AT_YES = {"eos_token_id": 4, "max_new_tokens": 6}
+
+
+def _sampled(lab, name, batch_size, config=STOP_AT_YES, **kwargs):
+    summary = lab.evaluate(
+        SAMPLE_ROWS,
+        name=name,
+        mode="sampled",
+        batch_size=batch_size,
+        generation_config=config,
+        **kwargs,
+    )
+    return summary, _items(summary)
+
+
+def _outputs(items):
+    return [(i["generated"], i["finish_reason"], i["generated_tokens"]) for i in items]
+
+
+def test_greedy_batched_generation_matches_batch_one(tiny_lab):
+    _, single = _sampled(tiny_lab, "single", 1)
+    _, batched = _sampled(tiny_lab, "batched", 4)
+    assert _outputs(batched) == _outputs(single)
+    assert [i["generated_tokens"] for i in single] == [4, 6, 6, 2, 6, 1]
+    assert [i["finish_reason"] for i in single] == [
+        "eos",
+        "max_tokens",
+        "max_tokens",
+        "eos",
+        "max_tokens",
+        "eos",
+    ]
+
+
+def test_sampled_passes_equal_generated_tokens_and_summary_reports_lengths(tiny_lab):
+    summary, items = _sampled(tiny_lab, "batched", 4)
+    assert summary["forward_passes"] == sum(i["generated_tokens"] for i in items) == 25
+    assert summary["truncation_share"] == pytest.approx(3 / 6)
+    assert summary["mean_generated_tokens"] == pytest.approx(25 / 6)
+
+
+def test_seeded_sampling_does_not_depend_on_batch_size_or_caller_rng(tiny_lab):
+    config = {**STOP_AT_YES, "do_sample": True}
+    torch.manual_seed(123)
+    _, single = _sampled(tiny_lab, "single", 1, config, seed=7)
+    torch.manual_seed(456)
+    state = torch.random.get_rng_state()
+    _, batched = _sampled(tiny_lab, "batched", 3, config, seed=7)
+    assert torch.equal(torch.random.get_rng_state(), state)
+    assert _outputs(batched) == _outputs(single)
+    assert [i["sample_seed"] for i in single] == [7 + index for index in range(6)]
+
+
+def test_sampled_scoring_config_names_the_decoder(tiny_lab):
+    greedy, _ = _sampled(tiny_lab, "greedy", 4)
+    assert greedy["scoring_config"] == {
+        "sampler": "greedy-v1",
+        "batch_size": 4,
+        "padding_side": "left",
+    }
+    sampled, _ = _sampled(tiny_lab, "sampled", 1, {**STOP_AT_YES, "do_sample": True})
+    assert sampled["scoring_config"] == {
+        "sampler": "per-sequence-uniform-v1",
+        "batch_size": 1,
+        "padding_side": "none",
+    }
+    default, _ = _sampled(tiny_lab, "default", None)
+    assert default["scoring_config"]["batch_size"] == 8
+
+
+def test_budget_stops_batched_generation_mid_run(tiny_lab):
+    with pytest.raises(BudgetExceeded):
+        _sampled(tiny_lab, "capped", 4, max_passes=20)
+    summary = json.loads((tiny_lab.artifacts / "evaluations/capped/summary.json").read_text())
+    assert summary["state"] == "failed" and summary["truncation_share"] is None
+    # The first batch of four rows costs 18 passes; the second stops after two more.
+    assert summary["completed"] == 4 and summary["forward_passes"] == 20
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        {"num_beams": 2},
+        {"max_time": 5.0},
+        {"min_length": 3},
+        {"max_length": 8, "max_new_tokens": None},
+    ],
+)
+def test_padding_sensitive_settings_refuse_batching_before_reserving(tiny_lab, setting):
+    config = {**STOP_AT_YES, **setting}
+    key = next(iter(setting))
+    with pytest.raises(ValueError, match=key):
+        tiny_lab.evaluate(
+            SAMPLE_ROWS,
+            mode="sampled",
+            batch_size=2,
+            generation_config=config,
+            held_out=True,
+            max_passes=100,
+        )
+    result = tiny_lab.evaluate(
+        SAMPLE_ROWS, mode="sampled", generation_config=config, held_out=True, max_passes=100
+    )
+    assert result["scoring_config"]["batch_size"] == 1
 
 
 def test_likelihood_scores_only_continuation_tokens_and_explicit_boundary(lab):
@@ -672,7 +773,11 @@ def test_generate_arguments_are_accepted_but_scorer_inputs_are_not():
             _generation_kwargs({owned: None}, generate)
 
 
-def test_stop_strings_reach_generate_with_the_tokenizer(lab):
+def test_stop_strings_reach_generate_with_the_tokenizer(lab, monkeypatch):
+    from oumi_weights_lab import sampling
+
+    # The boundary tokenizer has no vocabulary for HF's stop-string matcher to index.
+    monkeypatch.setattr(sampling, "StopStringCriteria", lambda tokenizer, strings: None)
     seen = []
     original = lab.model.generate
 
