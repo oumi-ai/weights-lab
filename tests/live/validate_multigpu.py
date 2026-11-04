@@ -15,6 +15,7 @@ from pathlib import Path
 CHECKS = """
 import json, re, shutil, time
 from pathlib import Path
+from unittest import mock
 import accelerate, torch, transformers
 from transformers import AutoModelForCausalLM
 from oumi_weights_lab.lab import load_lab
@@ -102,8 +103,13 @@ for name in names:
 edited = logits()
 assert not torch.equal(edited, baseline)
 started = time.perf_counter()
-_fingerprint(lab)
+parallel = _fingerprint(lab)
 report["fingerprint_seconds"] = time.perf_counter() - started
+# Hashing one tensor at a time must give the same fingerprint, or saved bundles break.
+with mock.patch("os.cpu_count", return_value=1):
+    started = time.perf_counter()
+    assert _fingerprint(lab) == parallel
+    report["fingerprint_serial_seconds"] = time.perf_counter() - started
 started = time.perf_counter()
 bundle = lab.save_edits("multigpu-bundle")
 report["save_edits_seconds"] = time.perf_counter() - started

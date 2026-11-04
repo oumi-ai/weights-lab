@@ -116,3 +116,85 @@ def test_tensor_digests_match_the_ones_existing_bundles_recorded():
     assert persistence._digest(small) == (
         "99cee2668dea124ff17c6cf7732f1e8ed98c437396ad8805367c0dc861be2869"
     )
+
+
+def _stopping_worker(path, seconds):
+    """A stand-in worker that ignores SIGTERM and finishes after ``seconds``."""
+    import subprocess
+    import sys
+
+    status = path / "status.json"
+    code = (
+        "import json, signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"time.sleep({seconds})\n"
+        f"open({str(status)!r}, 'w').write(json.dumps("
+        "{'state': 'stopped', 'reason': 'idle_timeout', 'edit_bundle': 'saved'}))\n"
+    )
+    return subprocess.Popen([sys.executable, "-c", code])
+
+
+@pytest.mark.parametrize(("began", "forced"), [(0, False), (-60, True)])
+def test_stop_waits_out_a_deadline_bundle_within_the_shutdown_grace(
+    began, forced, tmp_path, capsys, monkeypatch
+):
+    import json
+    import time
+
+    path = session.create_session(tmp_path / "s", {"model": "m", "shutdown_grace": 20})
+    worker = _stopping_worker(path, 4 if not forced else 30)
+    # stop signals only its own worker; how ps shows a command line varies by platform.
+    monkeypatch.setattr(cli, "_matches_worker", lambda pid, _: pid == worker.pid)
+    try:
+        session.write_json(
+            path / "status.json",
+            {
+                "state": "stopping",
+                "pid": worker.pid,
+                "reason": "idle_timeout",
+                "updated_at": time.time() + began,
+            },
+        )
+        assert cli.main(["stop", "--session", str(path), "--timeout", "0.2"]) == 0
+        status = json.loads(capsys.readouterr().out)
+        assert status["state"] == "stopped"
+        # Within the grace the bundle finishes; past it, stop escalates as before.
+        assert bool(status.get("forced")) is forced
+        assert ("edit_bundle" in status) is not forced
+    finally:
+        worker.kill()
+        worker.wait(5)
+
+
+def test_parallel_hashing_on_gpus_matches_hashing_on_cpu(tmp_path, tiny_tokenizer, monkeypatch):
+    torch = pytest.importorskip("torch")
+    accelerate = pytest.importorskip("accelerate")
+    transformers = pytest.importorskip("transformers")
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs two CUDA GPUs")
+    import copy
+
+    from oumi_weights_lab import Lab
+
+    torch.manual_seed(0)
+    model = transformers.GPT2LMHeadModel(
+        transformers.GPT2Config(vocab_size=6, n_embd=64, n_layer=4, n_head=4, n_positions=32)
+    ).eval()
+    reference = Lab(copy.deepcopy(model), tiny_tokenizer, tmp_path / "cpu")
+    placement = {
+        "transformer.wte": 0,
+        "transformer.wpe": 0,
+        "transformer.drop": 0,
+        "transformer.h.0": 0,
+        "transformer.h.1": 0,
+        "transformer.h.2": 1,
+        "transformer.h.3": 1,
+        "transformer.ln_f": 1,
+        "lm_head": 0,
+    }
+    split = Lab(
+        accelerate.dispatch_model(model, device_map=placement), tiny_tokenizer, tmp_path / "gpus"
+    )
+    parallel = persistence._fingerprint(split)
+    monkeypatch.setattr(persistence.os, "cpu_count", lambda: 1)
+    assert persistence._fingerprint(split) == parallel == persistence._fingerprint(reference)

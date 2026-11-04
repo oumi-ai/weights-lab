@@ -249,13 +249,26 @@ def _matches_worker(pid: int, path: Path) -> bool:
     return command.endswith(f"-m oumi_weights_lab _worker --session {path}")
 
 
+def _saving_until(path: Path, status: dict) -> float:
+    """When a stopping worker's shutdown grace ends, or 0 when it is not stopping."""
+    if status.get("state") != "stopping":
+        return 0.0
+    try:
+        grace = float(session.read_json(path / "config.json")["shutdown_grace"])
+        return float(status["updated_at"]) + grace
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0.0
+
+
 def _stop(args: argparse.Namespace) -> int:
     path = args.session.expanduser().resolve()
     status = _status(path)
     (path / "STOP").touch()
     deadline = time.monotonic() + args.timeout
     while _alive(status):
-        if time.monotonic() >= deadline:
+        # A worker past its deadline saves an edit bundle within its shutdown grace;
+        # killing it then would lose the bundle, and its watchdog enforces the grace.
+        if time.monotonic() >= deadline and time.time() >= _saving_until(path, status):
             break
         time.sleep(0.1)
         status = _status(path)
