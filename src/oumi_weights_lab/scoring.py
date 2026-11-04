@@ -291,7 +291,8 @@ class ScoringMixin(EvaluationMixin):
     """Evaluation helpers and the pass-counting hook.
 
     The host registers ``_count_forward`` as a forward pre-hook with kwargs, passes the
-    counted model to ``_count_beams_once``, and owns ``_forward_passes``.
+    counted model to ``_count_beams_once``, owns ``_forward_passes``, and provides
+    ``device``, where input tensors are created.
     """
 
     @property

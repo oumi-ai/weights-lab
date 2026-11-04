@@ -119,6 +119,27 @@ def test_the_device_map_and_input_device_come_from_the_dispatch(labs):
     assert split.device.type == first
     devices = {torch.device(part["device"]).type for part in split.parts("lm_head.*")}
     assert devices == {second}
+    # accelerate's hooks run every block on its device and return outputs to the inputs'.
+    assert split.model._hf_hook.io_same_device
+    hook = split.model.transformer.h[1]._hf_hook
+    assert torch.device(hook.execution_device).type == second
+
+
+@pytest.mark.filterwarnings("ignore:You are calling .generate")
+@pytest.mark.parametrize("mode", ["likelihood", "sampled"])
+def test_inputs_go_to_the_embedding_device_not_model_device(labs, mode, monkeypatch):
+    split, _, _ = labs
+    # model.device is the first parameter's device, which need not hold the embeddings,
+    # for example in a multimodal model whose vision tower comes first.
+    monkeypatch.setattr(type(split.model), "device", property(lambda self: torch.device("meta")))
+    seen = []
+    split.model.register_forward_pre_hook(
+        lambda module, args, kwargs: seen.append(kwargs["input_ids"].device), with_kwargs=True
+    )
+    rows = ROWS if mode == "likelihood" else SAMPLED
+    config = {"generation_config": {"max_new_tokens": 2}} if mode == "sampled" else {}
+    split.evaluate(rows, name="run", mode=mode, batch_size=2, **config)
+    assert seen and {device.type for device in seen} == {split.device.type}
 
 
 @pytest.mark.parametrize("batch_size", [1, 3])
@@ -227,8 +248,7 @@ def test_exports_reload_with_the_same_logits(labs, tmp_path):
     assert logits == pytest.approx(_logits(split), abs=TOLERANCE)
 
 
-@pytest.fixture(params=SPLITS)
-def adapter_labs(request, tmp_path, tiny_tokenizer):
+def _adapter_pair(devices, tokenizer, root):
     """A LoRA adapter over a dispatched base, and the same adapter on one device."""
     peft = pytest.importorskip("peft")
 
@@ -238,7 +258,7 @@ def adapter_labs(request, tmp_path, tiny_tokenizer):
 
     model = _gpt2()
     single = adapted(copy.deepcopy(model))
-    split = adapted(_dispatch(model, request.param))
+    split = adapted(_dispatch(model, devices))
     torch.manual_seed(1)
     # Draw the adapter weights on CPU once; MPS has its own random generator.
     weights = dict(single.named_parameters())
@@ -247,16 +267,18 @@ def adapter_labs(request, tmp_path, tiny_tokenizer):
             if "lora_" in name:
                 weights[name].normal_()
                 parameter.copy_(weights[name])
-    return (
-        Lab(split, tiny_tokenizer, tmp_path / "split"),
-        Lab(single, tiny_tokenizer, tmp_path / "single"),
-    )
+    return Lab(split, tokenizer, root / "split"), Lab(single, tokenizer, root / "single")
 
 
-def test_adapters_over_a_split_base_score_record_and_export(adapter_labs, tmp_path):
+@pytest.fixture(params=SPLITS)
+def adapter_labs(request, tmp_path, tiny_tokenizer):
+    return (*_adapter_pair(request.param, tiny_tokenizer, tmp_path / "labs"), request.param)
+
+
+def test_adapters_over_a_split_base_score_and_export(adapter_labs, tmp_path):
     from transformers import AutoModelForCausalLM
 
-    split, single = adapter_labs
+    split, single, _ = adapter_labs
     assert split.device_map is not None and single.device_map is None
     options = {"A": " yes", "B": " no"}
     assert split.score("hello", options) == pytest.approx(
@@ -273,3 +295,33 @@ def test_adapters_over_a_split_base_score_record_and_export(adapter_labs, tmp_pa
     with torch.no_grad():
         logits = reloaded(**ids).logits
     assert logits == pytest.approx(_logits(split), abs=TOLERANCE)
+
+
+def test_adapters_over_a_split_base_record_patch_edit_and_resume(
+    adapter_labs, tmp_path, tiny_tokenizer
+):
+    split, single, devices = adapter_labs
+    blocks = ["base_model.model.transformer.h.0", "base_model.model.transformer.h.1"]
+    with split.record(blocks) as got, single.record(blocks) as want:
+        _logits(split)
+        _logits(single)
+    for name in blocks:
+        assert got[name][0] == pytest.approx(want[name][0], abs=TOLERANCE)
+        with split.patch(name, torch.zeros(8)), single.patch(name, torch.zeros(8)):
+            assert _logits(split) == pytest.approx(_logits(single), abs=TOLERANCE)
+    baseline = _logits(split)
+    names = [
+        "base_model.model.transformer.h.1.attn.c_attn.base_layer.weight",
+        "base_model.model.transformer.h.0.attn.c_attn.lora_B.default.weight",
+    ]
+    for name in names:
+        split.edit(name, lambda value: value * 2)
+    edited = _logits(split)
+    assert not torch.equal(edited, baseline)
+    bundle = split.save_edits(tmp_path / "edits")
+    resumed, _ = _adapter_pair(devices, tiny_tokenizer, tmp_path / "resumed")
+    resumed.load_edits(bundle)
+    assert torch.equal(_logits(resumed), edited)
+    for _ in names:
+        split.undo()
+    assert torch.equal(_logits(split), baseline)
