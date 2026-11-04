@@ -122,8 +122,8 @@ class AttachmentMixin:
         """
         import torch
 
+        chat = self._chat_settings(chat_template)  # Validate before any prefix transform.
         text = self._prepare_prompt(prompt)
-        chat = self._chat_settings(chat_template)
         if chat is not None:
             text = self._render_chat(text, chat)
         inputs = self.tokenizer(text, return_tensors="pt", add_special_tokens=chat is None).to(

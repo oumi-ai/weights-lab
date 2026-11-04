@@ -46,6 +46,18 @@ _SAMPLING_RANGES = {
 
 
 DEFAULT_BATCH_SIZE = 8
+# apply_chat_template arguments the lab sets itself.
+_OWNED_CHAT_ARGUMENTS = {
+    "conversation",
+    "tokenize",
+    "add_generation_prompt",
+    "continue_final_message",
+    "return_dict",
+    "return_tensors",
+    "return_assistant_tokens_mask",
+}
+# Rendered once per chat setting to fingerprint what the template produces.
+_CHAT_PROBE = "Weights Lab prompt format probe."
 
 
 def _check_batch_size(batch_size: Any) -> None:
@@ -587,16 +599,18 @@ class ScoringMixin(EvaluationMixin):
 
     def _scoring_prompt(self, prompt: str) -> str:
         """The text a prompt is scored as: prefix attachments first, then any chat template."""
+        chat = getattr(self, "_chat", None)
+        # A nested call with other template settings must not reuse this rendering.
+        key = (prompt, None if chat is None else chat["format"]["rendered_sha256"])
         cache = getattr(self, "_prepared_prompts", None)
-        if cache is not None and prompt in cache:
-            return cache[prompt]
+        if cache is not None and key in cache:
+            return cache[key]
         prepare = getattr(self, "_prepare_prompt", None)
         text = prepare(prompt) if prepare is not None else prompt
-        chat = getattr(self, "_chat", None)
         if chat is not None:
             text = self._render_chat(text, chat)
         if cache is not None:
-            cache[prompt] = text
+            cache[key] = text
         return text
 
     def _chat_settings(self, chat_template: Any) -> dict[str, Any] | None:
@@ -620,13 +634,32 @@ class ScoringMixin(EvaluationMixin):
             json.dumps(kwargs, allow_nan=False)
         except (TypeError, ValueError) as error:
             raise ValueError("chat_template kwargs must be JSON values") from error
-        if not getattr(self.tokenizer, "chat_template", None):
+        owned = sorted(set(kwargs) & _OWNED_CHAT_ARGUMENTS)
+        if owned:
+            raise ValueError(f"chat_template kwargs cannot set {owned}; the lab controls them")
+        if not getattr(self.tokenizer, "chat_template", None) and "chat_template" not in kwargs:
             raise ValueError("this tokenizer has no chat template; pass chat_template=None")
-        return {"system": system, "kwargs": kwargs}
+        # The template actually used: tokenizers may hold several named ones.
+        template = self.tokenizer.get_chat_template(
+            kwargs.get("chat_template"), kwargs.get("tools")
+        )
+        chat = {"system": system, "kwargs": kwargs}
+        # Render a fixed probe now, so template errors (such as a template that rejects a
+        # system message) surface before any reservation, and so templates that insert
+        # changing text, such as today's date, record a different fingerprint.
+        probe = self._render_chat(_CHAT_PROBE, chat)
+        chat["format"] = {
+            "chat_template_sha256": hashlib.sha256(template.encode()).hexdigest(),
+            "system": system,
+            "kwargs": kwargs,
+            "rendered_sha256": hashlib.sha256(probe.encode()).hexdigest(),
+        }
+        return chat
 
     def _render_chat(self, text: str, chat: dict[str, Any]) -> str:
         """Render text as the user turn, ready for the assistant's reply."""
-        messages = [{"role": "system", "content": chat["system"]}] if chat["system"] else []
+        system = chat["system"]
+        messages = [] if system is None else [{"role": "system", "content": system}]
         messages.append({"role": "user", "content": text})
         return self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True, **chat["kwargs"]
@@ -634,14 +667,7 @@ class ScoringMixin(EvaluationMixin):
 
     def _prompt_format(self, chat: dict[str, Any] | None) -> dict[str, Any] | None:
         """What a run's summary records about how prompts were rendered."""
-        if chat is None:
-            return None
-        template = self.tokenizer.chat_template
-        return {
-            "chat_template_sha256": hashlib.sha256(template.encode()).hexdigest(),
-            "system": chat["system"],
-            "kwargs": chat["kwargs"],
-        }
+        return None if chat is None else chat["format"]
 
     @contextmanager
     def _chat_prompts(self, chat: dict[str, Any] | None):

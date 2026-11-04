@@ -53,10 +53,16 @@ report = lab.compare_runs(before, after)
   variables such as `enable_thinking`. Prefix attachments transform the prompt
   first. The rendered text is tokenized without adding special tokens, because
   the template supplies them, and options follow the assistant header, so they
-  usually need no leading space. `evaluate` records the template's hash, system
-  message, and variables as `prompt_format`; runs pair only when it matches,
-  while dev and held-out identities still use the raw prompts. A tokenizer
-  without a chat template raises before anything is reserved.
+  usually need no leading space; `yes_no` mode's default options keep theirs, so
+  pass `options=["yes", "no"]` under a template. `evaluate` records the
+  template's hash, system message, variables, and a fingerprint of what the
+  template renders (so templates that insert today's date change it) as
+  `prompt_format`; runs pair only when it matches, while dev and held-out
+  identities still use the raw prompts. A tokenizer without a chat template, or
+  a template that rejects the settings, raises before anything is reserved. With
+  thinking enabled, likelihood options are scored as the start of a reasoning
+  trace, and sampled answers keep their `<think>` text, so grade them with a
+  checker or `answer_key` that skips it.
 - `evaluate(data, *, name=None, mode="likelihood", held_out=False, max_passes=None, ...)`
   accepts JSONL or rows and saves items and a summary under
   `artifacts/evaluations/NAME/`. Modes are `likelihood`, `yes_no`, and `sampled`.

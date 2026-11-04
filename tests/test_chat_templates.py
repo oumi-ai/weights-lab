@@ -64,11 +64,9 @@ def test_evaluate_records_the_prompt_format_and_refuses_mixed_pairs(chat_lab):
     templated = chat_lab.evaluate(ROWS, name="templated", chat_template={"system": "rules"})
     raw = chat_lab.evaluate(ROWS, name="raw")
     digest = hashlib.sha256(TEMPLATE.encode()).hexdigest()
-    assert templated["prompt_format"] == {
-        "chat_template_sha256": digest,
-        "system": "rules",
-        "kwargs": {},
-    }
+    prompt_format = dict(templated["prompt_format"])
+    assert len(prompt_format.pop("rendered_sha256")) == 64
+    assert prompt_format == {"chat_template_sha256": digest, "system": "rules", "kwargs": {}}
     assert raw["prompt_format"] is None
     with pytest.raises(ValueError, match="prompt_format"):
         chat_lab.compare_runs(templated, raw)
@@ -112,3 +110,72 @@ def test_a_tokenizer_without_a_template_is_refused_before_reserving(tiny_lab):
 def test_invalid_chat_template_settings_are_refused(chat_lab, setting):
     with pytest.raises(ValueError, match="chat_template"):
         chat_lab.score("yes", [" yes"], chat_template=setting)
+
+
+OTHER = "hello no {{ messages[-1]['content'] }}{% if add_generation_prompt %} world{% endif %}"
+
+
+def test_named_templates_are_resolved_before_reserving(chat_lab):
+    chat_lab.tokenizer.chat_template = {"default": TEMPLATE, "other": OTHER}
+    default = chat_lab.evaluate(
+        ROWS, name="named", chat_template=True, held_out=True, max_passes=10
+    )
+    assert (
+        default["prompt_format"]["chat_template_sha256"]
+        == hashlib.sha256(TEMPLATE.encode()).hexdigest()
+    )
+    other = chat_lab.evaluate(
+        [{**ROWS[0], "prompt": "no"}],
+        name="other",
+        chat_template={"kwargs": {"chat_template": "other"}},
+    )
+    assert (
+        other["prompt_format"]["chat_template_sha256"] == hashlib.sha256(OTHER.encode()).hexdigest()
+    )
+
+
+def test_prompt_format_fingerprints_what_the_template_renders(chat_lab):
+    plain = chat_lab.evaluate(ROWS, name="plain", chat_template=True)
+    flagged = chat_lab.evaluate(ROWS, name="flagged", chat_template={"kwargs": {"flag": True}})
+    again = chat_lab.evaluate(ROWS, name="again", chat_template=True)
+    assert plain["prompt_format"]["rendered_sha256"] == again["prompt_format"]["rendered_sha256"]
+    assert plain["prompt_format"]["rendered_sha256"] != flagged["prompt_format"]["rendered_sha256"]
+
+
+def test_an_empty_system_message_is_rendered(chat_lab):
+    templated = chat_lab.score("yes", [" yes", " no"], chat_template={"system": ""})
+    assert templated == chat_lab.score("no hello yes world", [" yes", " no"])
+
+
+def test_a_checker_scoring_raw_prompts_mid_evaluation_gets_raw_text(chat_lab):
+    raw = chat_lab.score("yes", [" yes"])
+    seen = []
+
+    def checker(generated, answer, row):
+        seen.append(chat_lab.score(row["prompt"], [" yes"]))
+        return True
+
+    chat_lab.evaluate(
+        [{"prompt": "yes", "answer": "x"}],
+        mode="sampled",
+        checker=checker,
+        checker_id="nested",
+        chat_template=True,
+        generation_config={"max_new_tokens": 1},
+    )
+    assert seen == [raw]
+
+
+@pytest.mark.parametrize("key", ["tokenize", "add_generation_prompt", "conversation"])
+def test_template_kwargs_the_lab_controls_are_refused(chat_lab, key):
+    with pytest.raises(ValueError, match="chat_template"):
+        chat_lab.score("yes", [" yes"], chat_template={"kwargs": {key: True}})
+
+
+def test_generate_validates_the_template_before_prefix_transforms(tiny_lab):
+    tiny_lab.tokenizer.chat_template = None
+    calls = []
+    with tiny_lab.attach(lambda prompt: calls.append(prompt) or prompt, mode="prefix"):
+        with pytest.raises(ValueError, match="chat template"):
+            tiny_lab.generate("yes", chat_template=True, max_new_tokens=1)
+    assert calls == []
