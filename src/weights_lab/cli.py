@@ -110,6 +110,7 @@ def _start(args: argparse.Namespace) -> int:
         "pass_limit": args.pass_limit,
         "revision": args.revision,
         "adapter_revision": args.adapter_revision,
+        "resume": str(args.resume.expanduser().resolve()) if args.resume else None,
     }
     if args.adapter:
         config["adapter"] = args.adapter
@@ -320,6 +321,8 @@ def _remote_start(args):
             "adapter_revision",
         )
     }
+    if args.resume is not None:
+        config["resume"] = str(args.resume)
     _configuration(args.model, config)  # Reject static errors before provisioning.
     transport = SkyPilotLauncher(args.cluster, python=args.remote_python)
     config.update(
@@ -393,6 +396,7 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--adapter")
     start.add_argument("--revision", help="model and tokenizer checkpoint revision")
     start.add_argument("--adapter-revision")
+    start.add_argument("--resume", type=Path, help="edit bundle to resume in this new session")
     start.add_argument("--device", default="auto")
     start.add_argument(
         "--dtype", default="auto", choices=["auto", "float32", "float16", "bfloat16"]

@@ -17,7 +17,7 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
 ]
-dependencies = ["torch>=2.4", "transformers>=4.56,<6"]
+dependencies = ["torch>=2.4", "transformers>=4.56,<6", "safetensors>=0.4.3"]
 
 [project.urls]
 Repository = "https://github.com/oumi-ai/weights-lab"
@@ -49,6 +49,10 @@ include = [
     "plugin.json",
     "docs/README.md",
     "docs/api.md",
+    "docs/edit-bundles.md",
+    "docs/evaluation.md",
+    "docs/lora-diagnostics.md",
+    "docs/date-network.md",
     "docs/remote.md",
     "docs/dogfood.md",
     "docs/parity.md",

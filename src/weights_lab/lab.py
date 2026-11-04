@@ -7,10 +7,11 @@ from .attachments import AttachmentMixin
 from .budget import PassBudget
 from .editing import EditingMixin
 from .inspection import InspectionMixin
+from .persistence import PersistenceMixin
 from .scoring import ScoringMixin
 
 
-class Lab(EditingMixin, ScoringMixin, InspectionMixin, AttachmentMixin):
+class Lab(EditingMixin, ScoringMixin, InspectionMixin, AttachmentMixin, PersistenceMixin):
     """A loaded model, tokenizer, and the session's artifact directory.
 
     Forward passes count calls to the base language model, including generation
@@ -138,6 +139,8 @@ def load_lab(config: dict[str, Any], session_path: Path) -> Lab:
         model, tokenizer, session_path, model_id=model_id, pass_limit=config.get("pass_limit")
     )
     lab.model_commit = getattr(model_config, "_commit_hash", None) or config.get("revision")
+    if config.get("resume"):
+        lab.load_edits(config["resume"])
     return lab
 
 

@@ -20,6 +20,14 @@ tiny random models locally; public-model examples download their pinned checkpoi
 These recorded engine-validation counts precede the added plugin-packaging checks
 in the current suite.
 
+The expanded local suite also covers edit-bundle replay and CLI resume, consumed
+held-out reservations after resume, paired reports and regression suites, pinned
+dev screens, scaled LoRA spectra, and the frozen date network. A local PEFT
+round trip verifies both base/adapter edits and identical logits; calendar tests
+compare randomized dates with an independent Python calendar reference. These new
+helpers have local CPU validation; the earlier H200/Slurm runs were not repeated
+for this expansion.
+
 The CUDA harness exercised a random GPT-2 with a nonzero LoRA adapter. All 15
 accepted forwards were accounted for. Edit/undo restored weights and scores exactly;
 the largest export/reload logit difference was `7.450580596923828e-09`. All 33 backup

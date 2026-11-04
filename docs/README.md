@@ -6,6 +6,10 @@ Choose a task below. For local development, see [Contributing](../CONTRIBUTING.m
 | --- | --- |
 | Install and run a first session | [Quickstart](../README.md#start-on-cpu) |
 | Inspect models, edit weights, and evaluate changes | [Python API](api.md) |
+| Save edit bundles and resume an experiment | [Edit persistence](edit-bundles.md) |
+| Compare scores, run regression suites, and pin dev screens | [Evaluation](evaluation.md) |
+| Inspect effective LoRA rank and update magnitude | [LoRA diagnostics](lora-diagnostics.md) |
+| Run a frozen calendar network without a language model | [Fixed date network](date-network.md) |
 | Install the coding-agent skill or plugin | [Agent installation](skill-install.md) |
 | Follow a public-model edit, inspect, undo, and backup run | [Dogfood walkthrough](dogfood.md) |
 | Run the complete demo script | [End-to-end demo](../examples/dogfood.py) |

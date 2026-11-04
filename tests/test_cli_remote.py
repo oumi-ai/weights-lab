@@ -212,6 +212,28 @@ def test_sky_start_forwards_checkpoint_pins_budget_and_infra(transports, capsys,
     ]
 
 
+def test_sky_resume_uses_remote_bundle_path(transports, capsys):
+    assert (
+        cli.main(
+            [
+                "start",
+                "--cluster",
+                "lab",
+                "--session",
+                "new-session",
+                "--model",
+                "base",
+                "--resume",
+                "~/saved/candidate",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    call = transports[0]["SkyPilotLauncher"].calls[0]
+    assert call[3]["resume"] == "~/saved/candidate"
+
+
 @pytest.mark.parametrize(
     "removed",
     [

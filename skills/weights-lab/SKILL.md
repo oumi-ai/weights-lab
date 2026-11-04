@@ -35,12 +35,15 @@ A pass counts one underlying model forward, including each generation step; a ba
 Read only the recipe needed:
 
 - [Compare checkpoints](references/compare-checkpoints.md): parameter deltas without extra forward passes.
+- [Save and resume edits](references/edit-bundles.md): portable save points with undo history and inherited guards.
+- [Evaluation reports and screens](references/evaluation.md): score changes, paired statistics, regression suites, and pinned dev subsets.
 - [Zero or swap parts](references/zero-swap.md): reversible ablations and matched checkpoint slices.
 - [Document-split probes](references/probes.md): representations with source documents kept apart.
 - [Activation patching](references/activation-patching.md): temporary intervention on selected tokens.
 - [Short-row gradients](references/gradients.md): per-row gradients without long-context memory growth.
 - [Written-working control](references/written-working.md): test computation before editing weights.
 - [Hand-built parts](references/hand-built.md): temporary logit modules or prompt transformations.
+- [Fixed date network](references/date-network.md): frozen calendar/business-day operations and character output.
 - [Worked example](references/worked-example.md): baseline, first-layer ablation, exact undo, and a saved report.
 
 For remote sessions, read [remote workers](references/remote.md) for the SkyPilot workflow, source-checkout prerequisites, and backup before teardown. Local sessions need no SkyPilot installation.

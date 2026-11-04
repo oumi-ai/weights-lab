@@ -80,7 +80,13 @@ Install as a Claude Code or Codex plugin, or as a standalone skill for Codex,
 Claude Code, Cursor, Copilot CLI, and OpenCode; see the
 [per-harness install commands](docs/skill-install.md).
 The [Python API](docs/api.md) covers reversible edits, evaluation, pass budgets,
-and experimental fixed-weight components. LoRA loading requires `uv sync --extra adapters`.
+and experimental fixed-weight components. [Edit bundles](docs/edit-bundles.md) save
+edits, undo history, budgets, and evaluation reservations for a fresh worker.
+[Evaluation tools](docs/evaluation.md) add score-sensitive comparisons, paired
+statistics, regression suites, and pinned dev screens. Inspect effective adapter
+rank with [LoRA diagnostics](docs/lora-diagnostics.md), or run the optional
+[fixed-weight date network](docs/date-network.md) offline.
+LoRA loading requires `uv sync --extra adapters`.
 
 For a remote worker, use upstream SkyPilot:
 

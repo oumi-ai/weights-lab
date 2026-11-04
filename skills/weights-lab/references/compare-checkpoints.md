@@ -1,5 +1,14 @@
 # Compare checkpoints
 
+For a loaded LoRA model, `lab.lora_diagnostics(pattern="*", top_k=8)` reports
+singular values, numerical/stable rank, and magnitude of each active adapter's
+effective scaled update. It uses factor QR decompositions and a small SVD;
+it does not form a dense `B @ A` or spend model forwards. An explicit
+`adapter="default"` selects that adapter even when inactive. Multiple adapters
+are reported independently, never as a combined spectrum. Unsupported DoRA,
+embedding, convolutional and runtime variants are rejected. A low rank or small
+norm is a diagnostic, not evidence that deleting the adapter improves behavior.
+
 Use parameter deltas to locate differences before spending forwards. Loading a second full model consumes additional memory; keep it on CPU and restrict the pattern. Check that model architecture, vocabulary, and named shapes match before interpreting deltas.
 
 ```python

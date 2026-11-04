@@ -44,6 +44,12 @@ Remove experimental attachments and activation patches before export: they canno
 checkpoint weights. `backup` archives session records, including exported checkpoints
 under `artifacts/`; it does not export the live model itself.
 
+`save_edits(path)` saves a portable bundle of exact edited slices, undo history,
+pass accounting, and dataset reservations. `load_edits(path)` resumes that save
+point into a fresh identical model; CLI `start --resume PATH` performs the same
+step during loading. The inherited pass limit cannot be raised. It does not
+restore arbitrary Python variables. See [edit bundles](edit-bundles.md).
+
 ## Scoring
 
 JSONL rows have `prompt`, `options`, and `answer`. An optional `id` identifies a row.
@@ -78,6 +84,12 @@ hash, session identity, checkpoint revision, edit history, attachments, patches,
 Failed runs preserve partial results and raise the original error; their accuracy
 is null. Run names cannot overwrite existing runs. `diff` compares successful runs
 of the same data, mode, and session, returning improved, regressed, or changed items.
+Use `diff(before, after, include_scores=True)` to include changes to scores even
+when the prediction is unchanged. `compare_runs` reports grouped metrics, largest
+score/probability movers, exact paired McNemar tests, and deterministic bootstrap
+intervals. Named `evaluate_suite` / `compare_suites` runs support regression
+checks, and `create_screen` / `verify_screen` pins repeatable dev subsets. See
+[evaluation workflows and probability limitations](evaluation.md).
 
 For yes/no rows, use `mode="yes_no"` and a boolean or yes/no answer. For free answers:
 
@@ -139,6 +151,12 @@ and `-100` for masked tokens. Existing `.grad` values and parameter flags surviv
 Request selected parameters and short rows: gradients retain activations even in
 eval mode, and returning all gradients can be expensive.
 
+`lora_diagnostics(pattern="*", adapter=None, top_k=8)` measures effective scaled
+LoRA updates through small QR/SVD calculations, with no forwards or dense `B @ A`
+allocation. It reports singular values, update/base norms and numerical/stable
+rank for each selected adapter separately. See [supported variants and scaling
+semantics](lora-diagnostics.md).
+
 `probe(features, labels, groups, train_groups=None, seed=0, test_fraction=.25, ridge=.001)`
 fits a linear ridge classifier. Groups are source document IDs, and a document can
 appear on only one side of the split. Training must contain every class. Results
@@ -170,6 +188,11 @@ tensor building blocks in `weights_lab.circuits` provide token matching, nearest
 matches, lookup tables, digit addition with carries, integer comparison, and a
 calendar circuit exact over valid dates from 2000 through 2099. They use fixed
 weights, indexing, and integer operations; they are not trained neural arithmetic.
+
+The separate [fixed-weight date network](date-network.md) adds calendar/business
+offsets, weekend rolling, date comparisons, and ISO character logits. Its frozen
+tables and linear layers run offline; the character vocabulary is independent
+of any language model's tokenizer.
 
 ## Remote sessions
 
