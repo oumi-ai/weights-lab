@@ -10,7 +10,7 @@ Load one model into a persistent worker, then send it Python snippets. Snippets 
 
 ## Setup
 
-Run `oumi-weights-lab --help`. If it fails, ask the user to install the CLI with `uv tool install git+https://github.com/oumi-ai/weights-lab`, or `uv tool install 'oumi-weights-lab[adapters] @ git+https://github.com/oumi-ai/weights-lab'` for LoRA adapters. Under the Claude Code plugin, the first call builds an environment and downloads PyTorch; allow it several minutes.
+Run `oumi-weights-lab --help`. If it fails, ask the user to install the CLI with `uv tool install git+https://github.com/oumi-ai/weights-lab`, or `uv tool install 'oumi-weights-lab[adapters,datasets] @ git+https://github.com/oumi-ai/weights-lab'` for LoRA adapters and Hugging Face datasets (`lab.hf_rows`). Under the Claude Code plugin, the first call builds an environment and downloads PyTorch; allow it several minutes.
 
 ## Session commands
 

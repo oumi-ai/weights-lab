@@ -17,7 +17,7 @@ if command -v uv >/dev/null 2>&1 && [ -f "$root/pyproject.toml" ] && [ -f "$root
         echo "oumi-weights-lab: creating the plugin's environment; the first run downloads PyTorch" >&2
     fi
     # Run the module, not the console script, so PATH lookup cannot find this wrapper.
-    exec uv run ${quiet:+"$quiet"} --frozen --no-dev --extra adapters --project "$root" \
+    exec uv run ${quiet:+"$quiet"} --frozen --no-dev --extra adapters --extra datasets --project "$root" \
         python -m oumi_weights_lab "$@"
 fi
 

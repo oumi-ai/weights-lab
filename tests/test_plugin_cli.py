@@ -62,7 +62,8 @@ def test_wrapper_runs_the_plugin_copy_with_its_lockfile(tmp_path):
     assert first.returncode == 0
     assert "first run downloads PyTorch" in first.stderr
     assert first.stdout == ""  # Setup notices never reach the JSON stdout.
-    expected = ["run", "--frozen", "--no-dev", "--extra", "adapters", "--project"]
+    expected = ["run", "--frozen", "--no-dev", "--extra", "adapters", "--extra", "datasets"]
+    expected += ["--project"]
     expected += [str(plugin.resolve()), "python", "-m", "oumi_weights_lab"]
     expected += ["send", "--session", "s p", "--code", "print(1)"]
     assert log.read_text().splitlines()[1:] == expected

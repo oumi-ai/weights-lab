@@ -137,7 +137,7 @@ def _installed_commit():
 def _worker_requirement(checkout):
     """Install what the caller runs: its checkout, or the same git commit."""
     if checkout is not None:
-        return ".[adapters]"
+        return ".[adapters,datasets]"
     installed = _installed_commit()
     if installed is None:
         raise ValueError(
@@ -145,7 +145,7 @@ def _worker_requirement(checkout):
             "checkout, install from git+https://github.com/oumi-ai/weights-lab, or pass --source"
         )
     url, commit = installed
-    return f"oumi-weights-lab[adapters] @ git+{url}@{commit}"
+    return f"oumi-weights-lab[adapters,datasets] @ git+{url}@{commit}"
 
 
 def _worker_script(session, configuration):
