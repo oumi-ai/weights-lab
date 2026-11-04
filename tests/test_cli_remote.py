@@ -219,6 +219,7 @@ def test_sky_start_forwards_checkpoint_pins_budget_and_infra(transports, capsys)
                 "adapter_revision": "adapter-sha",
                 "source": None,
                 "accelerators": "A100:1",
+                "disk_size": None,
                 "idle_minutes": 15,
                 "infra": "slurm/mycluster/gpu",
             },

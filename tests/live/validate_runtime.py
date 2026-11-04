@@ -161,7 +161,12 @@ def make_assets(root, model=None):
     return str(model), str(adapter)
 
 
-def validate(device, output_dir, model=None, *, checks=CHECKS):
+def validate(device, output_dir, model=None, *, checks=CHECKS, options=None, assets=None, wait=150):
+    """Run ``checks`` in a real worker, then stop it and verify its backup.
+
+    ``options`` adds or replaces ``start`` flags (None drops one), ``assets(root,
+    model)`` returns the model and adapter to load, and ``wait`` bounds the snippet.
+    """
     from oumi_weights_lab.cli import _matches_worker
     from oumi_weights_lab.session import is_process_alive
 
@@ -175,7 +180,7 @@ def validate(device, output_dir, model=None, *, checks=CHECKS):
             [sys.executable, "-m", "oumi_weights_lab", *map(str, args)],
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=wait + 30,
         )
         with (root / "cli.jsonl").open("a") as stream:
             entry = dict(
@@ -190,7 +195,7 @@ def validate(device, output_dir, model=None, *, checks=CHECKS):
         return json.loads(result.stdout)
 
     try:
-        model, adapter = make_assets(root, model)
+        model, adapter = (assets or make_assets)(root, model)
         (root / "device.json").write_text(json.dumps(device))
         options = {
             "model": model,
@@ -199,14 +204,16 @@ def validate(device, output_dir, model=None, *, checks=CHECKS):
             "dtype": "float32",
             "snippet-timeout": 120,
             "pass-limit": 64,
+            **(options or {}),
         }
         start = ["start", "--session", session]
         for flag, value in options.items():
-            start += [f"--{flag}", value]
+            if value is not None:
+                start += [f"--{flag}", value]
         pid = cli(*start)["pid"]
         source = root / "checks.py"
         source.write_text(checks)
-        result = cli("send", "--session", session, "--file", source, "--wait", "--timeout", 150)
+        result = cli("send", "--session", session, "--file", source, "--wait", "--timeout", wait)
         report.update(json.loads((session / "artifacts/runtime.json").read_text()))
         report["snippet_result"] = result
         report["state"] = "succeeded"

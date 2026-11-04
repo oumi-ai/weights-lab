@@ -23,6 +23,8 @@ sky down my-lab
   `--accelerators`, such as `H100:4`; `--max-memory 0=70GiB,1=70GiB` uses only the
   GPUs it names, up to that much on each.
   A model that would need CPU or disk offload is refused before any weights load.
+  With `--device-map`, the shutdown grace defaults to 300 seconds instead of 30.
+- `--disk-size GB` sizes the cluster disk for a large checkpoint and its exports.
 - Use a new `--session` path for each `start`. Relative session and `--resume` paths
   resolve under `~/sky_workdir/`.
 - The worker exits after `--idle-timeout` seconds without work (default 900) or

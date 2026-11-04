@@ -20,7 +20,8 @@ descent. Every snippet's source, output, and forward-pass count is saved.
 Version 0.1 is experimental, and snippets run as trusted Python with your filesystem
 and network access.
 
-Tested on CPU, Apple MPS, NVIDIA H200, and SkyPilot with Slurm.
+Tested on CPU, Apple MPS, NVIDIA H200, a 72B model split across eight NVIDIA H100s,
+and SkyPilot with Slurm.
 
 ![Your coding agent edits a running model's weights: GPT-2's next word changes from Paris to banana, then undo restores Paris. The same model stays loaded throughout.](docs/assets/agent-workbench.svg)
 

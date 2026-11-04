@@ -32,13 +32,15 @@ run `sky check`, then add `--infra slurm/mycluster/mypartition` to `start`.
 For a model larger than one GPU, request several and spread the model over them:
 
 ```sh
-oumi-weights-lab start --cluster lab-big \
-  --model Qwen/Qwen3-32B --session /tmp/lab --accelerators H100:2 --device-map balanced
+oumi-weights-lab start --cluster lab-big --model Qwen/Qwen3-32B --session /tmp/lab \
+  --accelerators H100:2 --device-map balanced --disk-size 512
 ```
 
 `peek` then lists GiB of parameters on each GPU under `devices`. A model that
 does not fit in 90% of the GPUs' free memory, or in `--max-memory`, is refused
-before its weights download.
+before its weights download. `--disk-size` (GB) leaves room for the downloaded
+checkpoint plus any export of it. With `--device-map`, the shutdown grace
+defaults to 300 seconds, since saving the deadline bundle hashes every weight.
 
 Export any checkpoint under `artifacts/` while the model is alive, then stop and
 back up before destroying the worker:
@@ -57,7 +59,8 @@ so on stderr. Remote workers default to a 900-second idle timeout and a
 and `--max-lifetime`; `0` explicitly disables either limit.
 Local workers have no automatic deadline by default. The worker attempts an edit
 bundle before deadline shutdown; `peek` reports the reason and saved path or error.
-An independent watchdog forces exit after the 30-second shutdown grace if needed.
+An independent watchdog forces exit after the shutdown grace (30 seconds, or 300
+with `--device-map`) if needed.
 SkyPilot's separate `--idle-minutes` autodown timer (default 15 minutes) starts
 after the worker job ends, so download results during that interval. Inspect
 `sky status` after startup failures and release resources when finished.

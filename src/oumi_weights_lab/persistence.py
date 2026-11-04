@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import itertools
 import json
 import os
 import tempfile
@@ -39,6 +40,15 @@ def _manifest_digest(manifest: dict) -> str:
     ).hexdigest()
 
 
+def _interleaved(targets: dict[str, Any]) -> list[str]:
+    """Names ordered round-robin across devices, so parallel hashing reads every GPU at once."""
+    groups: dict[str, list[str]] = {}
+    for name, value in targets.items():
+        groups.setdefault(str(value.device), []).append(name)
+    rounds = itertools.zip_longest(*groups.values())
+    return [name for names in rounds for name in names if name is not None]
+
+
 def _fingerprint(lab: Any, originals: dict | None = None) -> str:
     originals = originals or {}
     state = lab.model.state_dict(keep_vars=True)
@@ -51,10 +61,13 @@ def _fingerprint(lab: Any, originals: dict | None = None) -> str:
             storage[key] = value
     targets = {name: originals.get(id(value), value) for name, value in state.items()}
     # Hashing every tensor dominates a deadline save on large models, so hash in
-    # parallel. MPS is not safe to drive from several threads; hash it serially.
+    # parallel, taking tensors from each device in turn so copies from every GPU
+    # overlap. MPS is not safe to drive from several threads; hash it serially.
     serial = any(value.device.type == "mps" for value in targets.values())
-    with ThreadPoolExecutor(max_workers=1 if serial else min(8, os.cpu_count() or 1)) as pool:
-        tensors = dict(zip(targets, pool.map(_digest, targets.values()), strict=True))
+    names = _interleaved(targets)
+    with ThreadPoolExecutor(max_workers=1 if serial else min(32, os.cpu_count() or 1)) as pool:
+        digests = pool.map(_digest, (targets[name] for name in names))
+        tensors = dict(zip(names, digests, strict=True))
     # Tied tensors are part of the model contract, not just equal-valued weights.
     aliases: dict[int, list[str]] = {}
     for name, value in lab.model.named_parameters(remove_duplicate=False):

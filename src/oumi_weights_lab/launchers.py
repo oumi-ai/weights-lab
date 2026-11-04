@@ -344,6 +344,7 @@ class SkyPilotLauncher:
         source=None,
         infra=None,
         accelerators="A100:1",
+        disk_size=None,
         idle_minutes=15,
         bootstrap_timeout=900,
         bootstrap_poll_interval=0.5,
@@ -354,6 +355,10 @@ class SkyPilotLauncher:
                 raise ValueError("infra must be a nonempty SkyPilot infrastructure selector")
             if infra.split("/", 1)[0].strip().lower() == "modal":
                 raise ValueError("Modal is not supported by upstream SkyPilot")
+        if disk_size is not None and (
+            isinstance(disk_size, bool) or not isinstance(disk_size, int) or disk_size < 1
+        ):
+            raise ValueError("disk_size must be a positive whole number of GB")
         if not isinstance(idle_minutes, int) or idle_minutes < 1:
             raise ValueError("idle_minutes must be a positive integer")
         for name, value in (
@@ -386,7 +391,10 @@ class SkyPilotLauncher:
             root = Path(temporary)
             task = {
                 "name": "oumi-weights-lab",
-                "resources": {} if accelerators is None else {"accelerators": accelerators},
+                "resources": {
+                    **({} if accelerators is None else {"accelerators": accelerators}),
+                    **({} if disk_size is None else {"disk_size": disk_size}),
+                },
                 "setup": shlex.join([self.python, "-m", "pip", "install", requirement]),
                 "run": shlex.join([self.python, "-c", script]),
             }
