@@ -86,11 +86,16 @@ class _TemporaryHook:
             self.handle.remove()
 
 
-def _accepts_position_ids(model):
+def _accepts(model, name):
+    """Whether the base model's forward takes a keyword argument called ``name``."""
     import inspect
 
     base = model.get_base_model() if hasattr(model, "peft_config") else model
-    return "position_ids" in inspect.signature(base.forward).parameters
+    return name in inspect.signature(base.forward).parameters
+
+
+def _accepts_position_ids(model):
+    return _accepts(model, "position_ids")
 
 
 class InspectionMixin:
