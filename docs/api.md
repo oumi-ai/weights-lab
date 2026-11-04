@@ -17,7 +17,7 @@ relative paths under `artifacts/`; other paths resolve from where `start` ran.
 | `swap(name, source, source_name=None, index=None)` | Copy a parameter or slice from a tensor, model, or dict |
 | `undo(edit_id=None)` | Restore the most recent edit exactly; undo is strictly last-in, first-out |
 | `edits()` | Edit history |
-| `export(path)` | Hugging Face checkpoint plus edit manifest; a PEFT adapter is merged into a copy |
+| `export(path)` | Hugging Face checkpoint plus edit manifest; a LoRA adapter is merged one layer at a time, other adapters into a copy of the model |
 | `save_edits(path)`, `load_edits(path)` | Save edits, undo history, pass count, and dataset reservations, then resume them in a fresh session of the same model (CLI: `start --resume PATH`) |
 
 Only API edits can be undone or saved; writes made directly through `model` are

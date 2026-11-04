@@ -34,4 +34,8 @@ Saving does not run model forwards. Keep logs and evaluation artifacts separatel
 
 For SkyPilot, the bundle must already exist at the remote path passed to
 `--resume`; the flag does not upload it. Download saved bundles before teardown.
-To share a complete model instead, use `lab.export(...)` while it is alive.
+To share a complete model instead, use `lab.export(...)` while it is alive. With
+a LoRA adapter, export merges one layer at a time and restores it, so it needs CPU
+memory for the merged layers but no second copy of the model. DoRA and other PEFT
+methods merge a copy of the whole model, which is refused for a model split
+across GPUs.
