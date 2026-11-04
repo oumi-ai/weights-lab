@@ -1,0 +1,72 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "oumi-weights-lab"
+version = "0.1.0"
+description = "A persistent Python workspace for exploring open language models"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
+dependencies = ["torch>=2.4", "transformers>=4.56,<6", "safetensors>=0.4.3"]
+
+[project.urls]
+Repository = "https://github.com/oumi-ai/weights-lab"
+Documentation = "https://github.com/oumi-ai/weights-lab/tree/main/docs"
+Issues = "https://github.com/oumi-ai/weights-lab/issues"
+
+[project.optional-dependencies]
+adapters = ["peft>=0.13"]
+
+[project.scripts]
+oumi-weights-lab = "oumi_weights_lab.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.9", "build>=1.2", "pyyaml>=6"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/oumi_weights_lab"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/oumi_weights_lab",
+    "bin",
+    "tests",
+    "examples",
+    "scripts",
+    "skills",
+    ".claude-plugin",
+    ".codex-plugin",
+    ".agents/plugins/marketplace.json",
+    "plugin.json",
+    "docs/api.md",
+    "docs/remote.md",
+    "CONTRIBUTING.md",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not integration'"
+markers = ["integration: opt-in tests requiring an external coding harness"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"examples/*.py" = ["F821"]

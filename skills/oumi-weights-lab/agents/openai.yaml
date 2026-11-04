@@ -1,0 +1,4 @@
+interface:
+  display_name: "Oumi Weights Lab"
+  short_description: "Explore model weights in a persistent Python worker"
+  default_prompt: "Use $oumi-weights-lab to compare a model baseline with a reversible weight edit and report the measured effect."

@@ -1,0 +1,112 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.10.12"
+          enable-cache: true
+          cache-suffix: package-py312
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+            .github/workflows/tests.yml
+      - name: Install build and lint tools
+        run: |
+          uv venv --python python "$RUNNER_TEMP/ci-tools"
+          uv pip install --python "$RUNNER_TEMP/ci-tools/bin/python" ruff pytest pyyaml
+      - name: Check the lockfile matches pyproject.toml
+        # The plugin's CLI runs `uv run --frozen`, which trusts uv.lock as-is.
+        run: uv lock --check
+      - name: Lint and check repository contracts
+        run: |
+          "$RUNNER_TEMP/ci-tools/bin/ruff" check .
+          "$RUNNER_TEMP/ci-tools/bin/ruff" format --check .
+          python scripts/check_repo.py
+          "$RUNNER_TEMP/ci-tools/bin/pytest" -q tests/test_plugin_packaging.py tests/test_repo_checks.py tests/test_ci_changes.py
+      - name: Build distributions
+        run: uv build
+      - name: Smoke test installed wheel without model dependencies
+        run: |
+          uv venv --python python "$RUNNER_TEMP/wheel-smoke"
+          uv pip install --python "$RUNNER_TEMP/wheel-smoke/bin/python" --no-deps dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/wheel-smoke/bin/python" -c 'import importlib.metadata, oumi_weights_lab, oumi_weights_lab.cli; assert oumi_weights_lab.__version__ == importlib.metadata.version("oumi-weights-lab")'
+          "$RUNNER_TEMP/wheel-smoke/bin/oumi-weights-lab" --help
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: "3.12"
+            dependencies: latest
+          - python-version: "3.11"
+            dependencies: minimum
+    env:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      CUDA_VISIBLE_DEVICES: ""
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check whether model tests are needed
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python3 scripts/ci_changes.py --base "$BASE_SHA" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        if: steps.changes.outputs.run == 'true'
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        if: steps.changes.outputs.run == 'true'
+        with:
+          version: "0.10.12"
+          enable-cache: true
+          cache-suffix: ${{ matrix.dependencies }}-py${{ matrix.python-version }}-cpu
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+            .github/workflows/tests.yml
+      - name: Create test environment
+        if: steps.changes.outputs.run == 'true'
+        run: uv venv --python python
+      - name: Install latest CPU dependencies
+        if: steps.changes.outputs.run == 'true' && matrix.dependencies == 'latest'
+        run: uv pip install --torch-backend cpu -e '.[adapters]' pytest pyyaml
+      - name: Install minimum supported CPU dependencies
+        if: steps.changes.outputs.run == 'true' && matrix.dependencies == 'minimum'
+        run: |
+          uv pip install --torch-backend cpu -e '.[adapters]' 'torch==2.4.0' 'transformers==4.56.0' 'safetensors==0.4.3' 'peft==0.13.0' pytest pyyaml
+          uv pip check
+      - name: Full unit suite
+        if: steps.changes.outputs.run == 'true' && matrix.dependencies == 'latest'
+        run: .venv/bin/pytest -q
+      - name: Minimum dependency model and adapter checks
+        if: steps.changes.outputs.run == 'true' && matrix.dependencies == 'minimum'
+        run: >-
+          .venv/bin/pytest -q tests/test_local_model.py tests/test_adapter.py tests/test_loading.py
+          tests/test_persistence.py tests/test_scoring.py tests/test_interventions.py
+          tests/test_budget.py

@@ -1,0 +1,20 @@
+{
+  "name": "oumi-weights-lab",
+  "interface": {
+    "displayName": "Oumi Weights Lab"
+  },
+  "plugins": [
+    {
+      "name": "oumi-weights-lab",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

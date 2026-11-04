@@ -1,0 +1,14 @@
+{
+  "name": "oumi-weights-lab",
+  "description": "Persistent open-weights model experiments for coding agents.",
+  "owner": {
+    "name": "Oumi"
+  },
+  "plugins": [
+    {
+      "name": "oumi-weights-lab",
+      "source": "./",
+      "description": "Investigate open-weights language models in a persistent local worker."
+    }
+  ]
+}
