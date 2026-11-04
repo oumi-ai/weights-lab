@@ -3,7 +3,7 @@ import json
 import pytest
 import torch
 
-from weights_lab.inspection import InspectionMixin
+from oumi_weights_lab.inspection import InspectionMixin
 
 
 class Layer(torch.nn.Module):

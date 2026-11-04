@@ -93,12 +93,12 @@ print(json.dumps(report, indent=2))
 Run from the installed package environment, choosing a fresh session path:
 
 ```bash
-weights-lab start --session sessions/first-layer --model HuggingFaceTB/SmolLM2-135M \
+oumi-weights-lab start --session sessions/first-layer --model HuggingFaceTB/SmolLM2-135M \
   --device cpu --dtype float32 --snippet-timeout 300 --pass-limit 64
-weights-lab send --session sessions/first-layer --file first-layer.py --follow --timeout 600
-weights-lab peek --session sessions/first-layer
-weights-lab stop --session sessions/first-layer
-weights-lab backup --session sessions/first-layer --output first-layer.tar.gz
+oumi-weights-lab send --session sessions/first-layer --file first-layer.py --follow --timeout 600
+oumi-weights-lab peek --session sessions/first-layer
+oumi-weights-lab stop --session sessions/first-layer
+oumi-weights-lab backup --session sessions/first-layer --output first-layer.tar.gz
 ```
 
 Inspect `sessions/first-layer/artifacts/report.json` and the per-item scores. The report measures score movement even if no winning labels change. It records the undo control and exposes any failure to restore the original scores. Expected execution uses 28 forwards; this is a pass-count expectation, not a predicted accuracy. This document contains no measured outcome. The saved worker records and report supply the evidence for the actual run.

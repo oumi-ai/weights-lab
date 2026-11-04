@@ -167,7 +167,7 @@ related rows; row-level random splits would leak information.
 ## Experimental attachments
 
 ```python
-from weights_lab.circuits import DateFacts
+from oumi_weights_lab.circuits import DateFacts
 
 with lab.attach(DateFacts(), mode="prefix", name="calendar-facts"):
     text = lab.generate("What weekday was 2026-11-03?", max_new_tokens=24)
@@ -184,7 +184,7 @@ with lab.attach(lambda model, args, kwargs, output: bias, mode="logits"):
 
 Handles support `remove()` and context cleanup. `attachments()` lists active
 components, and attachment changes advance the experiment revision. The fixed
-tensor building blocks in `weights_lab.circuits` provide token matching, nearest
+tensor building blocks in `oumi_weights_lab.circuits` provide token matching, nearest
 matches, lookup tables, digit addition with carries, integer comparison, and a
 calendar circuit exact over valid dates from 2000 through 2099. They use fixed
 weights, indexing, and integer operations; they are not trained neural arithmetic.
@@ -196,7 +196,7 @@ of any language model's tokenizer.
 
 ## Remote sessions
 
-`weights_lab.launchers.SkyPilotLauncher(cluster, python="python3")` manages remote
+`oumi_weights_lab.launchers.SkyPilotLauncher(cluster, python="python3")` manages remote
 sessions through upstream SkyPilot. `start(model, session, source=..., infra=None,
 accelerators="A100:1", idle_minutes=15, **config)` accepts the same model settings
 as the local CLI. Set `infra="slurm/mycluster/mypartition"` to select Slurm, or

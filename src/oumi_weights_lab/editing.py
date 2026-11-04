@@ -355,7 +355,7 @@ class EditingMixin:
             model = copy.deepcopy(model, memo).merge_and_unload(safe_merge=True)
         destination.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(
-            prefix=".weights-lab-export-", dir=destination.parent
+            prefix=".oumi-weights-lab-export-", dir=destination.parent
         ) as temp:
             staged = Path(temp) / "checkpoint"
             model.save_pretrained(staged)
@@ -369,7 +369,7 @@ class EditingMixin:
                 "edits": self.edits(),
                 "merged_adapter": merged_adapter,
             }
-            (staged / "weights_lab_manifest.json").write_text(
+            (staged / "oumi_weights_lab_manifest.json").write_text(
                 json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
             )
             if destination.exists():

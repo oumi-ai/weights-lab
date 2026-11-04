@@ -14,7 +14,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from weights_lab import Lab
+from oumi_weights_lab import Lab
 
 
 def raw_hash(tensor):

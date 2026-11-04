@@ -6,8 +6,8 @@ import tarfile
 
 import pytest
 
-from weights_lab.cli import main
-from weights_lab.session import create_session, read_json, submit, write_json
+from oumi_weights_lab.cli import main
+from oumi_weights_lab.session import create_session, read_json, submit, write_json
 
 
 @pytest.fixture
@@ -69,7 +69,7 @@ def test_start_records_launch_failure(tmp_path, monkeypatch, capsys):
     def fail_to_launch(*args, **kwargs):
         raise OSError("process launch failed")
 
-    monkeypatch.setattr("weights_lab.cli.subprocess.Popen", fail_to_launch)
+    monkeypatch.setattr("oumi_weights_lab.cli.subprocess.Popen", fail_to_launch)
     assert main(["start", "--session", str(path), "--model", "local-model"]) != 0
     assert "process launch failed" in capsys.readouterr().err
     status = read_json(path / "status.json")

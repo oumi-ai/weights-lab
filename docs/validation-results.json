@@ -44,6 +44,32 @@
       "scheduler_job_gone_after_teardown": true,
       "forced_cancellation": false,
       "report_sha256": "30a14680e045819dd3761a802ef1d8cdfa5275cad3df16a5b480ceda9b52bd45"
+    },
+    "cuda_edit_bundle_resume": {
+      "state": "passed",
+      "validated_on_utc": "2026-11-04",
+      "device": "NVIDIA H200",
+      "torch": "2.15.0+cu132",
+      "transformers": "5.22.1",
+      "peft": "0.21.2",
+      "base_dtype": "bfloat16",
+      "adapter_dtype": "float32",
+      "inherited_forward_passes": 4,
+      "inherited_pass_limit": 32,
+      "download_and_upload_hashes_verified": true,
+      "edited_parameters_and_logits_exact": true,
+      "undo_parameters_and_outputs_exact": true,
+      "failed_heldout_reservation_preserved": true,
+      "rejected_retry_consumed_zero_passes": true,
+      "both_workers_stopped": true,
+      "installed_source_matches": true,
+      "source_manifest_sha256": "3537fbb03c4d9ab05f97ab62664978f86442c29aca2ff569aee8fcb758a831e5",
+      "prepare_report_sha256": "4c7e0a3492b25036efed787bb58cf67f2d071120077d865b1b3a962793825344",
+      "resume_report_sha256": "23670e30ee4c5fcec814a202f9a8c5ccbc385af289f51febd4df794c761cb13c",
+      "distribution": "oumi-weights-lab",
+      "python_namespace": "oumi_weights_lab",
+      "console_verified": true,
+      "final_audit_sha256": "5703f33fb1b3febc71f8211b3d8f0cc70324e425496468a6b093928c72faa30a"
     }
   },
   "math500_benchmark": {
@@ -144,6 +170,66 @@
     "slurm_report": "../sessions/validation-20261103/sky-slurm/wl-inner-evidence-v6/report.json",
     "slurm_audit": "../sessions/validation-20261103/sky-slurm/audit.json",
     "slurm_controller_version_log": "../sessions/validation-20261103/sky-slurm/wl-ctld.log",
-    "skypilot_version_record": "../sessions/validation-20261103/sky-slurm/wl-versions.txt"
+    "skypilot_version_record": "../sessions/validation-20261103/sky-slurm/wl-versions.txt",
+    "cuda_resume_prepare": "../sessions/oumi-weights-lab-readiness-20261103/remote-evidence/prepare/report.json",
+    "cuda_resume_result": "../sessions/oumi-weights-lab-readiness-20261103/remote-evidence/resume/report.json",
+    "cuda_resume_final_audit": "../sessions/oumi-weights-lab-readiness-20261103/final-audit.json",
+    "linux_lifecycle_result": "../sessions/oumi-weights-lab-readiness-20261103/linux-evidence/result.json",
+    "harness_integration_summary": "../sessions/oumi-weights-lab-readiness-20261103/harness-success-summary.json",
+    "harness_event_proof": "../sessions/oumi-weights-lab-readiness-20261103/harness-events.jsonl"
+  },
+  "readiness_checks": {
+    "validated_on_utc": "2026-11-04",
+    "local_suite": {
+      "passed": 370,
+      "integration_tests_deselected": 4
+    },
+    "minimum_dependency_subset": {
+      "passed": 69,
+      "skipped": 4,
+      "python": "3.11",
+      "torch": "2.4.0",
+      "transformers": "4.56.0",
+      "peft": "0.13.0",
+      "safetensors": "0.4.3"
+    },
+    "linux_lifecycle_subset": {
+      "passed": 74,
+      "model_downloads": false
+    },
+    "real_harness_integration": {
+      "claude_code_version": "2.1.318",
+      "codex_version": "0.166.0",
+      "install_and_discover": {
+        "claude": "passed",
+        "codex": "passed"
+      },
+      "invoke_read_recipe_and_cli_help": {
+        "claude": "passed",
+        "codex": "passed"
+      },
+      "host_global_settings_unchanged": true,
+      "api_transcripts_retained": false,
+      "success_summary_sha256": "3e034d0331f22b2a40ed1ebc8fc31dc3b167d8fd21653fe689bd723f72262206",
+      "plugin_id": "oumi-weights-lab@oumi-weights-lab-local",
+      "qualified_skill": "oumi-weights-lab:oumi-weights-lab",
+      "bounded_tool_event_proof_retained": true,
+      "event_proof_sha256": "e08f75edfba104844e26bf3c6201011b2597ed59409490cefdecc60629073a68"
+    },
+    "canonical_identity": {
+      "distribution": "oumi-weights-lab",
+      "console": "oumi-weights-lab",
+      "python_namespace": "oumi_weights_lab",
+      "skill": "oumi-weights-lab",
+      "plugin": "oumi-weights-lab@oumi-weights-lab-local"
+    },
+    "resource_cleanup": {
+      "validation_instances": 0,
+      "validation_disks": 0,
+      "validation_gpu_clusters": 0,
+      "skypilot_clusters": 0,
+      "watchdog_exited": true
+    },
+    "estimated_total_compute_usd": 14.63
   }
 }

@@ -111,6 +111,9 @@ def _start(args: argparse.Namespace) -> int:
         "revision": args.revision,
         "adapter_revision": args.adapter_revision,
         "resume": str(args.resume.expanduser().resolve()) if args.resume else None,
+        "idle_timeout": args.idle_timeout,
+        "max_lifetime": args.max_lifetime,
+        "shutdown_grace": args.shutdown_grace,
     }
     if args.adapter:
         config["adapter"] = args.adapter
@@ -118,7 +121,7 @@ def _start(args: argparse.Namespace) -> int:
     try:
         with (path / "worker.log").open("ab") as log:
             process = subprocess.Popen(
-                [sys.executable, "-m", "weights_lab", "_worker", "--session", str(path)],
+                [sys.executable, "-m", "oumi_weights_lab", "_worker", "--session", str(path)],
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
@@ -214,7 +217,7 @@ def _matches_worker(pid: int, path: Path) -> bool:
         text=True,
         check=False,
     ).stdout.strip()
-    return command.endswith(f"-m weights_lab _worker --session {path}")
+    return command.endswith(f"-m oumi_weights_lab _worker --session {path}")
 
 
 def _stop(args: argparse.Namespace) -> int:
@@ -323,6 +326,11 @@ def _remote_start(args):
     }
     if args.resume is not None:
         config["resume"] = str(args.resume)
+    for key in ("idle_timeout", "max_lifetime"):
+        if getattr(args, key) is not None:
+            config[key] = getattr(args, key)
+    if args.shutdown_grace != 30:
+        config["shutdown_grace"] = args.shutdown_grace
     _configuration(args.model, config)  # Reject static errors before provisioning.
     transport = SkyPilotLauncher(args.cluster, python=args.remote_python)
     config.update(
@@ -384,7 +392,7 @@ def _remote_command(args, transport):
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="weights-lab",
+        prog="oumi-weights-lab",
         description="Keep a local model loaded and run Python snippets against it.",
     )
     commands = parser.add_subparsers(
@@ -403,6 +411,22 @@ def _parser() -> argparse.ArgumentParser:
     )
     start.add_argument("--snippet-timeout", type=_positive, default=300.0)
     start.add_argument("--pass-limit", type=int, help="maximum total model forward calls")
+    start.add_argument(
+        "--idle-timeout",
+        type=float,
+        help="seconds without queued/running work; 0 disables (Sky default: 900)",
+    )
+    start.add_argument(
+        "--max-lifetime",
+        type=float,
+        help="maximum worker seconds including load; 0 disables (Sky default: 14400)",
+    )
+    start.add_argument(
+        "--shutdown-grace",
+        type=_positive,
+        default=30,
+        help="seconds for graceful shutdown before forced kill (default: 30)",
+    )
     start.add_argument("--launcher", choices=["local", "sky"], default="local")
     start.add_argument(
         "--source", type=Path, help="source checkout to install on a SkyPilot worker"
@@ -482,5 +506,5 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 130
     except (OSError, ValueError, RuntimeError) as exc:
-        print(f"weights-lab: {exc}", file=sys.stderr)
+        print(f"oumi-weights-lab: {exc}", file=sys.stderr)
         return 1

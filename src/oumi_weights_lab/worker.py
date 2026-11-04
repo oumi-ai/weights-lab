@@ -6,6 +6,7 @@ import contextlib
 import fcntl
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -62,9 +63,12 @@ class Worker:
             **extra,
         }
         with session_lock(self.path):
-            write_json(self.path / "status.json", status)
             if state in {"stopped", "failed"}:
-                cancel_unfinished(self.path, extra.get("error", "worker stopped before completion"))
+                cancel_unfinished(
+                    self.path,
+                    extra.get("error", extra.get("reason", "worker stopped before completion")),
+                )
+            write_json(self.path / "status.json", status)
 
     @staticmethod
     def _stop(signum: int, frame: Any) -> None:
@@ -151,6 +155,7 @@ class Worker:
                         return
 
             watcher = threading.Thread(target=watch_stop, daemon=True)
+            guard = None
             exit_code = 0
             final_error = None
             try:
@@ -158,6 +163,23 @@ class Worker:
                     self._status("stopped")
                     return 0
                 self._status("loading")
+                if self.config.get("idle_timeout") or self.config.get("max_lifetime"):
+                    guard = subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-m",
+                            "oumi_weights_lab.watchdog",
+                            "--session",
+                            str(self.path),
+                            "--pid",
+                            str(os.getpid()),
+                            "--started",
+                            str(time.monotonic()),
+                        ],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
                 watcher.start()
                 if self.loader is None:
                     from .lab import load_lab
@@ -165,7 +187,7 @@ class Worker:
                     self.loader = load_lab
                 self.lab = self.loader(self.config, self.path)
                 self.namespace = {
-                    "__name__": "__weights_lab__",
+                    "__name__": "__oumi_weights_lab__",
                     "lab": self.lab,
                     "model": self.lab.model,
                     "tokenizer": self.lab.tokenizer,
@@ -195,12 +217,27 @@ class Worker:
                 if watcher.ident is not None:
                     watcher.join()
                 signal.setitimer(signal.ITIMER_REAL, 0)
+                extra = {}
+                shutdown = self.path / "shutdown.json"
+                if shutdown.exists():
+                    extra = read_json(shutdown)
+                    extra.pop("pid", None)
+                    self._status("stopping", **extra)
+                    save = getattr(self.lab, "save_edits", None)
+                    if callable(save):
+                        try:
+                            extra["edit_bundle"] = str(save(f"shutdown-{time.time_ns()}"))
+                        except Exception as error:
+                            extra["checkpoint_error"] = f"{type(error).__name__}: {error}"
                 try:
                     if final_error is None:
-                        self._status("stopped")
+                        self._status("stopped", **extra)
                     else:
-                        self._status("failed", error=final_error)
+                        self._status("failed", error=final_error, **extra)
                 finally:
+                    if guard is not None:
+                        guard.terminate()
+                        guard.wait()
                     for signum, handler in previous.items():
                         signal.signal(signum, handler)
             return exit_code

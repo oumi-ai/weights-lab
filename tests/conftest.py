@@ -7,7 +7,7 @@ def tiny_lab(tmp_path):
     import torch
     from transformers import GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerFast
 
-    from weights_lab import Lab
+    from oumi_weights_lab import Lab
 
     backend = tokenizers.Tokenizer(
         tokenizers.models.WordLevel(

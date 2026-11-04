@@ -14,9 +14,9 @@ CHECKS = """
 import json
 import torch
 import transformers
-import weights_lab
+import oumi_weights_lab
 from transformers import AutoModelForCausalLM
-from weights_lab import BudgetExceeded
+from oumi_weights_lab import BudgetExceeded
 expected_device = json.loads((artifacts.parent.parent / "device.json").read_text())
 assert lab.device.type == expected_device
 assert all(value.device.type == expected_device for value in model.parameters())
@@ -115,7 +115,7 @@ report = {"device": str(lab.device), "torch": torch.__version__,
           "export_max_logit_difference": float((exported_logits-restored_logits).abs().max()),
           "baseline": baseline, "edited": edited, "restored": restored, "held_out": final}
 import hashlib
-package = Path(weights_lab.__file__).parent
+package = Path(oumi_weights_lab.__file__).parent
 report["package_source_sha256"] = {
     str(path.relative_to(package)): hashlib.sha256(path.read_bytes()).hexdigest()
     for path in sorted(package.rglob("*.py"))
@@ -162,8 +162,8 @@ def make_assets(root, model=None):
 
 
 def validate(device, output_dir, model=None, *, checks=CHECKS):
-    from weights_lab.cli import _matches_worker
-    from weights_lab.session import is_process_alive
+    from oumi_weights_lab.cli import _matches_worker
+    from oumi_weights_lab.session import is_process_alive
 
     root = Path(output_dir).resolve()
     root.mkdir(parents=True, exist_ok=False)
@@ -172,7 +172,7 @@ def validate(device, output_dir, model=None, *, checks=CHECKS):
 
     def cli(*args):
         result = subprocess.run(
-            [sys.executable, "-m", "weights_lab", *map(str, args)],
+            [sys.executable, "-m", "oumi_weights_lab", *map(str, args)],
             capture_output=True,
             text=True,
             timeout=180,

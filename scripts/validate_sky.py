@@ -10,17 +10,17 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from weights_lab.launchers import SkyPilotLauncher, _SSHTransport
+from oumi_weights_lab.launchers import SkyPilotLauncher, _SSHTransport
 
-PYTHON = "/tmp/weights-lab-env/bin/python"
-UV = "/tmp/weights-lab-uv/uv"
-SESSION = "/tmp/weights-lab-transport"
+PYTHON = "/tmp/oumi-weights-lab-env/bin/python"
+UV = "/tmp/oumi-weights-lab-uv/uv"
+SESSION = "/tmp/oumi-weights-lab-transport"
 REVISION = "5f91d94bd9cd7190a9f3216ff93cd1dd95f2c7be"
 SETUP = (
     "set -euo pipefail\n"
     "curl -LsSf https://astral.sh/uv/0.10.12/install.sh | "
-    "env UV_INSTALL_DIR=/tmp/weights-lab-uv UV_NO_MODIFY_PATH=1 sh\n"
-    f"{UV} venv --seed --python 3.11 /tmp/weights-lab-env\n"
+    "env UV_INSTALL_DIR=/tmp/oumi-weights-lab-uv UV_NO_MODIFY_PATH=1 sh\n"
+    f"{UV} venv --seed --python 3.11 /tmp/oumi-weights-lab-env\n"
     f"{UV} pip install --python {PYTHON} '.[adapters]'\n"
 )
 
@@ -102,9 +102,9 @@ def validate(
     source = Path(source or Path(__file__).resolve().parents[1]).resolve()
     root = Path(output).resolve()
     root.mkdir(parents=True, exist_ok=False)
-    cluster = cluster or f"weights-lab-val-{datetime.now(UTC):%Y%m%d-%H%M%S-%f}"
-    if not cluster.startswith("weights-lab-val-"):
-        raise ValueError("validation requires a dedicated weights-lab-val-* cluster name")
+    cluster = cluster or f"oumi-weights-lab-val-{datetime.now(UTC):%Y%m%d-%H%M%S-%f}"
+    if not cluster.startswith("oumi-weights-lab-val-"):
+        raise ValueError("validation requires a dedicated oumi-weights-lab-val-* cluster name")
     status = subprocess.run(
         ["sky", "status", "--all-users", "--output", "json"],
         capture_output=True,
@@ -275,18 +275,18 @@ def validate(
                 "--device",
                 "cuda",
                 "--output-dir",
-                "/tmp/weights-lab-runtime",
+                "/tmp/oumi-weights-lab-runtime",
             ],
             "cuda-runtime.log",
         )
-        ssh.download("/tmp/weights-lab-runtime/report.json", root / "cuda-runtime.json")
-        ssh.download("/tmp/weights-lab-runtime/session.tar.gz", root / "cuda-runtime.tar.gz")
+        ssh.download("/tmp/oumi-weights-lab-runtime/report.json", root / "cuda-runtime.json")
+        ssh.download("/tmp/oumi-weights-lab-runtime/session.tar.gz", root / "cuda-runtime.tar.gz")
         runtime = json.loads((root / "cuda-runtime.json").read_text())
         if runtime["state"] != "succeeded" or runtime["worker_alive_after_stop"]:
             raise RuntimeError("CUDA runtime harness did not pass and stop its worker")
         report["cuda_runtime"] = runtime
         if prepared:
-            remote = "/tmp/weights-lab-benchmark"
+            remote = "/tmp/oumi-weights-lab-benchmark"
             for name in ("manifest.json", "dataset.jsonl", "prompts.jsonl", "upstream_mathqa.py"):
                 upload(prepared / name, f"{remote}/{name}")
             benchmark = source / "scripts/validate_qwen_benchmark.py"

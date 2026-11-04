@@ -2,7 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from weights_lab.budget import BudgetExceeded, PassBudget
+from oumi_weights_lab.budget import BudgetExceeded, PassBudget
 
 
 @pytest.mark.parametrize("limit", [-1, 1.5, True, "2"])

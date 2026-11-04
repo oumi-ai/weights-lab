@@ -1,6 +1,6 @@
 """Check GPT-2 against upstream golden tokens and HF continuation loss on CPU.
 
-Run: uv run python -m examples.parity --output-dir /tmp/weights-lab-parity
+Run: uv run python -m examples.parity --output-dir /tmp/oumi-weights-lab-parity
 The first run downloads the public GPT-2 124M checkpoint (roughly 500 MB).
 """
 
@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 import transformers
 
-from weights_lab.lab import load_lab
+from oumi_weights_lab.lab import load_lab
 
 MODEL_ID = "openai-community/gpt2"
 MODEL_REVISION = "607a30d783dfa663caf39e06633721c8d4cfcd7e"

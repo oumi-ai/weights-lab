@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from weights_lab.editing import EditBook, EditingMixin
+from oumi_weights_lab.editing import EditBook, EditingMixin
 
 torch = pytest.importorskip("torch")
 
@@ -120,7 +120,7 @@ def test_swap_accepts_tensor_mapping_and_model(model):
 
 
 def test_chunked_stats_compare_noncontiguous_and_nonfinite(monkeypatch):
-    import weights_lab.editing as editing
+    import oumi_weights_lab.editing as editing
 
     monkeypatch.setattr(editing, "_CHUNK", 3)
     module = torch.nn.Module()
@@ -188,7 +188,7 @@ def test_export_round_trip_preserves_edits_and_tokenizer(tmp_path):
     with torch.no_grad():
         assert torch.equal(reloaded(inputs).logits, expected)
     assert AutoTokenizer.from_pretrained(destination).get_vocab() == tokenizer.get_vocab()
-    manifest = json.loads((destination / "weights_lab_manifest.json").read_text())
+    manifest = json.loads((destination / "oumi_weights_lab_manifest.json").read_text())
     assert manifest["active_edit_ids"] == [first]
     assert manifest["revision"] == 1
     assert manifest["edits"][0]["active"]
@@ -203,7 +203,7 @@ def test_export_failure_leaves_destination_absent(tmp_path, model):
     with pytest.raises(AttributeError):
         lab.export("bad")
     assert not (lab.artifacts / "bad").exists()
-    assert not list(lab.artifacts.glob(".weights-lab-export-*"))
+    assert not list(lab.artifacts.glob(".oumi-weights-lab-export-*"))
 
 
 def test_lora_full_export_keeps_base_edits_without_merging_live_model(tmp_path):
@@ -260,7 +260,7 @@ def test_export_accepts_existing_empty_directory(tmp_path):
 
 
 def test_stats_stable_for_large_close_values(monkeypatch):
-    import weights_lab.editing as editing
+    import oumi_weights_lab.editing as editing
 
     monkeypatch.setattr(editing, "_CHUNK", 2)
     model = torch.nn.Module()

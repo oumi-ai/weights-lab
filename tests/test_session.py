@@ -3,7 +3,7 @@ from threading import Event
 
 import pytest
 
-from weights_lab.session import (
+from oumi_weights_lab.session import (
     create_session,
     is_process_alive,
     read_json,

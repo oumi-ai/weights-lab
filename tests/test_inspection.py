@@ -4,7 +4,7 @@ import pytest
 import torch
 from transformers import GPT2Config, GPT2LMHeadModel
 
-from weights_lab.inspection import InspectionMixin, train_probe
+from oumi_weights_lab.inspection import InspectionMixin, train_probe
 
 
 class Inspect(InspectionMixin):

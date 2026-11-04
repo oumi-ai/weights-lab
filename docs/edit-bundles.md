@@ -17,10 +17,10 @@ machine. Start a **new session directory**, using the same original model,
 adapter, precision, and tokenizer:
 
 ```sh
-weights-lab start --session sessions/resumed --model /path/to/original-checkpoint \
+oumi-weights-lab start --session sessions/resumed --model /path/to/original-checkpoint \
   --device cpu --dtype float32 \
   --resume /path/to/old-session/artifacts/candidate-v1
-weights-lab send --session sessions/resumed --code 'print(lab.edits()); lab.undo()' --follow
+oumi-weights-lab send --session sessions/resumed --code 'print(lab.edits()); lab.undo()' --follow
 ```
 
 Alternatively, call `lab.load_edits("/absolute/path/to/bundle")` in a fresh

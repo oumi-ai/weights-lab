@@ -5,7 +5,7 @@ Use temporary components to test a narrow computation hypothesis. `attach` retur
 A checked fact prefix is the smallest date experiment:
 
 ```python
-from weights_lab.circuits import DateFacts, DateCalculator
+from oumi_weights_lab.circuits import DateFacts, DateCalculator
 import torch
 
 calculator = DateCalculator()

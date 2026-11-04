@@ -1,6 +1,6 @@
 # Contributing
 
-Weights Lab 0.1.0 is experimental. Its Python API and session formats may change
+Oumi Weights Lab 0.1.0 is experimental. Its Python API and session formats may change
 as model inspection and editing workflows develop. Develop against a source checkout.
 
 ## Set up and check changes
@@ -13,6 +13,7 @@ uv run pytest -q
 uv run ruff check .
 uv run ruff format --check .
 uv run python -m build
+uv run python scripts/check_repo.py
 ```
 
 The tests use small local models; the core suite needs no cloud credentials.
@@ -20,15 +21,21 @@ The scripts under `scripts/` run separate runtime and remote validation. Read
 [the validation record](docs/validation.md) before running a harness that provisions
 infrastructure or downloads larger models.
 
+CI keeps package/link/manifest checks separate from model dependencies. The main
+suite uses tiny offline CPU models; a smaller job checks the declared dependency
+floor. Docker-based [Claude Code/Codex integration tests](docs/harness-integration.md)
+are opt-in and excluded from ordinary pytest runs. They do not download models;
+actual agent invocation requires separately enabled API access.
+
 ## Find the code
 
 | Area | Files |
 | --- | --- |
-| Model loading and shared workspace | `src/weights_lab/lab.py`, `worker.py`, `session.py` |
-| Weight edits, undo, and checkpoint export | `src/weights_lab/editing.py` |
-| Evaluation and pass limits | `src/weights_lab/scoring.py`, `budget.py` |
-| Activations, gradients, probes, and attachments | `src/weights_lab/inspection.py`, `attachments.py`, `circuits.py` |
-| CLI and SkyPilot transport | `src/weights_lab/cli.py`, `launchers.py` |
+| Model loading and shared workspace | `src/oumi_weights_lab/lab.py`, `worker.py`, `session.py` |
+| Weight edits, undo, and checkpoint export | `src/oumi_weights_lab/editing.py` |
+| Evaluation and pass limits | `src/oumi_weights_lab/scoring.py`, `budget.py` |
+| Activations, gradients, probes, and attachments | `src/oumi_weights_lab/inspection.py`, `attachments.py`, `circuits.py` |
+| CLI and SkyPilot transport | `src/oumi_weights_lab/cli.py`, `launchers.py` |
 
 Tests mirror these areas in `tests/`. Start with the
 [Python API](docs/api.md) for behavior and the [documentation index](docs/README.md)

@@ -36,6 +36,16 @@ class Lab(EditingMixin, ScoringMixin, InspectionMixin, AttachmentMixin, Persiste
         self.model_id = model_id
         self._forward_passes = 0
         self._budget = PassBudget(pass_limit)
+        if hasattr(model, "peft_config"):
+            from peft.tuners.tuners_utils import BaseTuner
+
+            # Older PEFT calls model.forward directly and skips all Module hooks.
+            # Normalize only the plain delegation, preserving custom tuner logic.
+            for module in model.modules():
+                if isinstance(module, BaseTuner) and (
+                    getattr(module.forward, "__func__", None) is BaseTuner.forward
+                ):
+                    module.forward = module.model.__call__
         # PEFT generation calls the underlying language model directly.
         counted_model = model.get_base_model() if hasattr(model, "peft_config") else model
         self._counter_hook = counted_model.register_forward_pre_hook(self._count_forward)

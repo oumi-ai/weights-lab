@@ -29,7 +29,12 @@ def test_watchdog_waits_for_absolute_deadline_then_retries_and_marks_cleanup(tmp
     marker = tmp_path / "done"
     assert (
         validate_sky.watchdog(
-            "weights-lab-val-test", 40, marker, runner=runner, now=lambda: clock.value, sleep=sleep
+            "oumi-weights-lab-val-test",
+            40,
+            marker,
+            runner=runner,
+            now=lambda: clock.value,
+            sleep=sleep,
         )
         == 0
     )
@@ -44,7 +49,9 @@ def test_watchdog_exits_when_main_cleanup_marker_exists(tmp_path):
     marker.touch()
     runner = Mock(side_effect=AssertionError("already cleaned up"))
     assert (
-        validate_sky.watchdog("weights-lab-val-test", 100, marker, runner=runner, now=lambda: 0)
+        validate_sky.watchdog(
+            "oumi-weights-lab-val-test", 100, marker, runner=runner, now=lambda: 0
+        )
         == 0
     )
     runner.assert_not_called()
@@ -55,7 +62,7 @@ def test_watchdog_reports_failure_after_three_bounded_attempts(tmp_path):
     marker = tmp_path / "done"
     assert (
         validate_sky.watchdog(
-            "weights-lab-val-test", 0, marker, runner=runner, sleep=lambda _: None
+            "oumi-weights-lab-val-test", 0, marker, runner=runner, sleep=lambda _: None
         )
         == 1
     )
@@ -141,7 +148,7 @@ def test_partial_launch_failure_still_tears_down_and_records_failure(tmp_path, m
 
 
 def test_existing_cluster_is_rejected_without_launch_or_cleanup(tmp_path, monkeypatch):
-    name = "weights-lab-val-existing"
+    name = "oumi-weights-lab-val-existing"
     monkeypatch.setattr(
         validate_sky.subprocess,
         "run",

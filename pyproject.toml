@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "weights-lab"
+name = "oumi-weights-lab"
 version = "0.1.0"
 description = "A persistent Python workspace for exploring open language models"
 readme = "README.md"
@@ -28,17 +28,17 @@ Issues = "https://github.com/oumi-ai/weights-lab/issues"
 adapters = ["peft>=0.13"]
 
 [project.scripts]
-weights-lab = "weights_lab.cli:main"
+oumi-weights-lab = "oumi_weights_lab.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.9", "build>=1.2"]
+dev = ["pytest>=8", "ruff>=0.9", "build>=1.2", "pyyaml>=6"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/weights_lab"]
+packages = ["src/oumi_weights_lab"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "src/weights_lab",
+    "src/oumi_weights_lab",
     "tests",
     "examples",
     "scripts",
@@ -58,6 +58,7 @@ include = [
     "docs/parity.md",
     "docs/qwen-replay.md",
     "docs/skill-install.md",
+    "docs/harness-integration.md",
     "docs/validation.md",
     "docs/validation-results.json",
     "docs/validation-notes.md",
@@ -69,6 +70,8 @@ include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not integration'"
+markers = ["integration: opt-in tests requiring an external coding harness"]
 
 [tool.ruff]
 target-version = "py311"

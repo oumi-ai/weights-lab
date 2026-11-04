@@ -20,15 +20,15 @@ The script independently checks these facts when run. It hashes the safetensors'
 From the repository checkout, in the installed package environment:
 
 ```bash
-weights-lab start --session sessions/qwen-replay \
+oumi-weights-lab start --session sessions/qwen-replay \
   --model Qwen/Qwen3.5-0.8B \
   --revision 2fc06364715b967f1860aea9cf38778875588b17 \
   --device cpu --dtype bfloat16 --pass-limit 0 --snippet-timeout 3600
-weights-lab send --session sessions/qwen-replay \
+oumi-weights-lab send --session sessions/qwen-replay \
   --file examples/replay_qwen_edit.py --follow --timeout 3600
-weights-lab peek --session sessions/qwen-replay
-weights-lab stop --session sessions/qwen-replay
-weights-lab backup --session sessions/qwen-replay --output sessions/qwen-replay.tar.gz
+oumi-weights-lab peek --session sessions/qwen-replay
+oumi-weights-lab stop --session sessions/qwen-replay
+oumi-weights-lab backup --session sessions/qwen-replay --output sessions/qwen-replay.tar.gz
 ```
 
 The loader needs a Transformers version that supports `Qwen3_5ForConditionalGeneration`. The model is the multimodal release; this recipe uses its language-model parameters and supplies no images. Custom Hub code remains disabled. Model loading needs sufficient RAM even though the default replay performs no forwards.

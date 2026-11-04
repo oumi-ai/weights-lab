@@ -1,20 +1,20 @@
 ---
-name: weights-lab
+name: oumi-weights-lab
 description: Investigate an open-weights language model with a persistent Python worker, reversible parameter edits, activation probes, and controlled local evaluations. Use for experiments on model behavior or weights, including LoRA checkpoints.
 ---
 
-Keep one model loaded while investigating one concrete question. Use the `weights-lab` CLI and the `lab` object in its shared Python namespace. Snippets are trusted Python with normal filesystem and network access.
+Keep one model loaded while investigating one concrete question. Use the `oumi-weights-lab` CLI and the `lab` object in its shared Python namespace. Snippets are trusted Python with normal filesystem and network access.
 
-This skill supplies instructions, not the Python package. Use an agent execution environment where `weights-lab` is installed separately; installing the skill or plugin does not install the CLI. A plugin cache or copied skill folder is not a source checkout.
+This skill supplies instructions, not the Python package. Use an agent execution environment where `oumi-weights-lab` is installed separately; installing the skill or plugin does not install the CLI. A plugin cache or copied skill folder is not a source checkout.
 
 1. Write the question, expected observation, model/adapter IDs, device/dtype, dev examples, reserved held-out examples, and pass budget in experiment notes. Separate held-out data before searching. Start a fresh session directory; an old process's Python namespace cannot be resumed from disk.
 2. Start once, then submit saved snippet files. `start` returns while loading; `send --follow` waits and streams output. `peek` distinguishes loading, running, and failure. Save notes under the worker-created `artifacts` directory after startup.
 
    ```bash
-   weights-lab start --session sessions/experiment --model HuggingFaceTB/SmolLM2-135M \
+   oumi-weights-lab start --session sessions/experiment --model HuggingFaceTB/SmolLM2-135M \
      --device cpu --dtype float32 --snippet-timeout 300 --pass-limit 1000
-   weights-lab send --session sessions/experiment --file baseline.py --follow
-   weights-lab peek --session sessions/experiment
+   oumi-weights-lab send --session sessions/experiment --file baseline.py --follow
+   oumi-weights-lab peek --session sessions/experiment
    ```
 
 3. Establish a baseline on the dev data inside this session before changing anything. Use `lab.evaluate(rows, name="baseline-v1", max_passes=...)`; compare later runs with `lab.diff(baseline, candidate)`. Use a new run name each time: letters, digits, underscores, and hyphens only, beginning with a letter or digit. Keep prompts, continuation spacing, scoring mode, and generation settings fixed.
@@ -24,8 +24,8 @@ This skill supplies instructions, not the Python package. Use an agent execution
 7. If preserving edited weights, call `lab.export("checkpoint")` while the model is alive. Relative exports go under `artifacts`; destinations must be absent or empty. Remove active attachments and activation patches first. PEFT export merges a clone into a full checkpoint, temporarily requiring a second model's memory. Save the component code separately when it cannot be represented by the checkpoint. Then stop and archive:
 
    ```bash
-   weights-lab stop --session sessions/experiment
-   weights-lab backup --session sessions/experiment --output sessions/experiment.tar.gz
+   oumi-weights-lab stop --session sessions/experiment
+   oumi-weights-lab backup --session sessions/experiment --output sessions/experiment.tar.gz
    ```
 
 The namespace includes `lab`, `model`, `tokenizer`, `Path`, and `artifacts`. The worker saves every submitted source, output, and result; evaluation saves item-level answers and summaries under `artifacts/evaluations`. Use `torch.no_grad()` for inference; eval mode alone retains gradients. Keep gradient rows short. Hooks require the uncompiled model; the loader uses eager execution and never enables custom Hub code. A timeout may leave earlier completed edits active; inspect `lab.edits()` and restore a known state before comparing. Native calls may finish before Python handles cancellation.

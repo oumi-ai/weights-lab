@@ -1,6 +1,6 @@
 """Exercise a public tiny GPT-2 model through the detached local worker on CPU.
 
-Run: uv run python -m examples.dogfood --output-dir /tmp/weights-lab-dogfood
+Run: uv run python -m examples.dogfood --output-dir /tmp/oumi-weights-lab-dogfood
 The first run downloads a small public checkpoint. All experiment files, the
 exported checkpoint, CLI transcript, and stopped-session backup stay in output-dir.
 """
@@ -95,7 +95,7 @@ def run(output_dir: Path) -> dict:
 
     def cli(*arguments):
         result = subprocess.run(
-            [sys.executable, "-m", "weights_lab", *map(str, arguments)],
+            [sys.executable, "-m", "oumi_weights_lab", *map(str, arguments)],
             capture_output=True,
             text=True,
             timeout=180,

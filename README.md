@@ -1,4 +1,27 @@
-# Weights Lab
+<p align="center">
+  <img src="https://github.com/oumi-ai/oumi/raw/main/docs/_static/logo/header_readme.svg" alt="Oumi" width="300">
+</p>
+
+# Oumi Weights Lab
+
+[![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+[![Documentation](https://img.shields.io/badge/docs-oumi--weights--lab-blue.svg)](https://github.com/oumi-ai/weights-lab/tree/main/docs)
+[![About Oumi](https://img.shields.io/badge/about-oumi.ai-blue.svg)](https://oumi.ai)
+
+Oumi Weights Lab gives coding agents a persistent, auditable workspace for
+experiments with model weights and behavior.
+
+## Features
+
+- Persistent model worker with an audit trail for every Python snippet.
+- Exact, reversible slice edits, zeroing, swapping, undo, and checkpoint export ([API](docs/api.md), [edit bundles](docs/edit-bundles.md)).
+- Activation patching, gradient inspection, and document-split probes ([skill references](skills/oumi-weights-lab/references/)).
+- LoRA update spectra, numerical/stable rank, and magnitude diagnostics ([LoRA diagnostics](docs/lora-diagnostics.md)).
+- Score-sensitive comparisons, paired statistics, regression suites, and pinned dev screens ([evaluation tools](docs/evaluation.md)).
+- Save and resume edit bundles with inherited pass budgets and held-out evaluation reservations ([edit bundles](docs/edit-bundles.md)).
+- CPU, Apple MPS, and CUDA support; upstream SkyPilot and Slurm workers with deadline guards ([remote setup](docs/remote.md)).
+- Native Claude Code and Codex plugins, plus standalone skills for compatible agents including Cursor, Copilot CLI, and OpenCode ([installation](docs/skill-install.md)).
+- Optional offline fixed-weight date calculator network ([date network](docs/date-network.md)).
 
 Load a language model once, then let a coding agent inspect and edit it through
 Python snippets in a persistent worker. Compare a baseline, change a weight,
@@ -18,9 +41,9 @@ The first run downloads a small public model; no GPU or cloud account is needed.
 git clone https://github.com/oumi-ai/weights-lab.git
 cd weights-lab
 uv sync --python 3.12
-uv run weights-lab start --session sessions/first --model HuggingFaceTB/SmolLM2-135M --device cpu
-uv run weights-lab send --session sessions/first --code 'print(model.config)' --follow
-uv run weights-lab send --session sessions/first --file examples/inspect_model.py --follow
+uv run oumi-weights-lab start --session sessions/first --model HuggingFaceTB/SmolLM2-135M --device cpu
+uv run oumi-weights-lab send --session sessions/first --code 'print(model.config)' --follow
+uv run oumi-weights-lab send --session sessions/first --file examples/inspect_model.py --follow
 ```
 
 `start` returns while the model loads. Snippets queue during loading and share
@@ -31,7 +54,7 @@ Use `peek --session sessions/first` for status, or `send --wait` without streami
 ## Measure an edit
 
 Save this as `edit.py`, then submit it with
-`uv run weights-lab send --session sessions/first --file edit.py --follow`:
+`uv run oumi-weights-lab send --session sessions/first --file edit.py --follow`:
 
 ```python
 rows = [{"prompt": "France's capital is", "options": [" Paris", " Rome"], "answer": 0}]
@@ -52,8 +75,8 @@ snippet's budget. Use `torch.no_grad()` for inference when gradients are unneces
 Export weights before stopping, then archive the session:
 
 ```sh
-uv run weights-lab stop --session sessions/first
-uv run weights-lab backup --session sessions/first --output sessions/first.tar.gz
+uv run oumi-weights-lab stop --session sessions/first
+uv run oumi-weights-lab backup --session sessions/first --output sessions/first.tar.gz
 ```
 
 The backup includes snippets, results, logs, and artifacts. It saves weights only
@@ -75,7 +98,7 @@ Choose an unused output directory each time.
 ## Give an agent a model workspace
 
 The [agent skill and plugin](docs/skill-install.md) guide experiments, including
-[checkpoint comparisons, activation patching, gradients, and probes](skills/weights-lab/references/).
+[checkpoint comparisons, activation patching, gradients, and probes](skills/oumi-weights-lab/references/).
 Install as a Claude Code or Codex plugin, or as a standalone skill for Codex,
 Claude Code, Cursor, Copilot CLI, and OpenCode; see the
 [per-harness install commands](docs/skill-install.md).
@@ -91,16 +114,19 @@ LoRA loading requires `uv sync --extra adapters`.
 For a remote worker, use upstream SkyPilot:
 
 ```sh
-uv run weights-lab start --cluster my-lab --source . --accelerators L4:1 --model Qwen/Qwen3-0.6B --session /tmp/lab
-uv run weights-lab send --cluster my-lab --session /tmp/lab --code 'print(lab.forward_passes)' --wait
-uv run weights-lab stop --cluster my-lab --session /tmp/lab
-uv run weights-lab backup --cluster my-lab --session /tmp/lab --output ./lab.tar.gz
+uv run oumi-weights-lab start --cluster my-lab --source . --accelerators L4:1 --model Qwen/Qwen3-0.6B --session /tmp/lab
+uv run oumi-weights-lab send --cluster my-lab --session /tmp/lab --code 'print(lab.forward_passes)' --wait
+uv run oumi-weights-lab stop --cluster my-lab --session /tmp/lab
+uv run oumi-weights-lab backup --cluster my-lab --session /tmp/lab --output ./lab.tar.gz
 sky down my-lab
 ```
 
 `--cluster` selects SkyPilot. It also supports Slurm through
 `--infra slurm/mycluster/mypartition`. Read [remote setup and cleanup](docs/remote.md)
 before provisioning; export and download results before teardown destroys the disk.
+Remote workers stop after 15 idle minutes or four hours total by default, attempt
+an edit-bundle save, and then allow SkyPilot's autodown timer to release the cluster.
+Override with `--idle-timeout` and `--max-lifetime` (seconds).
 
 ## What has been measured
 

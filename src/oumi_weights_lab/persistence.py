@@ -205,7 +205,7 @@ class PersistenceMixin:
             }
         destination.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(
-            prefix=".weights-lab-edits-", dir=destination.parent
+            prefix=".oumi-weights-lab-edits-", dir=destination.parent
         ) as tmp:
             staged = Path(tmp) / "bundle"
             staged.mkdir()

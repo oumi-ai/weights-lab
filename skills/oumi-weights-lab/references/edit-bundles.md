@@ -13,9 +13,9 @@ Stop and archive the source session. Load the same original model, tokenizer,
 adapter and precision in a new session, pointing at the saved bundle:
 
 ```sh
-weights-lab start --session sessions/continued --model /path/to/original \
+oumi-weights-lab start --session sessions/continued --model /path/to/original \
   --device cpu --dtype float32 --resume /path/to/candidate-v1
-weights-lab send --session sessions/continued \
+oumi-weights-lab send --session sessions/continued \
   --code 'print(lab.edits(), lab.forward_passes); lab.undo()' --follow
 ```
 

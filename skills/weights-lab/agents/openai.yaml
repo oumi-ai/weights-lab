@@ -1,4 +1,0 @@
-interface:
-  display_name: "Weights Lab"
-  short_description: "Explore model weights in a persistent Python worker"
-  default_prompt: "Use $weights-lab to compare a model baseline with a reversible weight edit and report the measured effect."

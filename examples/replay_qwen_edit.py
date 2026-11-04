@@ -1,6 +1,6 @@
-"""Replay the released Qwen edit inside a weights-lab worker.
+"""Replay the released Qwen edit inside a oumi-weights-lab worker.
 
-Submit this file with weights-lab send --file. Optionally set a qwen_replay
+Submit this file with oumi-weights-lab send --file. Optionally set a qwen_replay
 configuration dictionary in an earlier snippet; see docs/qwen-replay.md.
 This replays released tensor values, not the discovery or published benchmark.
 """
@@ -265,7 +265,7 @@ def replay_qwen_edit(
     return report
 
 
-if __name__ == "__weights_lab__":
+if __name__ == "__oumi_weights_lab__":
     print(json.dumps(replay_qwen_edit(lab, **globals().get("qwen_replay", {})), indent=2))
 elif __name__ == "__main__":
-    raise SystemExit("Submit this file with weights-lab send --file; see docs/qwen-replay.md")
+    raise SystemExit("Submit this file with oumi-weights-lab send --file; see docs/qwen-replay.md")

@@ -70,3 +70,23 @@ Estimated compute was $12.72, including $0.04 for the Slurm CPU fixture. The H20
 CPU quotes were $4.50/hour and $0.0992/hour. These estimates use controller durations,
 exclude storage, and are not billing statements. Cloud runs had an independent
 teardown watchdog, a finite worker lifetime, and SkyPilot autodown.
+
+The pre-rename CUDA resume and real-harness readiness check used three bounded H200
+attempts. Two controller issues (detached setup readiness and mixing SSH warning
+stderr with JSON stdout) interrupted earlier attempts; the final run passed.
+Those controller paths now have local regression checks and preserve stdout and
+stderr separately. New estimated compute was $1.39, approximately $14.11 including
+the prior validation. All three clusters and their disks were removed; raw
+attempt evidence is retained under the ignored `sessions/gpu-resume-20261103*`
+directories. Successful harness tool events were asserted inside disposable
+containers; sanitized test logs and a success summary remain, rather than raw
+successful API transcripts.
+
+After renaming the distribution, CLI, skill, and plugin to `oumi-weights-lab`
+and Python namespace to `oumi_weights_lab`, the final run repeated the GPU resume,
+74 Linux checks, and all four real Claude Code/Codex integration checks. This run
+retained bounded actual tool-event proof as well as sanitized test summaries.
+Its additional compute estimate was $0.51, bringing all recorded validation to
+approximately $14.63. Final SkyPilot and provider inventories were empty, and the
+independent watchdog exited. Canonical-name evidence is retained under the ignored
+`sessions/oumi-weights-lab-readiness-20261103/` directory.

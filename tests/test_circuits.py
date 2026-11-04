@@ -3,7 +3,7 @@ from datetime import date, timedelta
 import pytest
 import torch
 
-from weights_lab.circuits import (
+from oumi_weights_lab.circuits import (
     Compare,
     DateCalculator,
     DateFacts,

@@ -4,9 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from weights_lab.budget import BudgetExceeded
-from weights_lab.lab import Lab
-from weights_lab.scoring import Scorer, ScoringMixin
+from oumi_weights_lab.budget import BudgetExceeded
+from oumi_weights_lab.lab import Lab
+from oumi_weights_lab.scoring import Scorer, ScoringMixin
 
 torch = pytest.importorskip("torch")
 

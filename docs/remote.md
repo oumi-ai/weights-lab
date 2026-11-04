@@ -12,13 +12,13 @@ on SkyPilot's Python packages.
 ## Start and use a worker
 
 ```sh
-weights-lab start --cluster weights-lab-demo --source . \
+oumi-weights-lab start --cluster oumi-weights-lab-demo --source . \
   --accelerators L4:1 --model Qwen/Qwen3-0.6B --session /tmp/lab --device cuda
-weights-lab send --cluster weights-lab-demo --session /tmp/lab --file snippet.py --follow
-weights-lab peek --cluster weights-lab-demo --session /tmp/lab
-weights-lab stop --cluster weights-lab-demo --session /tmp/lab
-weights-lab backup --cluster weights-lab-demo --session /tmp/lab --output ./lab.tar.gz
-sky down weights-lab-demo
+oumi-weights-lab send --cluster oumi-weights-lab-demo --session /tmp/lab --file snippet.py --follow
+oumi-weights-lab peek --cluster oumi-weights-lab-demo --session /tmp/lab
+oumi-weights-lab stop --cluster oumi-weights-lab-demo --session /tmp/lab
+oumi-weights-lab backup --cluster oumi-weights-lab-demo --session /tmp/lab --output ./lab.tar.gz
+sky down oumi-weights-lab-demo
 ```
 
 `--cluster` selects SkyPilot automatically. `--launcher sky` is optional. The same
@@ -26,9 +26,9 @@ cluster name reconnects subsequent commands; there is no direct SSH launcher.
 `--infra` passes an infrastructure selector to `sky launch`.
 
 ```python
-from weights_lab.launchers import SkyPilotLauncher
+from oumi_weights_lab.launchers import SkyPilotLauncher
 
-sky = SkyPilotLauncher("weights-lab-demo")
+sky = SkyPilotLauncher("oumi-weights-lab-demo")
 sky.start(
     "Qwen/Qwen3-0.6B",
     "/tmp/lab",
@@ -72,12 +72,12 @@ then check access and select the cluster and partition:
 
 ```sh
 sky check
-weights-lab start --cluster lab-slurm --source . \
+oumi-weights-lab start --cluster lab-slurm --source . \
   --infra slurm/mycluster/mypartition --accelerators A100:1 \
   --model Qwen/Qwen3-0.6B --session /tmp/lab --device cuda
-weights-lab send --cluster lab-slurm --session /tmp/lab --code 'print(model.config)' --wait
-weights-lab stop --cluster lab-slurm --session /tmp/lab
-weights-lab backup --cluster lab-slurm --session /tmp/lab --output ./slurm-lab.tar.gz
+oumi-weights-lab send --cluster lab-slurm --session /tmp/lab --code 'print(model.config)' --wait
+oumi-weights-lab stop --cluster lab-slurm --session /tmp/lab
+oumi-weights-lab backup --cluster lab-slurm --session /tmp/lab --output ./slurm-lab.tar.gz
 sky down lab-slurm
 ```
 
@@ -100,7 +100,34 @@ model weights. Stop, back up or download anything needed, then tear down.
 are needed. Teardown destroys the cluster and disk.
 
 Autodown occurs after the configured idle period once jobs finish. A running worker
-keeps the cluster active even with an empty snippet inbox. Provisioning or setup
+keeps the cluster active until it exits. Remote workers now default to
+`--idle-timeout 900` (15 minutes with no queued or running snippets) and
+`--max-lifetime 14400` (four hours, including model loading). Local workers have
+no automatic deadline unless one is supplied. For example:
+
+```sh
+oumi-weights-lab start --cluster lab-slurm --source . --model Qwen/Qwen3-0.6B \
+  --session /tmp/lab --idle-timeout 600 --max-lifetime 3600 --shutdown-grace 30
+```
+
+Set either limit to `0` to disable that limit explicitly. Python `start()` accepts
+the same `idle_timeout`, `max_lifetime`, and `shutdown_grace` settings in seconds.
+Idle time starts after loading and restarts after each completed snippet; queued
+or running work prevents inactivity shutdown. The lifetime deadline includes
+loading and active snippets.
+
+An independent watchdog sends SIGTERM at the deadline. The worker cancels active
+and queued snippets and attempts to save an [edit bundle](edit-bundles.md). Status
+records `reason` (`idle_timeout` or `max_lifetime`) and `edit_bundle` when saving
+succeeds. Active attachments, patches, or a long save can prevent the snapshot;
+`checkpoint_error` records a graceful-save failure. After `shutdown_grace` seconds
+(default 30), the watchdog kills a worker that has not exited, including one
+blocked in native code; its terminal status records `forced: true`.
+
+After the job exits, SkyPilot's separate `--idle-minutes` timer starts (default
+15 minutes), then autodown releases the cluster. Results remain on the worker disk
+only until teardown; retrieve them during that interval. These worker limits begin
+when the worker starts, after provisioning and package setup. Provisioning or setup
 failures may leave resources for debugging: inspect `sky status` and run `sky down`
 when finished. See the [SkyPilot CLI reference](https://docs.skypilot.ai/en/latest/reference/cli.html)
 and [validation evidence](validation.md) for measured coverage and limits.

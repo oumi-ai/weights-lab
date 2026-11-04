@@ -2,7 +2,7 @@
 
 import argparse
 
-from weights_lab.date_network import FixedDateNetwork
+from oumi_weights_lab.date_network import FixedDateNetwork
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("date", nargs="?", default="2028-02-28")

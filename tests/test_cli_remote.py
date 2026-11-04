@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from weights_lab import cli, launchers
-from weights_lab.session import create_session, write_json
+from oumi_weights_lab import cli, launchers
+from oumi_weights_lab.session import create_session, write_json
 
 
 class Transport:
@@ -234,6 +234,55 @@ def test_sky_resume_uses_remote_bundle_path(transports, capsys):
     assert call[3]["resume"] == "~/saved/candidate"
 
 
+def test_sky_forwards_worker_deadlines(transports, capsys):
+    assert (
+        cli.main(
+            [
+                "start",
+                "--cluster",
+                "lab",
+                "--session",
+                "bounded",
+                "--model",
+                "base",
+                "--idle-timeout",
+                "10",
+                "--max-lifetime",
+                "60",
+                "--shutdown-grace",
+                "2",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    config = transports[0]["SkyPilotLauncher"].calls[0][3]
+    assert (config["idle_timeout"], config["max_lifetime"], config["shutdown_grace"]) == (10, 60, 2)
+
+
+@pytest.mark.parametrize("flag", ["--idle-timeout", "--max-lifetime"])
+def test_invalid_deadline_does_not_construct_cloud_transport(transports, capsys, flag):
+    assert (
+        cli.main(
+            [
+                "start",
+                "--cluster",
+                "lab",
+                "--session",
+                "bounded",
+                "--model",
+                "base",
+                flag,
+                "nan",
+            ]
+        )
+        != 0
+    )
+    assert "finite" in capsys.readouterr().err
+    assert transports[1] == []
+    assert transports[0]["SkyPilotLauncher"].calls == []
+
+
 @pytest.mark.parametrize(
     "removed",
     [
@@ -315,8 +364,9 @@ def test_cli_import_and_help_do_not_import_torch():
         [
             sys.executable,
             "-c",
-            "import sys; import weights_lab.cli; "
-            "assert 'torch' not in sys.modules; weights_lab.cli._parser().parse_args(['--help'])",
+            "import sys; import oumi_weights_lab.cli; "
+            "assert 'torch' not in sys.modules; "
+            "oumi_weights_lab.cli._parser().parse_args(['--help'])",
         ],
         capture_output=True,
         text=True,

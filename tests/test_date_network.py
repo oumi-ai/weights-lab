@@ -4,7 +4,7 @@ from datetime import date, timedelta
 import pytest
 import torch
 
-from weights_lab.date_network import FixedDateNetwork
+from oumi_weights_lab.date_network import FixedDateNetwork
 
 
 @pytest.fixture(scope="module")
@@ -97,8 +97,8 @@ def test_forward_and_render_do_not_use_host_datetime(network, monkeypatch):
     def unavailable(*args, **kwargs):
         raise AssertionError("datetime must not compute an inference result")
 
-    monkeypatch.setattr("weights_lab.date_network.date", unavailable)
-    monkeypatch.setattr("weights_lab.date_network.timedelta", unavailable)
+    monkeypatch.setattr("oumi_weights_lab.date_network.date", unavailable)
+    monkeypatch.setattr("oumi_weights_lab.date_network.timedelta", unavailable)
     result = network(encoded, 2)
     assert network.render(result) == "2028-03-01"
     assert network.render(network(encoded, -1, business=True)) == "2028-02-25"

@@ -25,10 +25,28 @@ held-out reservations after resume, paired reports and regression suites, pinned
 dev screens, scaled LoRA spectra, and the frozen date network. A local PEFT
 round trip verifies both base/adapter edits and identical logits; calendar tests
 compare randomized dates with an independent Python calendar reference. These new
-helpers have local CPU validation; the earlier H200/Slurm runs were not repeated
-for this expansion.
+helpers initially received local CPU validation; the earlier complete H200/Slurm
+engine runs were not repeated for this expansion.
 
-The CUDA harness exercised a random GPT-2 with a nonzero LoRA adapter. All 15
+The final readiness run checked `oumi-weights-lab` (`oumi_weights_lab`) on an H200: a BF16 base
+and PEFT-default FP32 adapter were independently edited, saved, downloaded,
+reuploaded with verified hashes, and resumed in a fresh CUDA worker. All parameter
+bytes and edited logits matched. Undo restored both intermediate and original
+outputs exactly. Four spent forwards and the 32-pass cap survived resume; a failed
+held-out reservation stayed consumed and its rejected retry spent no forwards.
+Both workers stopped, installed source hashes matched the checkout, and all
+validation instances, disks, and GPU clusters were removed.
+
+The current local suite passed 370 tests with four integration tests excluded by
+default. The declared dependency-floor subset passed 69 with four architecture
+skips; actual Linux lifecycle/worker/session/remote CLI checks passed 74. Real
+container-based Claude Code 2.1.318 and Codex 0.166.0 checks passed plugin install,
+skill discovery, recipe reading, and CLI-help execution through model tool calls.
+See [harness integration](harness-integration.md). These checks do not rerun the
+full MATH-500 benchmark or the Slurm fixture.
+
+The earlier runtime CUDA harness at `5995bb0` exercised a random GPT-2 with a
+nonzero LoRA adapter. All 15
 accepted forwards were accounted for. Edit/undo restored weights and scores exactly;
 the largest export/reload logit difference was `7.450580596923828e-09`. All 33 backup
 files matched their source digests, installed source fingerprints matched the

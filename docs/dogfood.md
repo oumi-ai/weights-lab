@@ -93,7 +93,7 @@ The measured run is in the ignored local directory
 `transcript.json`, all submitted Python snippets,
 `dogfood.json`, the session's per-run summaries and item JSON files, the restored
 HF checkpoint at `session/artifacts/restored-checkpoint`, and `session.tar.gz`.
-The checkpoint includes the tokenizer and `weights_lab_manifest.json` with the
+The checkpoint includes the tokenizer and `oumi_weights_lab_manifest.json` with the
 undo history. The backup includes the source snippets, outputs, results, and
 artifacts needed to inspect the experiment without keeping a worker alive.
 

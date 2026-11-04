@@ -11,6 +11,7 @@ Choose a task below. For local development, see [Contributing](../CONTRIBUTING.m
 | Inspect effective LoRA rank and update magnitude | [LoRA diagnostics](lora-diagnostics.md) |
 | Run a frozen calendar network without a language model | [Fixed date network](date-network.md) |
 | Install the coding-agent skill or plugin | [Agent installation](skill-install.md) |
+| Test real plugin installation and invocation in isolation | [Harness integration](harness-integration.md) |
 | Follow a public-model edit, inspect, undo, and backup run | [Dogfood walkthrough](dogfood.md) |
 | Run the complete demo script | [End-to-end demo](../examples/dogfood.py) |
 | Compare generation and continuation scores with Transformers | [Parity checks](parity.md) |

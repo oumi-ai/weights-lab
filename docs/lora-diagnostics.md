@@ -16,7 +16,7 @@ rows = lab.lora_diagnostics(adapter="default")
 In an existing session with a loaded LoRA adapter:
 
 ```sh
-uv run weights-lab send --session sessions/first --code 'import json; print(json.dumps(lab.lora_diagnostics("*q_proj"), indent=2, allow_nan=False))' --follow
+uv run oumi-weights-lab send --session sessions/first --code 'import json; print(json.dumps(lab.lora_diagnostics("*q_proj"), indent=2, allow_nan=False))' --follow
 ```
 
 `pattern` is a case-sensitive glob over module names, as returned by

@@ -1,6 +1,6 @@
 # Optional fixed-weight date network
 
-Use `weights_lab.date_network.FixedDateNetwork` when an experiment needs bounded
+Use `oumi_weights_lab.date_network.FixedDateNetwork` when an experiment needs bounded
 calendar-day arithmetic, Monday–Friday business-day arithmetic, weekend roll,
 calendar gaps/comparisons, or exact ISO character output. Run the offline demo:
 
@@ -10,7 +10,7 @@ uv run pytest -q tests/test_date_network.py
 ```
 
 ```python
-from weights_lab.date_network import FixedDateNetwork
+from oumi_weights_lab.date_network import FixedDateNetwork
 
 network = FixedDateNetwork()
 start = network.encode("2026-10-31")

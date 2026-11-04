@@ -11,12 +11,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from weights_lab.launchers import (
+from oumi_weights_lab.launchers import (
     SkyPilotLauncher,
     _SSHTransport,
     sanitized_workdir,
 )
-from weights_lab.session import read_json
+from oumi_weights_lab.session import read_json
 
 
 class Recorder:
@@ -62,7 +62,7 @@ def test_sky_bootstrap_serializes_path_model(tmp_path):
 def test_ssh_roundtrip_handles_hostile_code_and_paths(tmp_path):
     launcher = _SSHTransport("test-host", python=sys.executable, runner=local_transport)
     session = tmp_path / "session 'with spaces; $(false)"
-    from weights_lab.session import create_session
+    from oumi_weights_lab.session import create_session
 
     create_session(session, {"model": "unused"})
     code = "print('literal $(false) `false` ; $HOME')\n"
@@ -84,7 +84,7 @@ def test_ssh_transport_uses_stdin_and_runs_commands_remotely():
     assert command[command.index("exec") + 1 :] == [
         "python3",
         "-m",
-        "weights_lab",
+        "oumi_weights_lab",
         "stop",
         "--session",
         "/remote/session",
@@ -133,7 +133,7 @@ def test_checkpoint_download_rejects_corruption_and_traversal(tmp_path, name, di
             manifest = json.dumps(
                 {"kind": "directory", "files": [{"path": name, "sha256": digest}]}
             ).encode()
-            info = tarfile.TarInfo(".weights-lab-manifest.json")
+            info = tarfile.TarInfo(".oumi-weights-lab-manifest.json")
             info.size = len(manifest)
             archive.addfile(info, io.BytesIO(manifest))
             info = tarfile.TarInfo(name)
@@ -151,10 +151,10 @@ def test_checkpoint_download_rejects_corruption_and_traversal(tmp_path, name, di
 
 def package_source(tmp_path):
     root = tmp_path / "source"
-    (root / "src" / "weights_lab").mkdir(parents=True)
+    (root / "src" / "oumi_weights_lab").mkdir(parents=True)
     for name in ("pyproject.toml", "README.md", "LICENSE"):
         (root / name).write_text("metadata")
-    (root / "src" / "weights_lab" / "__init__.py").write_text("")
+    (root / "src" / "oumi_weights_lab" / "__init__.py").write_text("")
     (root / ".env").write_text("secret")
     (root / ".git").mkdir()
     (root / ".git" / "config").write_text("private")
@@ -173,7 +173,7 @@ def test_sky_syncs_sanitized_package_and_keeps_foreground_worker(tmp_path):
         "pyproject.toml",
         "README.md",
         "LICENSE",
-        "src/weights_lab/__init__.py",
+        "src/oumi_weights_lab/__init__.py",
     }
     assert runner.task["resources"] == {"accelerators": "L4:1"}
     run = shlex.split(runner.task["run"])
@@ -226,7 +226,7 @@ def test_sky_invalid_or_modal_infrastructure_rejected_before_provisioning(infra)
 
 
 def test_sky_start_waits_for_python_and_session_files_with_quoted_home_path(tmp_path):
-    from weights_lab.session import create_session
+    from oumi_weights_lab.session import create_session
 
     source = package_source(tmp_path)
     path = tmp_path / "session ' $(false); spaces"
@@ -268,7 +268,7 @@ def test_sky_relative_start_metadata_and_probe_use_remote_workdir(tmp_path):
 
 
 def test_sky_relative_session_readiness_send_peek_and_stop_shell_roundtrip(tmp_path):
-    from weights_lab.session import create_session
+    from oumi_weights_lab.session import create_session
 
     path = create_session(tmp_path / "session ' $(false); spaces", {"model": "unused"})
     # Exercise remote HOME expansion without changing this machine's HOME or writing there.
@@ -290,7 +290,7 @@ def test_sky_relative_session_readiness_send_peek_and_stop_shell_roundtrip(tmp_p
 
 
 def test_sky_slurm_commands_load_cluster_home_after_noninteractive_bashrc(tmp_path):
-    from weights_lab.session import create_session
+    from oumi_weights_lab.session import create_session
 
     login_home = tmp_path / "login home"
     cluster_home = login_home / ".sky_clusters" / "fixture"
@@ -360,9 +360,9 @@ def test_sky_bootstrap_timeout_preserves_last_diagnostic(monkeypatch):
         attempts.append(kwargs["timeout"])
         return subprocess.CompletedProcess(args, 75, "", "package setup still running")
 
-    monkeypatch.setattr("weights_lab.launchers.time.monotonic", lambda: clock.now)
+    monkeypatch.setattr("oumi_weights_lab.launchers.time.monotonic", lambda: clock.now)
     monkeypatch.setattr(
-        "weights_lab.launchers.time.sleep",
+        "oumi_weights_lab.launchers.time.sleep",
         lambda seconds: setattr(clock, "now", clock.now + seconds),
     )
     launcher = SkyPilotLauncher("weights-test", runner=probe)
@@ -413,7 +413,7 @@ def test_sky_bootstrap_options_rejected_before_launch(option, value, tmp_path):
 
 
 def test_sky_stdin_snippet_survives_remote_shell_roundtrip(tmp_path):
-    from weights_lab.session import create_session
+    from oumi_weights_lab.session import create_session
 
     path = tmp_path / "session with spaces"
     create_session(path, {"model": "unused"})
@@ -430,7 +430,7 @@ def test_sky_stdin_snippet_survives_remote_shell_roundtrip(tmp_path):
 
 def test_sanitized_source_rejects_symlinked_package_files(tmp_path):
     source = package_source(tmp_path)
-    (source / "src" / "weights_lab" / "secret.py").symlink_to(source / ".env")
+    (source / "src" / "oumi_weights_lab" / "secret.py").symlink_to(source / ".env")
     with pytest.raises(ValueError, match="symbolic"):
         sanitized_workdir(source, tmp_path / "destination")
 

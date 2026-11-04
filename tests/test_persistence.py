@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from weights_lab.budget import BudgetExceeded
-from weights_lab.lab import Lab
+from oumi_weights_lab.budget import BudgetExceeded
+from oumi_weights_lab.lab import Lab
 
 
 def workspace(path, state=None, limit=20):
@@ -139,7 +139,7 @@ def test_tied_parameters_and_chained_resume(tmp_path):
 
 
 def test_restore_failure_rolls_back_weights_registry_and_budget(tmp_path, monkeypatch):
-    import weights_lab.persistence as persistence
+    import oumi_weights_lab.persistence as persistence
 
     old = workspace(tmp_path / "old")
     base = {k: v.clone() for k, v in old.model.state_dict().items()}
@@ -195,7 +195,7 @@ def test_tokenizer_padding_and_truncation_calls_do_not_change_identity(tmp_path)
     from tokenizers import Tokenizer, models
     from transformers import PreTrainedTokenizerFast
 
-    from weights_lab.persistence import _fingerprint
+    from oumi_weights_lab.persistence import _fingerprint
 
     lab = workspace(tmp_path / "old")
     lab.tokenizer = PreTrainedTokenizerFast(
@@ -279,7 +279,7 @@ def test_cli_saves_stops_and_resumes_a_local_checkpoint(tmp_path):
 
     def cli(*args):
         output = subprocess.run(
-            [sys.executable, "-m", "weights_lab", *map(str, args)],
+            [sys.executable, "-m", "oumi_weights_lab", *map(str, args)],
             capture_output=True,
             text=True,
             timeout=30,

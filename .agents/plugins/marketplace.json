@@ -1,11 +1,11 @@
 {
-  "name": "weights-lab-local",
+  "name": "oumi-weights-lab-local",
   "interface": {
-    "displayName": "Weights Lab Local"
+    "displayName": "Oumi Weights Lab Local"
   },
   "plugins": [
     {
-      "name": "weights-lab",
+      "name": "oumi-weights-lab",
       "source": {
         "source": "local",
         "path": "./"

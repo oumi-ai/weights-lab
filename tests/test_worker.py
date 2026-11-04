@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from weights_lab.session import create_session, read_json, submit
-from weights_lab.worker import Worker
+from oumi_weights_lab.session import create_session, read_json, submit
+from oumi_weights_lab.worker import Worker
 
 
 def fake_loader(config, path):
@@ -26,7 +26,7 @@ def run_worker(path):
 
 def run_worker_with_stop_signal_during_join(path):
     """Make the watcher deliver SIGTERM exactly when cleanup joins it."""
-    import weights_lab.worker as worker_module
+    import oumi_weights_lab.worker as worker_module
 
     signal_pending = threading.Event()
     cleanup_started = threading.Event()

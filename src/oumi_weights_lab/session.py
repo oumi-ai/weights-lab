@@ -51,6 +51,7 @@ def create_session(path: Path, config: dict[str, Any]) -> Path:
     if not config.get("model"):
         raise ValueError("a model name or checkpoint path is required")
     PassBudget(config.get("pass_limit"))
+    config = validate_lifecycle(config)
     config = {"snippet_timeout": 300.0, "poll_interval": 0.1, **config}
     for name in ("snippet_timeout", "poll_interval"):
         value = float(config[name])
@@ -63,6 +64,24 @@ def create_session(path: Path, config: dict[str, Any]) -> Path:
     write_json(path / "config.json", config)
     write_json(path / "status.json", {"state": "starting", "model": config["model"]})
     return path
+
+
+def validate_lifecycle(config: dict[str, Any]) -> dict[str, Any]:
+    config = config.copy()
+    for name in ("idle_timeout", "max_lifetime", "shutdown_grace"):
+        value = config.get(name, 30.0 if name == "shutdown_grace" else None)
+        if value is None and name != "shutdown_grace":
+            continue
+        if isinstance(value, bool):
+            raise ValueError(f"{name} must be finite and nonnegative")
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} must be finite and nonnegative") from None
+        if not math.isfinite(number) or number < 0:
+            raise ValueError(f"{name} must be finite and nonnegative")
+        config[name] = number
+    return config
 
 
 def submit(path: Path, code: str) -> str:

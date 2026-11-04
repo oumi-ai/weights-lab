@@ -1,8 +1,8 @@
 import pytest
 import torch
 
-from weights_lab import BudgetExceeded
-from weights_lab.circuits import DateFacts
+from oumi_weights_lab import BudgetExceeded
+from oumi_weights_lab.circuits import DateFacts
 
 
 def test_logit_attachment_changes_scores_then_removes_exactly(tiny_lab):

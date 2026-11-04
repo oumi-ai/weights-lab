@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from weights_lab.evaluation import FAILED_NLL, mcnemar
-from weights_lab.scoring import Scorer, ScoringMixin
+from oumi_weights_lab.evaluation import FAILED_NLL, mcnemar
+from oumi_weights_lab.scoring import Scorer, ScoringMixin
 
 
 class OfflineLab(ScoringMixin):

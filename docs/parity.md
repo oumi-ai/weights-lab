@@ -11,7 +11,7 @@ Hugging Face's teacher-forced loss with all prompt labels masked to `-100`.
 Run from the repository root with an unused output directory:
 
 ```sh
-uv run python -m examples.parity --output-dir /tmp/weights-lab-parity
+uv run python -m examples.parity --output-dir /tmp/oumi-weights-lab-parity
 ```
 
 The first run downloads roughly 500 MB of public model weights. Execution uses
@@ -25,7 +25,7 @@ Measured on 2026-11-03, macOS arm64, PyTorch 2.15.0, Transformers 5.22.1:
 | Upstream greedy output | All 20 token IDs match exactly |
 | Prompt | `The dog` |
 | Continuation tokens | 18 |
-| Weights Lab continuation score | -35.2241325378418 |
+| Oumi Weights Lab continuation score | -35.2241325378418 |
 | HF mean continuation loss | 1.9568963050842285 |
 | Negative HF loss × 18 | -35.22413349151611 |
 | Absolute score difference | 0.00000095367431640625 |

@@ -5,7 +5,7 @@ from datetime import date, timedelta
 
 import torch
 
-from weights_lab.circuits import DateCalculator
+from oumi_weights_lab.circuits import DateCalculator
 
 parser = argparse.ArgumentParser()
 parser.add_argument("date", nargs="?", default="2026-11-03")

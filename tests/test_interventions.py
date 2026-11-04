@@ -5,8 +5,8 @@ import copy
 import pytest
 import torch
 
-from weights_lab import Lab
-from weights_lab.editing import EditBook
+from oumi_weights_lab import Lab
+from oumi_weights_lab.editing import EditBook
 
 
 class Interrupted(BaseException):

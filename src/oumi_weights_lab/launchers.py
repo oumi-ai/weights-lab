@@ -16,6 +16,7 @@ import time
 from pathlib import Path, PurePosixPath
 
 from .budget import PassBudget
+from .session import validate_lifecycle
 
 _SESSION_PROBE = (
     "import json,sys\nfrom pathlib import Path\n"
@@ -49,14 +50,14 @@ def sanitized_workdir(source, destination):
         if original.is_symlink() or not original.is_file():
             raise ValueError(f"package metadata must be a regular file: {name}")
         shutil.copyfile(original, destination / name)
-    package = source / "src" / "weights_lab"
+    package = source / "src" / "oumi_weights_lab"
     if package.is_symlink() or not package.is_dir():
-        raise ValueError("source must contain src/weights_lab")
+        raise ValueError("source must contain src/oumi_weights_lab")
     for original in package.rglob("*"):
         if original.is_symlink():
             raise ValueError("package source cannot contain symbolic links")
         if original.is_file() and original.suffix == ".py":
-            target = destination / "src" / "weights_lab" / original.relative_to(package)
+            target = destination / "src" / "oumi_weights_lab" / original.relative_to(package)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(original, target)
     return destination
@@ -84,7 +85,7 @@ def _configuration(model, config):
         if not math.isfinite(number) or number <= 0:
             raise ValueError(f"{name} must be finite and positive")
     PassBudget(configuration.get("pass_limit"))
-    return configuration
+    return validate_lifecycle(configuration)
 
 
 def _source_checkout(source):
@@ -99,10 +100,10 @@ def _source_checkout(source):
 def _worker_script(session, configuration):
     script = (
         "import os,sys\nfrom pathlib import Path\n"
-        "from weights_lab.session import create_session\n"
+        "from oumi_weights_lab.session import create_session\n"
         f"p=Path({str(session)!r}).expanduser().resolve()\n"
         f"create_session(p, {configuration!r})\n"
-        "command=[sys.executable,'-m','weights_lab','_worker','--session',str(p)]\n"
+        "command=[sys.executable,'-m','oumi_weights_lab','_worker','--session',str(p)]\n"
         "log=(p/'worker.log').open('ab',buffering=0)\n"
     )
     return (
@@ -128,7 +129,7 @@ class _SSHTransport:
     def run(self, args, *, input=None):
         return _checked(
             self.runner,
-            self._command(["-m", "weights_lab", *args]),
+            self._command(["-m", "oumi_weights_lab", *args]),
             input=input,
             text=True,
             capture_output=True,
@@ -141,7 +142,7 @@ class _SSHTransport:
             raise FileExistsError(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(
-            prefix=".weights-lab-copy-", dir=destination.parent
+            prefix=".oumi-weights-lab-copy-", dir=destination.parent
         ) as tmp:
             root = Path(tmp)
             archive_path = root / "transfer.tar"
@@ -183,7 +184,7 @@ for path in paths:
         files.append({'path': name, 'sha256': digest.hexdigest()})
 manifest = json.dumps({'kind': 'directory' if source.is_dir() else 'file', 'files': files}).encode()
 with tarfile.open(fileobj=sys.stdout.buffer, mode='w|') as archive:
-    info = tarfile.TarInfo('.weights-lab-manifest.json')
+    info = tarfile.TarInfo('.oumi-weights-lab-manifest.json')
     info.size = len(manifest)
     archive.addfile(info, io.BytesIO(manifest))
     for path, record in zip([path for path in paths if path.is_file()], files):
@@ -209,7 +210,7 @@ def _unpack_verified(archive_path, destination):
         members = archive.getmembers()
         if (
             not members
-            or members[0].name != ".weights-lab-manifest.json"
+            or members[0].name != ".oumi-weights-lab-manifest.json"
             or not members[0].isfile()
         ):
             raise ValueError("checkpoint transfer has no checksum manifest")
@@ -289,14 +290,16 @@ class SkyPilotLauncher:
             if not valid:
                 raise ValueError(f"{name} must be finite and positive")
         source = _source_checkout(source)
-        configuration = _configuration(model, config)
+        configuration = _configuration(
+            model, {"idle_timeout": 900, "max_lifetime": 14400, **config}
+        )
         session = self._path(session)
         script = _worker_script(session, configuration)
-        with tempfile.TemporaryDirectory(prefix="weights-lab-sky-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="oumi-weights-lab-sky-") as temporary:
             root = Path(temporary)
             workdir = sanitized_workdir(source, root / "package")
             task = {
-                "name": "weights-lab",
+                "name": "oumi-weights-lab",
                 "workdir": str(workdir),
                 "resources": {} if accelerators is None else {"accelerators": accelerators},
                 "setup": shlex.join([self.python, "-m", "pip", "install", "."]),

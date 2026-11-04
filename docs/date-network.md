@@ -12,7 +12,7 @@ uv run pytest -q tests/test_date_network.py
 ```
 
 ```python
-from weights_lab.date_network import FixedDateNetwork
+from oumi_weights_lab.date_network import FixedDateNetwork
 
 network = FixedDateNetwork()
 start = network.encode("2028-02-28")

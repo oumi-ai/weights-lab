@@ -2,8 +2,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from weights_lab.lab import load_lab
-from weights_lab.launchers import SkyPilotLauncher
+from oumi_weights_lab.lab import load_lab
+from oumi_weights_lab.launchers import SkyPilotLauncher
 
 
 @pytest.mark.parametrize(

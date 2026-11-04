@@ -7,7 +7,7 @@ import pytest
 
 def cli(*args, timeout=60):
     return subprocess.run(
-        [sys.executable, "-m", "weights_lab", *map(str, args)],
+        [sys.executable, "-m", "oumi_weights_lab", *map(str, args)],
         capture_output=True,
         text=True,
         timeout=timeout,
