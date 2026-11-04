@@ -10,6 +10,7 @@ desired leading whitespace in the answer itself. Scores are sums, not averages.
 
 from __future__ import annotations
 
+import functools
 import json
 import threading
 import time
@@ -81,8 +82,8 @@ def _generation_kwargs(
 class ScoringMixin(EvaluationMixin):
     """Evaluation helpers and the pass-counting hook.
 
-    The host registers ``_count_forward`` as a forward pre-hook with kwargs and owns
-    ``_forward_passes``.
+    The host registers ``_count_forward`` as a forward pre-hook with kwargs, passes the
+    counted model to ``_count_beams_once``, and owns ``_forward_passes``.
     """
 
     @property
@@ -106,10 +107,33 @@ class ScoringMixin(EvaluationMixin):
                 budget.consume(count)
 
     def _count_forward(self, module: Any, args: tuple, kwargs: dict) -> None:
-        """Forward pre-hook: charge one pass per sequence before the model runs."""
-        count = sequences_in_call(args, kwargs)
+        """Forward pre-hook: charge one pass per sequence before the model runs.
+
+        Inside beam search, a prompt's beams count as one sequence.
+        """
+        beams = getattr(self, "_beam_width", 1)
+        count = -(-sequences_in_call(args, kwargs) // beams)
         self._before_forward(count)
         self._forward_passes += count
+
+    def _count_beams_once(self, model: Any) -> None:
+        """Wrap ``model.generate`` so the counter divides beam-search batches by the beam width."""
+        original = getattr(model, "generate", None)
+        if original is None:
+            return
+
+        @functools.wraps(original)
+        def generate(*args: Any, **kwargs: Any) -> Any:
+            config = kwargs.get("generation_config") or getattr(model, "generation_config", None)
+            width = kwargs.get("num_beams") or getattr(config, "num_beams", None) or 1
+            previous = getattr(self, "_beam_width", 1)
+            self._beam_width = width
+            try:
+                return original(*args, **kwargs)
+            finally:
+                self._beam_width = previous
+
+        model.generate = generate
 
     @contextmanager
     def limit_passes(self, max_passes: int | None):

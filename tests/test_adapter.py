@@ -85,6 +85,17 @@ def test_local_lora_adapter_loads_in_eval_mode_and_counts_base_model_calls(adapt
     assert lab.forward_passes == lab.budget.used == 6  # 2 + 2 steps x 2 sequences
 
 
+def test_adapter_beam_search_counts_a_prompts_beams_once(adapter_lab):
+    torch = pytest.importorskip("torch")
+    lab = adapter_lab
+    inputs = lab.tokenizer("hello", return_tensors="pt")
+    with torch.no_grad():
+        lab.model.generate(
+            **inputs, num_beams=2, do_sample=False, min_new_tokens=2, max_new_tokens=2
+        )
+    assert lab.forward_passes == lab.budget.used == 2
+
+
 def test_adapter_failed_base_forward_counts_once(adapter_lab):
     torch = pytest.importorskip("torch")
     lab = adapter_lab

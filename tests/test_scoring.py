@@ -121,13 +121,47 @@ def test_generation_charges_each_step_per_sequence_and_stops_whole_steps(lab):
     assert lab.forward_passes == lab.budget.used == 6
 
 
-def test_beam_search_costs_one_pass_per_beam_per_step(tiny_lab):
-    inputs = tiny_lab.tokenizer("hello world", return_tensors="pt")
+def _generate_three(lab, **kwargs):
+    inputs = lab.tokenizer("hello world", return_tensors="pt")
     with torch.no_grad():
-        tiny_lab.model.generate(
-            **inputs, num_beams=2, do_sample=False, min_new_tokens=3, max_new_tokens=3
-        )
-    assert tiny_lab.forward_passes == tiny_lab.budget.used == 6  # 3 steps x 2 beams
+        return lab.model.generate(**inputs, min_new_tokens=3, max_new_tokens=3, **kwargs)
+
+
+def test_beam_search_counts_a_prompts_beams_once_per_step(tiny_lab):
+    _generate_three(tiny_lab, num_beams=2, do_sample=False)
+    assert tiny_lab.forward_passes == tiny_lab.budget.used == 3
+
+
+def test_beam_width_from_generation_config_counts_once(tiny_lab):
+    from transformers import GenerationConfig
+
+    _generate_three(tiny_lab, generation_config=GenerationConfig(num_beams=2, do_sample=False))
+    assert tiny_lab.forward_passes == tiny_lab.budget.used == 3
+
+
+def test_sampled_return_sequences_each_count(tiny_lab):
+    _generate_three(tiny_lab, do_sample=True, num_return_sequences=2)
+    assert tiny_lab.forward_passes == tiny_lab.budget.used == 6  # 3 steps x 2 samples
+
+
+def test_beam_width_resets_after_a_failed_generate(tiny_lab):
+    tiny_lab.budget.limit = 2
+    with pytest.raises(BudgetExceeded):
+        _generate_three(tiny_lab, num_beams=2, do_sample=False)
+    tiny_lab.budget.limit = None
+    batch = tiny_lab.tokenizer(["hello world", "world hello"], return_tensors="pt")
+    with torch.no_grad():
+        tiny_lab.model(**batch)
+    assert tiny_lab.forward_passes == tiny_lab.budget.used == 2 + 2
+
+
+def test_sampled_evaluate_with_beams_fits_a_greedy_sized_cap(tiny_lab):
+    rows = [{"prompt": "hello", "answer": "world"}]
+    config = {"num_beams": 2, "min_new_tokens": 3, "max_new_tokens": 3}
+    result = tiny_lab.evaluate(
+        rows, name="beams", mode="sampled", max_passes=3, generation_config=config
+    )
+    assert result["forward_passes"] == 3
 
 
 def test_likelihood_scores_only_continuation_tokens_and_explicit_boundary(lab):

@@ -52,6 +52,7 @@ class Lab(EditingMixin, ScoringMixin, InspectionMixin, AttachmentMixin, Persiste
         self._counter_hook = counted_model.register_forward_pre_hook(
             self._count_forward, with_kwargs=True
         )
+        self._count_beams_once(counted_model)
 
     @property
     def device(self) -> Any:

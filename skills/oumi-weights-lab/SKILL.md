@@ -58,7 +58,7 @@ print(json.dumps(lab.diff(baseline, ablated), indent=2))
 
 - A row is `{"prompt": str, "options": list or {label: text}, "answer": index, label, or option text}`. Prompt and option are tokenized separately, so start each option with the space the tokenizer expects, such as `" Paris"`. An answer given as option text must match it exactly, space included; an index avoids that.
 - `evaluate` returns a summary with `accuracy`, `correct`, `total`, `forward_passes`, and `run_dir`. Each row's scores and prediction are in `run_dir/items.jsonl`. Every run needs a new name made of letters, digits, `_`, and `-`.
-- Likelihood scoring costs one forward pass per option per row; `mode="sampled"` costs one per generated token, times `num_beams` with beam search; a batched call costs one pass per sequence. `max_passes` caps one call and `--pass-limit` caps the whole session; size both from that cost.
+- Likelihood scoring costs one forward pass per option per row; `mode="sampled"` costs one per generated token, however many beams; a batched call costs one pass per sequence. `max_passes` caps one call and `--pass-limit` caps the whole session; size both from that cost.
 - `lab.parts(pattern)` lists parameter names and shapes; names differ by architecture.
 - Edit through `lab.edit`, `lab.zero`, or `lab.swap`. `lab.undo()` restores the newest edit exactly in any dtype, so undo several edits newest first. Writes made directly through `model` are not tracked.
 - Wrap your own `model(...)` calls in `torch.no_grad()`.
