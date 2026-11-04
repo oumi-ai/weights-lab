@@ -13,7 +13,7 @@ with lab.attach(weekday_fact, mode="prefix", name="weekday-fact"):
     print(lab.score("The weekday of 2026-11-03 is", {"Tue": " Tuesday", "Wed": " Wednesday"}))
 ```
 
-Prefix components transform text passed through `lab.score`, `lab.evaluate`, and `lab.generate`. Raw `model(...)` and `model.generate(...)` bypass prefix transformations.
+Prefix components transform text passed through `lab.score`, `lab.evaluate`, and `lab.generate`, before any chat template wraps it. Raw `model(...)` and `model.generate(...)` bypass prefix transformations.
 
 A logits component receives `(model, args, kwargs, output)` and returns a finite delta broadcastable to the original logits shape. The delta changes returned logits only, so a model call that passes `labels` raises `ValueError` rather than returning a loss without the delta; compute any loss from the returned logits. Score with `batch_size=1` while a logits component is attached, and use the same batch size for its baseline:
 

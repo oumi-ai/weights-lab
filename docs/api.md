@@ -47,6 +47,16 @@ report = lab.compare_runs(before, after)
   left-padded forwards of up to `batch_size` sequences (default 8, or 1 for a
   model whose forward takes no `position_ids`);
   `batch_size=1` scores each option alone, exactly as v0.1 did.
+- `chat_template=True` on `score`, `evaluate`, and `generate` renders each prompt
+  as a user turn with the tokenizer's chat template, ready for the assistant's
+  reply; `{"system": text, "kwargs": {...}}` adds a system message and template
+  variables such as `enable_thinking`. Prefix attachments transform the prompt
+  first. The rendered text is tokenized without adding special tokens, because
+  the template supplies them, and options follow the assistant header, so they
+  usually need no leading space. `evaluate` records the template's hash, system
+  message, and variables as `prompt_format`; runs pair only when it matches,
+  while dev and held-out identities still use the raw prompts. A tokenizer
+  without a chat template raises before anything is reserved.
 - `evaluate(data, *, name=None, mode="likelihood", held_out=False, max_passes=None, ...)`
   accepts JSONL or rows and saves items and a summary under
   `artifacts/evaluations/NAME/`. Modes are `likelihood`, `yes_no`, and `sampled`.
