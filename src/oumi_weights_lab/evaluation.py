@@ -101,6 +101,11 @@ def _observation(item: dict, mode: str) -> dict:
     failed = bool(item.get("error")) or "prediction" not in item
     result = {"correct": bool(item.get("correct")) and not failed, "failed": failed}
     if mode == "sampled":
+        if "finish_reason" in item:
+            result.update(
+                truncated=item["finish_reason"] == "max_tokens",
+                generated_tokens=int(item.get("generated_tokens", 0)),
+            )
         return result
     scores = item.get("scores")
     if failed or not scores:
@@ -131,6 +136,17 @@ def _observation(item: dict, mode: str) -> dict:
     }
 
 
+def _value(row: dict, metric: str) -> float:
+    """One row's contribution to a run-level metric."""
+    if metric == "accuracy":
+        return float(row["correct"])
+    if metric == "truncation_share":
+        return float(bool(row.get("truncated")))
+    if metric == "mean_generated_tokens":
+        return float(row.get("generated_tokens", 0))
+    return float(row[metric])
+
+
 def _metrics(rows: list[dict]) -> dict:
     n = len(rows)
     out = {
@@ -139,6 +155,10 @@ def _metrics(rows: list[dict]) -> dict:
         "failures": sum(r["failed"] for r in rows),
     }
     out["accuracy"] = out["correct"] / n
+    # Failed rows have no generation: they count as untruncated with no tokens.
+    if any("truncated" in r for r in rows):
+        out["truncation_share"] = sum(_value(r, "truncation_share") for r in rows) / n
+        out["mean_generated_tokens"] = sum(_value(r, "mean_generated_tokens") for r in rows) / n
     out.update(nll=None, brier=None, ece=None)
     if "nll" in rows[0]:
         out.update({key: sum(r[key] for r in rows) / n for key in ("nll", "brier")})
@@ -164,9 +184,10 @@ def _paired_report(
     before, after = _metrics(left), _metrics(right)
     fixed = sum(not a["correct"] and b["correct"] for a, b in pairs)
     broken = sum(a["correct"] and not b["correct"] for a, b in pairs)
+    lengths = ("truncation_share", "mean_generated_tokens") if "truncation_share" in before else ()
     changes = {
         key: after[key] - before[key] if before[key] is not None else None
-        for key in ("accuracy", "nll", "brier", "ece")
+        for key in ("accuracy", "nll", "brier", "ece", *lengths)
     }
     groups: dict[str, list[int]] = defaultdict(list)
     for i, cluster in enumerate(clusters):
@@ -175,14 +196,11 @@ def _paired_report(
     draws: dict[str, list[float]] = {"accuracy": []}
     if "nll" in left[0]:
         draws["nll"] = []
+    draws.update({metric: [] for metric in lengths})
     # Resample whole documents; related rows always travel together.
     totals = {
         key: {
-            metric: sum(
-                float(right[i]["correct"] if metric == "accuracy" else right[i][metric])
-                - float(left[i]["correct"] if metric == "accuracy" else left[i][metric])
-                for i in groups[key]
-            )
+            metric: sum(_value(right[i], metric) - _value(left[i], metric) for i in groups[key])
             for metric in draws
         }
         for key in keys

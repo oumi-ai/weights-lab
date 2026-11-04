@@ -612,3 +612,50 @@ def test_unknown_mode_is_rejected_before_any_reservation(lab, method):
     with pytest.raises(ValueError, match="mode must be one of likelihood, yes_no, sampled"):
         getattr(lab, method)(rows(1), mode="ranking", **kwargs)
     assert not (lab.artifacts / "evaluations").exists()
+
+
+def test_sampled_comparisons_report_truncation_and_length():
+    from oumi_weights_lab.evaluation import _observation, _paired_report
+
+    def item(correct, reason, tokens):
+        return {
+            "prediction": "x",
+            "correct": correct,
+            "finish_reason": reason,
+            "generated_tokens": tokens,
+        }
+
+    before = [
+        item(True, "max_tokens", 6),
+        item(False, "max_tokens", 6),
+        item(True, "eos", 2),
+        item(False, "eos", 3),
+    ]
+    after = [
+        item(True, "eos", 1),
+        item(False, "max_tokens", 6),
+        item(True, "eos", 2),
+        item(True, "eos", 2),
+    ]
+    pairs = [
+        (_observation(a, "sampled"), _observation(b, "sampled"))
+        for a, b in zip(before, after, strict=True)
+    ]
+    report = _paired_report(pairs, ["d0", "d1", "d2", "d3"], 200, 0)
+    assert report["before"]["truncation_share"] == 0.5
+    assert report["after"]["truncation_share"] == 0.25
+    assert report["before"]["mean_generated_tokens"] == 17 / 4
+    assert report["after"]["mean_generated_tokens"] == 11 / 4
+    assert report["delta"]["truncation_share"] == -0.25
+    assert report["delta"]["mean_generated_tokens"] == pytest.approx(-6 / 4)
+    low, high = report["bootstrap"]["delta_ci"]["truncation_share"]
+    assert low <= -0.25 <= high
+    low, high = report["bootstrap"]["delta_ci"]["mean_generated_tokens"]
+    assert low <= -1.5 <= high
+
+
+def test_runs_without_finish_reasons_report_no_length_metrics():
+    from oumi_weights_lab.evaluation import _metrics, _observation
+
+    rows = [_observation({"prediction": "x", "correct": True}, "sampled")]
+    assert "truncation_share" not in _metrics(rows)
