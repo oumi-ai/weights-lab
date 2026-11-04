@@ -22,20 +22,26 @@ def plugin_copy(tmp_path):
 
 
 def recording_command(directory, name, log):
+    """A stand-in command that records its arguments and the uv settings it saw."""
     directory.mkdir(parents=True, exist_ok=True)
     command = directory / name
-    command.write_text(f'#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "{log}"\n')
+    command.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "{log}"\n'
+        f'env | grep -E "^(UV_|VIRTUAL_ENV)" > "{log}.env" || true\n'
+    )
     command.chmod(0o755)
     return command
 
 
-def run(plugin, path, *args):
+def run(plugin, path, *args, **env):
+    # A timeout turns a wrapper loop into a failure instead of a hung suite.
     return subprocess.run(
         [str(plugin / "bin/oumi-weights-lab"), *args],
         capture_output=True,
         text=True,
-        env={"PATH": path, "HOME": os.environ.get("HOME", "/tmp")},
+        env={"PATH": path, "HOME": os.environ.get("HOME", "/tmp"), **env},
         check=False,
+        timeout=10,
     )
 
 
@@ -57,7 +63,7 @@ def test_wrapper_runs_the_plugin_copy_with_its_lockfile(tmp_path):
     assert "first run downloads PyTorch" in first.stderr
     assert first.stdout == ""  # Setup notices never reach the JSON stdout.
     expected = ["run", "--frozen", "--no-dev", "--extra", "adapters", "--project"]
-    expected += [str(plugin.resolve()), "oumi-weights-lab"]
+    expected += [str(plugin.resolve()), "python", "-m", "oumi_weights_lab"]
     expected += ["send", "--session", "s p", "--code", "print(1)"]
     assert log.read_text().splitlines()[1:] == expected
 
@@ -90,3 +96,35 @@ def test_wrapper_explains_how_to_install_when_nothing_can_run(tmp_path, missing)
     result = run(plugin, path, "--help")
     assert result.returncode == 127
     assert "uv tool install git+https://github.com/oumi-ai/weights-lab" in result.stderr
+
+
+def test_wrapper_ignores_uv_settings_that_would_redirect_or_skip_its_environment(tmp_path):
+    plugin = plugin_copy(tmp_path)
+    log = tmp_path / "uv-args"
+    tools = tmp_path / "tools"
+    recording_command(tools, "uv", log)
+    result = run(
+        plugin,
+        f"{plugin / 'bin'}:{tools}:{SYSTEM_PATH}",
+        "--help",
+        UV_PROJECT_ENVIRONMENT=str(tmp_path / "user-env"),
+        UV_NO_SYNC="1",
+        UV_NO_EDITABLE="1",
+        VIRTUAL_ENV=str(tmp_path / "user-env"),
+    )
+    assert result.returncode == 0
+    assert Path(f"{log}.env").read_text() == ""
+
+
+@pytest.mark.parametrize("second", ["copy", "symlink"])
+def test_wrapper_copies_without_uv_never_defer_to_each_other_forever(tmp_path, second):
+    plugin = plugin_copy(tmp_path)
+    other = tmp_path / "other-bin"
+    other.mkdir()
+    if second == "copy":
+        shutil.copy2(plugin / "bin/oumi-weights-lab", other / "oumi-weights-lab")
+    else:
+        (other / "oumi-weights-lab").symlink_to(plugin / "bin/oumi-weights-lab")
+    result = run(plugin, f"{plugin / 'bin'}:{other}:{SYSTEM_PATH}", "--help")
+    assert result.returncode == 127
+    assert "uv tool install" in result.stderr

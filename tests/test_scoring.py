@@ -345,20 +345,31 @@ def test_exact_ties_are_flagged_and_count_as_incorrect(lab):
     [
         ("generation_key", "generation_config"),
         ("generation_value", "generation_config"),
+        ("sampling_range", "temperature must be positive"),
+        ("max_length", "leaves no room to generate"),
         ("empty_option", "no continuation tokens"),
+        ("token_tie", "distinct token sequences"),
         ("empty_prompt", "BOS or EOS"),
     ],
 )
 def test_input_errors_fail_before_reserving_held_out_data(lab, case, error):
     rows = valid = [{"prompt": "p", "options": [" x", " y"], "answer": "A"}]
     kwargs = fixed = {}
-    if case.startswith("generation"):
+    generation = {
+        "generation_key": {"max_new_tokns": 2},
+        "generation_value": {"max_new_tokens": 0},
+        # Accepted by GenerationConfig.validate(), refused by generate() itself.
+        "sampling_range": {"do_sample": True, "temperature": 0.0},
+        "max_length": {"max_new_tokens": None, "max_length": 1},
+    }
+    if case in generation:
         rows = valid = [{"prompt": "p", "answer": "2 3"}]
-        bad = {"max_new_tokns": 2} if case == "generation_key" else {"max_new_tokens": 0}
-        kwargs = {"mode": "sampled", "generation_config": bad}
+        kwargs = {"mode": "sampled", "generation_config": generation[case]}
         fixed = {"mode": "sampled", "generation_config": {"max_new_tokens": 2}}
     elif case == "empty_option":
         rows = [{"prompt": "p", "options": [" x", " "], "answer": "A"}]
+    elif case == "token_tie":
+        rows = [{"prompt": "p", "options": [" z", "p x"], "answer": "A"}]  # both encode to [5]
     else:
         rows = valid = [{"prompt": "", "options": [" x", " y"], "answer": "A"}]
         lab.tokenizer.bos_token_id = lab.tokenizer.eos_token_id = None
@@ -370,3 +381,37 @@ def test_input_errors_fail_before_reserving_held_out_data(lab, case, error):
     assert (
         lab.evaluate(valid, name="retry", held_out=True, max_passes=10, **fixed)["completed"] == 1
     )
+
+
+def test_generate_arguments_are_accepted_but_scorer_inputs_are_not():
+    from oumi_weights_lab.scoring import _generation_kwargs
+
+    def generate(inputs=None, generation_config=None, synced_gpus=None, **kwargs):
+        pass
+
+    assert _generation_kwargs({"synced_gpus": False}, generate)["synced_gpus"] is False
+    for owned in ("input_ids", "attention_mask", "tokenizer"):
+        with pytest.raises(ValueError, match="unknown keys"):
+            _generation_kwargs({owned: None}, generate)
+
+
+def test_stop_strings_reach_generate_with_the_tokenizer(lab):
+    seen = []
+    original = lab.model.generate
+
+    def generate(*args, **kwargs):
+        seen.append(kwargs.get("tokenizer"))
+        return original(*args, **{k: v for k, v in kwargs.items() if k != "tokenizer"})
+
+    lab.model.generate = generate
+    config = {"max_new_tokens": 2, "stop_strings": ["3"]}
+    lab.evaluate([{"prompt": "p", "answer": "2 3"}], mode="sampled", generation_config=config)
+    assert seen == [lab.tokenizer]
+
+
+def test_empty_prompt_held_out_rows_cannot_return_with_another_answer(lab):
+    row = {"prompt": "", "options": [" x", " y"], "answer": "A"}
+    lab.evaluate([row], name="heldout", held_out=True, max_passes=10)
+    # Scores do not depend on which option is gold, so this would replay held-out scores.
+    with pytest.raises(ValueError, match="overlaps reserved"):
+        lab.evaluate([{**row, "answer": "B"}], name="flipped")

@@ -39,11 +39,12 @@ def read_json(path: Path) -> dict[str, Any]:
         return json.load(stream)
 
 
-def write_json(path: Path, value: dict[str, Any]) -> None:
-    """Durably replace a JSON document without exposing partial writes to readers.
+def write_json(path: Path, value: dict[str, Any], *, durable: bool = False) -> None:
+    """Replace a JSON document without exposing partial writes to readers.
 
-    The file and its directory entry are flushed before returning, so a held-out
-    reservation recorded here survives a power loss that follows its evaluation.
+    With ``durable``, the file and its directory entry reach disk before returning,
+    so a held-out reservation survives a power loss that follows its evaluation.
+    Other writes skip the flush, which is slow on network filesystems.
     """
     path = Path(path)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -51,14 +52,16 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(value, stream, indent=2, allow_nan=False)
             stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
+            if durable:
+                stream.flush()
+                os.fsync(stream.fileno())
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        if durable:
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         Path(temporary).unlink(missing_ok=True)
 

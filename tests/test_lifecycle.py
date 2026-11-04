@@ -170,6 +170,36 @@ def test_worker_stops_when_its_watchdog_dies(tmp_path):
         finish(process)
 
 
+def kill_watchdog(process):
+    guard = wait_for(
+        lambda: subprocess.run(
+            ["pgrep", "-P", str(process.pid), "-f", "oumi_weights_lab.watchdog"],
+            capture_output=True,
+            text=True,
+        ).stdout.split()
+    )
+    os.kill(int(guard[0]), signal.SIGKILL)
+
+
+def test_worker_without_watchdog_still_exits_when_its_stop_is_swallowed(tmp_path):
+    path = tmp_path / "stubborn"
+    process = launch(path, idle_timeout=60, shutdown_grace=0.5, snippet_timeout=60)
+    try:
+        wait_for(lambda: read_json(path / "status.json").get("state") == "ready")
+        submit(
+            path,
+            "import time\nwhile True:\n    try:\n        time.sleep(0.05)\n"
+            "    except BaseException:\n        pass\n",
+        )
+        wait_for(lambda: read_json(path / "status.json").get("state") == "running")
+        kill_watchdog(process)
+        # The worker stands in for its dead watchdog and forces its own exit.
+        process.join(5)
+        assert process.exitcode == -signal.SIGKILL
+    finally:
+        finish(process)
+
+
 def watched_parent(path, terminated):
     """Stand in for a worker: run the watchdog and record whether it signals us."""
     signal.signal(signal.SIGTERM, lambda *_: (terminated.touch(), os._exit(0)))

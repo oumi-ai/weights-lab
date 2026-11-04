@@ -88,6 +88,8 @@ def test_json_replacement_is_flushed_to_disk(tmp_path, monkeypatch):
     synced = []
     original = os.fsync
     monkeypatch.setattr(os, "fsync", lambda fd: (synced.append(fd), original(fd)))
-    write_json(tmp_path / "_registry.json", {"datasets": {}})
+    write_json(tmp_path / "items.json", {"row": 1})
+    assert synced == []  # Ordinary writes skip the slow flush.
+    write_json(tmp_path / "_registry.json", {"datasets": {}}, durable=True)
     # Both the replacement file and its directory entry reach disk.
     assert len(synced) == 2

@@ -2,7 +2,8 @@
 
 Snippets share one namespace with `lab`, `model`, `tokenizer`, `Path`, and
 `artifacts`. Models load with eager attention in eval mode; use `torch.no_grad()`
-when gradients are unnecessary. Relative paths below resolve under `artifacts/`.
+when gradients are unnecessary. `export`, `save_edits`, and `load_edits` resolve
+relative paths under `artifacts/`; other paths resolve from where `start` ran.
 
 ## Weights
 
@@ -43,21 +44,24 @@ report = lab.compare_runs(before, after)
 - `score(prompt, options)` returns each option's summed log probability. Prompt and
   completion are tokenized separately without special tokens, so include a
   completion's leading space. Scores are not length-normalized.
-- `evaluate(data, name, mode="likelihood", held_out=False, max_passes=None, ...)`
+- `evaluate(data, *, name=None, mode="likelihood", held_out=False, max_passes=None, ...)`
   accepts JSONL or rows and saves items and a summary under
   `artifacts/evaluations/NAME/`. Modes are `likelihood`, `yes_no`, and `sampled`.
   An answer is an option index, label, or completion text. An exact top-score tie
   counts as incorrect. Sampled mode decodes greedily by default and grades with
   `checker` or a stripped exact match.
-- `diff(before, after)` pairs rows by position. `compare_runs(before, after)` pairs
-  rows by ID and adds McNemar p-values, bootstrap intervals, and the largest movers.
+- `diff(before, after)` and `compare_runs(before, after)` pair rows by position and
+  need the same rows in the same order. `compare_runs` also checks row IDs and adds
+  McNemar p-values, bootstrap intervals, and the largest movers.
 - `evaluate_suite` and `compare_suites` gate a candidate on per-dataset accuracy and
   NLL tolerances. `create_screen` and `verify_screen` pin a stratified dev subset.
 
 Held-out data needs `held_out=True` and `max_passes`, runs once per session, and
 stays reserved even if the run fails. Dev and held-out data can never trade roles;
-overlap is detected by row and prompt content. Probabilities are normalized over the
-supplied options only.
+overlap means an identical row or prompt after Unicode normalization and whitespace
+stripping. Probabilities are normalized over the supplied options only. These guards
+keep an honest workflow disciplined; snippet code can still change budgets or
+registry files directly.
 
 ## Pass budget
 

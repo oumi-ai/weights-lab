@@ -137,9 +137,15 @@ def _reservation_keys(identities: list[dict[str, Any]]) -> tuple[set[str], set[s
     Prompt hashes stop a prompt crossing roles in another mode or with other
     options. Empty prompts carry no question, so those rows reserve only their
     full identity; minimal-pair datasets can then keep separate dev and
-    held-out splits.
+    held-out splits. The gold answer changes no score, so each row with options
+    also reserves its prompt and options without the answer.
     """
     rows = {_digest(row) for row in identities}
+    rows |= {
+        _digest({key: value for key, value in row.items() if key != "answer"})
+        for row in identities
+        if "options" in row
+    }
     prompts = {_digest(row["prompt"]) for row in identities if row["prompt"]}
     return rows, prompts
 
@@ -192,4 +198,4 @@ def _reserve(
         record.update(item_identities=sorted(rows), prompt_identities=sorted(prompts))
         if run is not None:
             record["runs"].append(run)
-        write_json(root / "_registry.json", registry)
+        write_json(root / "_registry.json", registry, durable=True)

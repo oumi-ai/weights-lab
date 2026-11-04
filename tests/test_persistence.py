@@ -17,7 +17,9 @@ def workspace(path, state=None, limit=20):
         model.load_state_dict(state)
     path.mkdir()
     # Evaluation tokenizes every prompt before reserving data, so the stub must encode.
-    tokenizer = SimpleNamespace(encode=lambda text, add_special_tokens=False: [0])
+    tokenizer = SimpleNamespace(
+        encode=lambda text, add_special_tokens=False: [ord(char) for char in text] or [0]
+    )
     return Lab(model, tokenizer, path, model_id="tiny", pass_limit=limit)
 
 
@@ -153,8 +155,8 @@ def test_restore_failure_rolls_back_weights_registry_and_budget(tmp_path, monkey
     fresh = workspace(tmp_path / "new", base)
     real_write = persistence.write_json
 
-    def interrupted(path, value):
-        real_write(path, value)
+    def interrupted(path, value, **options):
+        real_write(path, value, **options)
         raise KeyboardInterrupt()
 
     with monkeypatch.context() as patch:

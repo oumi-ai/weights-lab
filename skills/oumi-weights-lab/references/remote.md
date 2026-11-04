@@ -48,6 +48,3 @@ An independent watchdog forces exit after the 30-second shutdown grace if needed
 SkyPilot's separate `--idle-minutes` autodown timer (default 15 minutes) starts
 after the worker job ends, so download results during that interval. Inspect
 `sky status` after startup failures and release resources when finished.
-
-For transfer details, timeouts, and lifecycle behavior, see the canonical
-[remote documentation](https://github.com/oumi-ai/weights-lab/blob/main/docs/remote.md).

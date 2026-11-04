@@ -50,6 +50,9 @@ _SESSION_PROBE = (
 )
 
 
+SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=10")
+
+
 def _checked(runner, args, **kwargs):
     return runner(args, check=True, **kwargs)
 
@@ -174,7 +177,9 @@ class _SSHTransport:
             'if [ -r "$HOME/.sky_ssh_rc" ]; then . "$HOME/.sky_ssh_rc"; fi; exec '
             + shlex.join([self.python, *map(str, args)])
         )
-        return ["ssh", "--", self.host, command]
+        # Fail fast on an unreachable host instead of waiting out the TCP timeout,
+        # so `stop --teardown` reaches teardown before an agent's command limit.
+        return ["ssh", *SSH_OPTIONS, "--", self.host, command]
 
     def run(self, args, *, input=None):
         """Run a remote CLI command; returned stdout and stderr are raw bytes.
@@ -407,7 +412,6 @@ class SkyPilotLauncher:
         command = _SSHTransport(self.cluster, self.python)._command(
             ["-c", _SESSION_PROBE, self._path(session), launch_id]
         )
-        command[1:1] = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
         deadline = time.monotonic() + timeout
         diagnostic = "no readiness response"
         while True:

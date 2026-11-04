@@ -23,20 +23,56 @@ from .evaluation import EvaluationMixin
 from .evaluation_data import _choices, _digest, _reserve, _safe_name, _tasks
 from .session import write_json
 
+# The scorer supplies these itself; a caller's copy would collide inside generate().
+_OWNED_GENERATE_ARGUMENTS = {
+    "inputs",
+    "input_ids",
+    "attention_mask",
+    "generation_config",
+    "tokenizer",
+}
+# GenerationConfig.validate() accepts these, but generate() raises on the first call.
+_SAMPLING_RANGES = {
+    "temperature": (lambda value: value > 0, "must be positive when sampling"),
+    "top_k": (lambda value: value >= 0, "must be nonnegative"),
+    "top_p": (lambda value: 0 < value <= 1, "must be in (0, 1]"),
+    "typical_p": (lambda value: 0 < value <= 1, "must be in (0, 1]"),
+    "min_p": (lambda value: 0 <= value <= 1, "must be in [0, 1]"),
+}
 
-def _generation_kwargs(generation_config: dict[str, Any] | None) -> dict[str, Any]:
+
+def _generation_kwargs(
+    generation_config: dict[str, Any] | None, generate: Any = None
+) -> dict[str, Any]:
     """Greedy defaults plus the caller's settings, refusing what generate() would reject."""
+    import inspect
+
     from transformers import GenerationConfig
 
     config = {"max_new_tokens": 32, "do_sample": False, **(generation_config or {})}
-    known = {key for key in vars(GenerationConfig()) if not key.startswith("_")}
-    unknown = sorted(set(config) - known)
+    fields = {key for key in vars(GenerationConfig()) if not key.startswith("_")}
+    known = set(fields)
+    if generate is not None:
+        known |= {
+            name
+            for name, parameter in inspect.signature(generate).parameters.items()
+            if parameter.kind not in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD)
+        }
+    unknown = sorted(set(config) - (known - _OWNED_GENERATE_ARGUMENTS))
     if unknown:
         raise ValueError(f"generation_config has unknown keys: {unknown}")
     if config.get("num_return_sequences", 1) != 1:
         raise ValueError("sampled scoring requires num_return_sequences=1")
+    sampling = bool(config.get("do_sample"))
+    for key, (valid, rule) in _SAMPLING_RANGES.items():
+        if sampling and config.get(key) is not None and not valid(config[key]):
+            raise ValueError(f"invalid generation_config: {key} {rule}")
+    penalty = config.get("repetition_penalty")
+    if penalty is not None and not penalty > 0:
+        raise ValueError("invalid generation_config: repetition_penalty must be positive")
     try:
-        GenerationConfig(**config).validate()
+        # Arguments that only generate() accepts are not GenerationConfig fields.
+        GenerationConfig(**{key: config[key] for key in config if key in fields}).validate()
     except (TypeError, ValueError) as error:
         raise ValueError(f"invalid generation_config: {error}") from error
     return config
@@ -111,13 +147,25 @@ class ScoringMixin(EvaluationMixin):
                 raise ValueError(f"option {label!r} encodes to no continuation tokens")
         return prompt_ids, answers
 
-    def _check_inputs(self, tasks: list[dict[str, Any]], mode: str) -> None:
+    def _check_inputs(
+        self, tasks: list[dict[str, Any]], mode: str, generation_config: dict[str, Any]
+    ) -> None:
         """Tokenize every row, so input errors fail before a held-out reservation."""
+        max_length = generation_config.get("max_length")
+        limited = generation_config.get("max_new_tokens") is None and max_length is not None
         for task in tasks:
             if mode == "sampled":
-                self._prompt_ids(self._scoring_prompt(task["prompt"]))
+                prompt_ids = self._prompt_ids(self._scoring_prompt(task["prompt"]))
+                if limited and len(prompt_ids) >= max_length:
+                    raise ValueError(
+                        f"prompt has {len(prompt_ids)} tokens, which max_length={max_length} "
+                        "leaves no room to generate"
+                    )
             else:
-                self._encode(task["prompt"], task["options"])
+                _, answers = self._encode(task["prompt"], task["options"])
+                # Options with the same tokens always tie, so the row could never be correct.
+                if len({tuple(ids) for ids in answers.values()}) != len(answers):
+                    raise ValueError("options must encode to distinct token sequences")
 
     def score(
         self, prompt: str, options: list[str] | dict[str, str], *, max_passes: int | None = None
@@ -157,8 +205,15 @@ class ScoringMixin(EvaluationMixin):
                 self._evaluation_mode(),
             ):
                 torch.manual_seed(seed)
+                # generate() needs the tokenizer to match stop strings.
+                extra = (
+                    {"tokenizer": self.tokenizer} if generation_config.get("stop_strings") else {}
+                )
                 generated = self.model.generate(
-                    input_ids=ids, attention_mask=torch.ones_like(ids), **generation_config
+                    input_ids=ids,
+                    attention_mask=torch.ones_like(ids),
+                    **generation_config,
+                    **extra,
                 )
         finally:
             if mps_state is not None:
@@ -203,9 +258,10 @@ class ScoringMixin(EvaluationMixin):
         json.dumps(generation_config or {}, allow_nan=False)
         tasks, identities = _tasks(data, mode)
         if mode == "sampled":
-            generation_config = _generation_kwargs(generation_config)
+            generate = getattr(getattr(self, "model", None), "generate", None)
+            generation_config = _generation_kwargs(generation_config, generate)
         name = _safe_name(name or f"run-{uuid.uuid4().hex[:12]}")
-        self._check_inputs(tasks, mode)
+        self._check_inputs(tasks, mode, generation_config or {})
         dataset_hash = _digest(
             [
                 {key: task[key] for key in ("prompt", "answer", "options") if key in task}

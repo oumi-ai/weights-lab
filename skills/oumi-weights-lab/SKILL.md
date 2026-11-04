@@ -1,50 +1,91 @@
 ---
 name: oumi-weights-lab
-description: Investigate an open-weights language model with a persistent Python worker, reversible parameter edits, activation probes, and controlled local evaluations. Use for experiments on model behavior or weights, including LoRA checkpoints.
+description: Use when asked to ablate, zero, edit, swap, or compare an open-weights language model's parameters, including LoRA adapters; when measuring how a weight change affects a model's answers; or when recording, patching, or probing a Hugging Face causal model's activations or gradients.
 compatibility: Requires the oumi-weights-lab CLI (Python 3.11+ on Linux or macOS), provided by the Claude Code plugin when uv is installed or by uv tool install git+https://github.com/oumi-ai/weights-lab, and network access to download models. Remote workers also need an authenticated SkyPilot CLI.
 ---
 
-Keep one model loaded while investigating one concrete question. Use the `oumi-weights-lab` CLI and the `lab` object in its shared Python namespace. Snippets are trusted Python with normal filesystem and network access.
+# Oumi Weights Lab
 
-The Claude Code plugin provides the `oumi-weights-lab` command when uv is installed; its first run builds an environment and downloads PyTorch, so allow it a few minutes. A standalone skill supplies instructions only. If `oumi-weights-lab --help` fails, ask the user to install the CLI with `uv tool install git+https://github.com/oumi-ai/weights-lab`, or `uv tool install 'oumi-weights-lab[adapters] @ git+https://github.com/oumi-ai/weights-lab'` for LoRA adapters.
+Load one model into a persistent worker, then send it Python snippets. Snippets share state, so an edit made in one snippet is measured in the next. The worker saves every snippet's source, output, and forward-pass count in the session directory. Snippets are trusted Python with the user's filesystem and network access.
 
-1. Write the question, expected observation, model/adapter IDs, device/dtype, dev examples, reserved held-out examples, and pass budget in experiment notes. Separate held-out data before searching. Start a fresh session directory; an old process's Python namespace cannot be resumed from disk.
-2. Start once, then submit saved snippet files. `start` returns while loading; `send --follow` waits and streams output. `peek` distinguishes loading, running, and failure. Save notes under the worker-created `artifacts` directory after startup.
+## Setup
 
-   ```bash
-   oumi-weights-lab start --session sessions/experiment --model HuggingFaceTB/SmolLM2-135M \
-     --device cpu --dtype float32 --snippet-timeout 300 --pass-limit 1000
-   oumi-weights-lab send --session sessions/experiment --file baseline.py --follow
-   oumi-weights-lab peek --session sessions/experiment
-   ```
+Run `oumi-weights-lab --help`. If it fails, ask the user to install the CLI with `uv tool install git+https://github.com/oumi-ai/weights-lab`, or `uv tool install 'oumi-weights-lab[adapters] @ git+https://github.com/oumi-ai/weights-lab'` for LoRA adapters. Under the Claude Code plugin, the first call builds an environment and downloads PyTorch; allow it several minutes.
 
-3. Establish a baseline on the dev data inside this session before changing anything. Use `lab.evaluate(rows, name="baseline-v1", max_passes=...)`; compare later runs with `lab.diff(baseline, candidate)`. Use a new run name each time: letters, digits, underscores, and hyphens only, beginning with a letter or digit. Keep prompts, continuation spacing, scoring mode, and generation settings fixed.
-4. Choose the cheapest informative experiment from the recipes below. Inspect names with `lab.parts()` or `model.named_modules()`; architecture-specific paths vary. Make edits through `lab.edit`, `lab.zero`, or `lab.swap` so originals are preserved. `lab.undo()` reverses the most recent edit exactly; undo multiple edits in reverse order. Direct tensor writes are possible but untracked. Repeat the restored baseline to check the control.
-5. Freeze the candidate and run held-out evaluation once: `lab.evaluate(heldout, name="heldout-final", held_out=True, max_passes=...)`. Held-out data requires an explicit pass cap and cannot be rerun or repurposed as dev data, including after a failed run. Dev data cannot later become held-out data. Do not inspect held-out misses to search further.
-6. Report the question, model and setup, active edit IDs/revision, dataset sizes, before/after results, changed items, forward passes, and limits of the evidence. Keep measured outcomes distinct from hypotheses. A tiny hand-built dev set is a diagnostic, not a benchmark estimate.
-7. If preserving edited weights, call `lab.export("checkpoint")` while the model is alive. Relative exports go under `artifacts`; destinations must be absent or empty. Remove active attachments and activation patches first. PEFT export merges a clone into a full checkpoint, temporarily requiring a second model's memory. Save the component code separately when it cannot be represented by the checkpoint. Then stop and archive:
+## Session commands
 
-   ```bash
-   oumi-weights-lab stop --session sessions/experiment
-   oumi-weights-lab backup --session sessions/experiment --output sessions/experiment.tar.gz
-   ```
+| Step | Command |
+| --- | --- |
+| Start | `oumi-weights-lab start --session sessions/NAME --model MODEL_ID --pass-limit 2000 --snippet-timeout 1800` |
+| Run a snippet and wait | `oumi-weights-lab send --session sessions/NAME --file /abs/path/snippet.py --follow --timeout 1800` |
+| Check status | `oumi-weights-lab peek --session sessions/NAME` |
+| Stop | `oumi-weights-lab stop --session sessions/NAME` |
+| Archive | `oumi-weights-lab backup --session sessions/NAME --output NAME.tar.gz` |
 
-The namespace includes `lab`, `model`, `tokenizer`, `Path`, and `artifacts`. The worker saves every submitted source, output, and result; evaluation saves item-level answers and summaries under `artifacts/evaluations`. Use `torch.no_grad()` for inference; eval mode alone retains gradients. Keep gradient rows short. Hooks require the uncompiled model; the loader uses eager execution and never enables custom Hub code. A timeout may leave earlier completed edits active; inspect `lab.edits()` and restore a known state before comparing. Native calls may finish before Python handles cancellation.
+- Use a new `--session` directory for every `start`; a stopped session cannot be restarted.
+- `start` returns while the model loads, and snippets queue until it is ready. `--device` defaults to CUDA, then Apple MPS, then CPU. `--dtype` defaults to the checkpoint's own.
+- Stdout is JSON. `--follow` streams snippet output to stderr. `--snippet-timeout` stops a snippet that runs too long; `send --timeout` only limits how long the CLI waits.
+- Snippet files can live anywhere; `--file` sends their contents. Snippets run in the directory where `start` ran, so read inputs by absolute path and write outputs under `artifacts`.
+- Add `--adapter PATH_OR_ID` to load a LoRA adapter. For a cloud GPU or Slurm, read [remote workers](references/remote.md).
 
-A pass counts one underlying model forward, including each generation step; a batch counts once. Use the session `--pass-limit` and narrower `lab.limit_passes(n)` scopes. A local evaluation cap never replaces the session cap. Compare causal conclusions within the same session: changing precision, kernels, or hardware can move near-ties.
+## Snippets
 
-Read only the recipe needed:
+A snippet sees `lab`, `model`, `tokenizer`, `Path`, and `artifacts`. This one measures an ablation and its control:
 
-- [Compare checkpoints](references/compare-checkpoints.md): parameter deltas without extra forward passes.
-- [LoRA update diagnostics](references/lora-diagnostics.md): adapter update spectra, rank, and magnitude without forward passes.
-- [Save and resume edits](references/edit-bundles.md): portable save points with undo history and inherited guards.
-- [Evaluation reports and screens](references/evaluation.md): score changes, paired statistics, regression suites, and pinned dev subsets.
+```python
+import json
+
+rows = [json.loads(line) for line in Path("/abs/path/caps.jsonl").read_text().splitlines()]
+rows = [
+    {
+        "prompt": r["prompt"],
+        "options": [" " + o for o in r["options"]],
+        "answer": r["options"].index(r["answer"]),
+    }
+    for r in rows
+]
+name = "model.layers.3.mlp.down_proj.weight"  # confirm with lab.parts("*layers.3.*")
+baseline = lab.evaluate(rows, name="baseline-v1", max_passes=200)
+edit_id = lab.zero(name, note="ablate layer 3 MLP")
+try:
+    ablated = lab.evaluate(rows, name="ablated-v1", max_passes=200)
+finally:
+    lab.undo(edit_id)
+restored = lab.evaluate(rows, name="restored-v1", max_passes=200)
+print(baseline["accuracy"], ablated["accuracy"], restored["accuracy"])
+print(json.dumps(lab.diff(baseline, ablated), indent=2))
+```
+
+- A row is `{"prompt": str, "options": list or {label: text}, "answer": index, label, or option text}`. Prompt and option are tokenized separately, so start each option with the space the tokenizer expects, such as `" Paris"`. An answer given as option text must match it exactly, space included; an index avoids that.
+- `evaluate` returns a summary with `accuracy`, `correct`, `total`, `forward_passes`, and `run_dir`. Each row's scores and prediction are in `run_dir/items.jsonl`. Every run needs a new name made of letters, digits, `_`, and `-`.
+- Likelihood scoring costs one forward pass per option per row; `mode="sampled"` costs one per generated token. `max_passes` caps one call and `--pass-limit` caps the whole session; size both from that cost.
+- `lab.parts(pattern)` lists parameter names and shapes; names differ by architecture.
+- Edit through `lab.edit`, `lab.zero`, or `lab.swap`. `lab.undo()` restores the newest edit exactly in any dtype, so undo several edits newest first. Writes made directly through `model` are not tracked.
+- Wrap your own `model(...)` calls in `torch.no_grad()`.
+- After a timeout or error, check `lab.active_edit_ids` and undo to a known state before measuring again.
+
+## Experiment discipline
+
+1. Write down the question and the observation you expect before running anything.
+2. Measure a baseline in the same session before any edit.
+3. After undoing, measure again: restored results must match the baseline.
+4. If you will choose among several edits or settings, set aside held-out rows first. Evaluate only the final choice on them, once, with `held_out=True` and `max_passes`. Held-out rows can never become dev rows, even after a failed run. A single pre-planned edit needs no held-out split.
+5. Report the question, model and device, parameters edited, dataset size, baseline, edited, and restored results, changed items, forward passes, and the limits of the evidence. A small hand-written set is a diagnostic, not a benchmark.
+6. To keep edited weights, call `lab.export("NAME")` before stopping. Export fails while attachments or patches are active, and `backup` never saves weights.
+
+## Recipes
+
+Read only the one you need:
+
+- [Worked example](references/worked-example.md): full baseline, ablation, undo, and report snippet.
 - [Zero or swap parts](references/zero-swap.md): reversible ablations and matched checkpoint slices.
-- [Document-split probes](references/probes.md): representations with source documents kept apart.
-- [Activation patching](references/activation-patching.md): temporary intervention on selected tokens.
-- [Short-row gradients](references/gradients.md): per-row gradients without long-context memory growth.
-- [Written-working control](references/written-working.md): test computation before editing weights.
-- [Hand-built parts](references/hand-built.md): temporary logit modules or prompt transformations.
-- [Worked example](references/worked-example.md): baseline, first-layer ablation, exact undo, and a saved report.
-
-For remote sessions, read [remote workers](references/remote.md) for the SkyPilot workflow and backup before teardown. Local sessions need no SkyPilot installation.
+- [Compare checkpoints](references/compare-checkpoints.md): parameter deltas without forward passes.
+- [Evaluation reports and screens](references/evaluation.md): paired statistics, regression suites, and pinned dev subsets.
+- [Save and resume edits](references/edit-bundles.md): save points that carry undo history and held-out reservations.
+- [Activation patching](references/activation-patching.md): replace hidden states at chosen tokens.
+- [Short-row gradients](references/gradients.md): per-row gradients for selected parameters.
+- [Document-split probes](references/probes.md): linear probes that keep source documents apart.
+- [LoRA update diagnostics](references/lora-diagnostics.md): adapter update spectra and rank without forward passes.
+- [Written-working control](references/written-working.md): test a computation in text before editing weights.
+- [Hand-built parts](references/hand-built.md): temporary prompt transforms and logit adjustments.
+- [Remote workers](references/remote.md): SkyPilot clouds and Slurm.

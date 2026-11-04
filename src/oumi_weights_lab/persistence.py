@@ -303,7 +303,7 @@ class PersistenceMixin:
                         originals[key][0].copy_(value)
                 if manifest["registry"] is not None:
                     registry_path.parent.mkdir(parents=True, exist_ok=True)
-                    write_json(registry_path, manifest["registry"])
+                    write_json(registry_path, manifest["registry"], durable=True)
             except BaseException:
                 with torch.no_grad():
                     for parameter, original in originals.values():

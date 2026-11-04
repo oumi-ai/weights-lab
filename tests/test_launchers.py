@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from oumi_weights_lab.launchers import (
+    SSH_OPTIONS,
     SkyPilotLauncher,
     _SSHTransport,
     sanitized_workdir,
@@ -43,8 +44,8 @@ class Recorder:
 
 def local_transport(args, **kwargs):
     """Execute the exact SSH command through a real local shell, without SSH access."""
-    assert args[:3] == ["ssh", "--", "test-host"]
-    return subprocess.run(["sh", "-c", args[3]], **kwargs)
+    assert args[:-1] == ["ssh", *SSH_OPTIONS, "--", "test-host"]
+    return subprocess.run(["sh", "-c", args[-1]], **kwargs)
 
 
 def run_session_bootstrap(script):
@@ -495,7 +496,7 @@ def test_sky_stdin_snippet_survives_remote_shell_roundtrip(tmp_path):
     create_session(path, {"model": "unused"})
 
     def local_sky(args, **kwargs):
-        assert args[:3] == ["ssh", "--", "weights-test"]
+        assert args[:-1] == ["ssh", *SSH_OPTIONS, "--", "weights-test"]
         return subprocess.run(["sh", "-c", args[-1]], **kwargs)
 
     launcher = SkyPilotLauncher("weights-test", python=sys.executable, runner=local_sky)
@@ -516,7 +517,7 @@ def test_sky_checkpoint_copy_uses_cluster_ssh_alias(tmp_path):
     source.write_bytes(b"checkpoint")
 
     def local_sky(args, **kwargs):
-        assert args[:3] == ["ssh", "--", "weights-test"]
+        assert args[:-1] == ["ssh", *SSH_OPTIONS, "--", "weights-test"]
         return subprocess.run(["sh", "-c", args[-1]], **kwargs)
 
     launcher = SkyPilotLauncher("weights-test", python=sys.executable, runner=local_sky)

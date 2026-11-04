@@ -15,7 +15,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .session import TERMINAL_STATES, cancel_unfinished, read_json, session_lock, write_json
+from .session import (
+    DEFAULT_SHUTDOWN_GRACE,
+    TERMINAL_STATES,
+    cancel_unfinished,
+    read_json,
+    session_lock,
+    write_json,
+)
 
 
 class _SnippetTimeout(BaseException):
@@ -54,6 +61,7 @@ class Worker:
         self.lab: Any = None
         self.namespace: dict[str, Any] = {}
         self._shutdown_reason: str | None = None
+        self._deadline: threading.Timer | None = None
 
     def _status(self, state: str, **extra: Any) -> None:
         status = {
@@ -161,8 +169,16 @@ class Worker:
                         return
                     if guard is not None and guard.poll() is not None:
                         # Without its watchdog this worker has no idle or lifetime
-                        # deadline, and a remote cluster would never autodown.
+                        # deadline, and a remote cluster would never autodown. Stand in
+                        # for it: stop now, and force exit if native code, a snippet
+                        # that swallows the stop, or the final save stalls past grace.
                         self._shutdown_reason = "watchdog_exited"
+                        grace = self.config.get("shutdown_grace", DEFAULT_SHUTDOWN_GRACE)
+                        self._deadline = threading.Timer(
+                            grace, os.kill, (os.getpid(), signal.SIGKILL)
+                        )
+                        self._deadline.daemon = True
+                        self._deadline.start()
                         os.kill(os.getpid(), signal.SIGTERM)
                         return
 
@@ -254,6 +270,8 @@ class Worker:
                     if guard is not None:
                         guard.terminate()
                         guard.wait()
+                    if self._deadline is not None:
+                        self._deadline.cancel()
                     for signum, handler in previous.items():
                         signal.signal(signum, handler)
             return exit_code

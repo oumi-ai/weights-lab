@@ -16,10 +16,15 @@ from oumi_weights_lab.scoring import ScoringMixin
 
 
 class WordTokenizer:
+    """One token per word; distinct words get distinct tokens."""
+
     bos_token_id = eos_token_id = 0
 
+    def __init__(self):
+        self.vocabulary: dict[str, int] = {}
+
     def encode(self, text, add_special_tokens=False):
-        return [1] * len(text.split())
+        return [self.vocabulary.setdefault(word, len(self.vocabulary) + 1) for word in text.split()]
 
 
 class OfflineLab(ScoringMixin):
