@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -42,13 +43,29 @@ def anchors(text: str) -> set[str]:
     return result
 
 
+def published(root: Path, documents: list[Path]) -> list[Path]:
+    """Keep documents Git would publish: tracked or new, but never ignored."""
+    try:
+        listed = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others"]
+            + ["--exclude-standard"],
+            capture_output=True,
+            check=True,
+            timeout=30,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return documents  # Not a Git checkout, such as an unpacked sdist.
+    names = {root / name for name in listed.decode().split("\0") if name}
+    return [document for document in documents if document in names]
+
+
 def check_links(root: Path) -> list[str]:
     errors = []
     documents = [root / "README.md", root / "CONTRIBUTING.md"]
     documents += sorted((root / "docs").glob("*.md"))
     documents += sorted((root / "skills").rglob("*.md"))
-    for document in documents:
-        if document.name == "PLAN.md" or not document.exists():
+    for document in published(root, documents):
+        if not document.exists():
             continue
         text = prose(document.read_text())
         targets = re.findall(r"!?\[[^\]]*\]\(\s*(<[^>]+>|[^\s)]+)(?:\s+[^)]*)?\)", text)
@@ -72,6 +89,10 @@ def check_manifests(root: Path) -> list[str]:
     """Validate the manifest fields this plugin uses, without harness installs."""
     errors = []
     project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
+    package = root / "src" / "oumi_weights_lab" / "__init__.py"
+    version = re.search(r'^__version__ = "([^"]+)"$', package.read_text(), re.MULTILINE)
+    if not version or version[1] != project["version"]:
+        errors.append("src/oumi_weights_lab/__init__.py: __version__ differs from package")
     manifests = {}
     for relative in ("plugin.json", ".codex-plugin/plugin.json", ".claude-plugin/plugin.json"):
         try:
@@ -119,11 +140,15 @@ def check_manifests(root: Path) -> list[str]:
         for key in ("displayName", "shortDescription", "longDescription", "category"):
             if not isinstance(interface.get(key), str) or not interface[key].strip():
                 errors.append(f"{relative}: interface.{key} must be a nonempty string")
+    if settings.get("interface") != codex.get("interface"):
+        errors.append(".codex-plugin/plugin.json: interface differs from portable manifest")
     if codex.get("skills") != "./skills/" or not skill.is_file():
         errors.append(".codex-plugin/plugin.json: skills must resolve to the packaged skill")
+    catalog_names = set()
     for relative in (".agents/plugins/marketplace.json", ".claude-plugin/marketplace.json"):
         try:
             catalog = json.loads((root / relative).read_text())
+            catalog_names.add(catalog.get("name"))
             entries = catalog.get("plugins", [])
             if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
                 raise ValueError("plugins must be a list of objects")
@@ -138,6 +163,8 @@ def check_manifests(root: Path) -> list[str]:
                 raise ValueError("plugin must resolve to this repository")
         except (OSError, ValueError, TypeError, AttributeError) as exc:
             errors.append(f"{relative}: {exc}")
+    if len(catalog_names) > 1:
+        errors.append("marketplace catalogs must share one name")
     return errors
 
 

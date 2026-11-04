@@ -9,6 +9,7 @@ from .editing import EditingMixin
 from .inspection import InspectionMixin
 from .persistence import PersistenceMixin
 from .scoring import ScoringMixin
+from .session import DTYPES
 
 
 class Lab(EditingMixin, ScoringMixin, InspectionMixin, AttachmentMixin, PersistenceMixin):
@@ -60,18 +61,6 @@ class Lab(EditingMixin, ScoringMixin, InspectionMixin, AttachmentMixin, Persiste
         """Number of base-model forward calls since loading."""
         return self._forward_passes
 
-    @property
-    def passes_used(self) -> int:
-        return self._forward_passes
-
-    @property
-    def revision(self) -> int:
-        return (
-            self.editbook.revision
-            + getattr(self, "_attachment_revision", 0)
-            + getattr(self, "_patch_revision", 0)
-        )
-
     def _count_forward(self, module: Any, inputs: Any) -> None:
         self._before_forward()
         self._forward_passes += 1
@@ -96,14 +85,9 @@ def load_lab(config: dict[str, Any], session_path: Path) -> Lab:
     model_id = config["model"]
     device = _resolve_device(torch, config.get("device", "auto"))
     dtype_name = config.get("dtype", "auto")
-    dtypes = {
-        "auto": "auto",
-        "float32": torch.float32,
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-    }
-    if dtype_name not in dtypes:
-        raise ValueError(f"Unsupported dtype {dtype_name!r}; choose {', '.join(dtypes)}")
+    if dtype_name not in DTYPES:
+        raise ValueError(f"Unsupported dtype {dtype_name!r}; choose {', '.join(DTYPES)}")
+    dtypes = {name: "auto" if name == "auto" else getattr(torch, name) for name in DTYPES}
 
     set_seed(config.get("seed", 0))
     torch.backends.cudnn.benchmark = False

@@ -1,11 +1,12 @@
 ---
 name: oumi-weights-lab
 description: Investigate an open-weights language model with a persistent Python worker, reversible parameter edits, activation probes, and controlled local evaluations. Use for experiments on model behavior or weights, including LoRA checkpoints.
+compatibility: Requires the oumi-weights-lab CLI (Python 3.11+ on Linux or macOS), provided by the Claude Code plugin when uv is installed or by uv tool install git+https://github.com/oumi-ai/weights-lab, and network access to download models. Remote workers also need an authenticated SkyPilot CLI.
 ---
 
 Keep one model loaded while investigating one concrete question. Use the `oumi-weights-lab` CLI and the `lab` object in its shared Python namespace. Snippets are trusted Python with normal filesystem and network access.
 
-This skill supplies instructions, not the Python package. Use an agent execution environment where `oumi-weights-lab` is installed separately; installing the skill or plugin does not install the CLI. A plugin cache or copied skill folder is not a source checkout.
+The Claude Code plugin provides the `oumi-weights-lab` command when uv is installed; its first run builds an environment and downloads PyTorch, so allow it a few minutes. A standalone skill supplies instructions only. If `oumi-weights-lab --help` fails, ask the user to install the CLI with `uv tool install git+https://github.com/oumi-ai/weights-lab`, or `uv tool install 'oumi-weights-lab[adapters] @ git+https://github.com/oumi-ai/weights-lab'` for LoRA adapters.
 
 1. Write the question, expected observation, model/adapter IDs, device/dtype, dev examples, reserved held-out examples, and pass budget in experiment notes. Separate held-out data before searching. Start a fresh session directory; an old process's Python namespace cannot be resumed from disk.
 2. Start once, then submit saved snippet files. `start` returns while loading; `send --follow` waits and streams output. `peek` distinguishes loading, running, and failure. Save notes under the worker-created `artifacts` directory after startup.
@@ -35,6 +36,7 @@ A pass counts one underlying model forward, including each generation step; a ba
 Read only the recipe needed:
 
 - [Compare checkpoints](references/compare-checkpoints.md): parameter deltas without extra forward passes.
+- [LoRA update diagnostics](references/lora-diagnostics.md): adapter update spectra, rank, and magnitude without forward passes.
 - [Save and resume edits](references/edit-bundles.md): portable save points with undo history and inherited guards.
 - [Evaluation reports and screens](references/evaluation.md): score changes, paired statistics, regression suites, and pinned dev subsets.
 - [Zero or swap parts](references/zero-swap.md): reversible ablations and matched checkpoint slices.
@@ -43,7 +45,6 @@ Read only the recipe needed:
 - [Short-row gradients](references/gradients.md): per-row gradients without long-context memory growth.
 - [Written-working control](references/written-working.md): test computation before editing weights.
 - [Hand-built parts](references/hand-built.md): temporary logit modules or prompt transformations.
-- [Fixed date network](references/date-network.md): frozen calendar/business-day operations and character output.
 - [Worked example](references/worked-example.md): baseline, first-layer ablation, exact undo, and a saved report.
 
-For remote sessions, read [remote workers](references/remote.md) for the SkyPilot workflow, source-checkout prerequisites, and backup before teardown. Local sessions need no SkyPilot installation.
+For remote sessions, read [remote workers](references/remote.md) for the SkyPilot workflow and backup before teardown. Local sessions need no SkyPilot installation.

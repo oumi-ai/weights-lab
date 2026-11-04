@@ -6,6 +6,7 @@ import argparse
 import fcntl
 import os
 import signal
+import sys
 import time
 from pathlib import Path
 
@@ -41,7 +42,9 @@ def watch(path: Path, pid: int, started: float) -> None:
             status = read_json(path / "status.json")
         except (OSError, ValueError):
             status = {}
-        ready = status.get("state") == "ready" and not any((path / "inbox").glob("*.py"))
+        # The worker claims a snippet (inbox -> running) before it reports "running".
+        queued = any((path / "inbox").glob("*.py")) or any((path / "running").glob("*.py"))
+        ready = status.get("state") == "ready" and not queued
         if ready:
             if idle_since is None or status.get("updated_at") != previous_ready:
                 idle_since = now
@@ -51,7 +54,11 @@ def watch(path: Path, pid: int, started: float) -> None:
         else:
             idle_since, previous_ready = None, None
         if reason:
-            write_json(path / "shutdown.json", {"reason": reason, "pid": pid})
+            try:
+                write_json(path / "shutdown.json", {"reason": reason, "pid": pid})
+            except (OSError, ValueError) as error:
+                # Enforcing the deadline matters more than recording why.
+                print(f"watchdog could not record {reason}: {error}", file=sys.stderr, flush=True)
             if os.getppid() != pid:
                 return
             os.kill(pid, signal.SIGTERM)

@@ -18,6 +18,12 @@ from typing import Any
 from .budget import PassBudget
 
 DIRECTORIES = ("inbox", "running", "completed", "outputs", "results", "artifacts")
+DTYPES = ("auto", "float32", "float16", "bfloat16")
+# Worker status states: starting, loading, ready, running, stopping, stopped, failed.
+TERMINAL_STATES = frozenset({"stopped", "failed"})
+DEFAULT_SNIPPET_TIMEOUT = 300.0
+DEFAULT_POLL_INTERVAL = 0.1
+DEFAULT_SHUTDOWN_GRACE = 30.0
 
 
 @contextmanager
@@ -34,14 +40,25 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 def write_json(path: Path, value: dict[str, Any]) -> None:
-    """Replace a JSON document without exposing partial writes to readers."""
+    """Durably replace a JSON document without exposing partial writes to readers.
+
+    The file and its directory entry are flushed before returning, so a held-out
+    reservation recorded here survives a power loss that follows its evaluation.
+    """
     path = Path(path)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(value, stream, indent=2, allow_nan=False)
             stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         Path(temporary).unlink(missing_ok=True)
 
@@ -52,7 +69,11 @@ def create_session(path: Path, config: dict[str, Any]) -> Path:
         raise ValueError("a model name or checkpoint path is required")
     PassBudget(config.get("pass_limit"))
     config = validate_lifecycle(config)
-    config = {"snippet_timeout": 300.0, "poll_interval": 0.1, **config}
+    config = {
+        "snippet_timeout": DEFAULT_SNIPPET_TIMEOUT,
+        "poll_interval": DEFAULT_POLL_INTERVAL,
+        **config,
+    }
     for name in ("snippet_timeout", "poll_interval"):
         value = float(config[name])
         if not math.isfinite(value) or value <= 0:
@@ -69,7 +90,7 @@ def create_session(path: Path, config: dict[str, Any]) -> Path:
 def validate_lifecycle(config: dict[str, Any]) -> dict[str, Any]:
     config = config.copy()
     for name in ("idle_timeout", "max_lifetime", "shutdown_grace"):
-        value = config.get(name, 30.0 if name == "shutdown_grace" else None)
+        value = config.get(name, DEFAULT_SHUTDOWN_GRACE if name == "shutdown_grace" else None)
         if value is None and name != "shutdown_grace":
             continue
         if isinstance(value, bool):
@@ -92,7 +113,7 @@ def submit(path: Path, code: str) -> str:
 
 def _submit(path: Path, code: str) -> str:
     state = read_json(path / "status.json")["state"]
-    if state in {"stopped", "failed", "stopping"} or (path / "STOP").exists():
+    if state in TERMINAL_STATES | {"stopping"} or (path / "STOP").exists():
         raise ValueError(f"session is not accepting snippets (state: {state})")
     if not code.strip():
         raise ValueError("snippet is empty")

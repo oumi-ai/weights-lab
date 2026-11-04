@@ -15,10 +15,11 @@ print(report["groups"])
 print(report["top_probability_movers"])
 ```
 
-`diff` reports prediction/correctness changes by default; use
-`include_scores=True` to see score movement with unchanged winners. Legacy `diff`
-ignores row IDs while checking ordered content, metadata, settings, and complete
-results. `compare_runs` and suite pairing are strict: same ordered tasks, IDs, metadata, session, mode, seed, scoring policy, and
+`diff` pairs two runs of the same dataset by position and reports
+prediction/correctness changes; use `include_scores=True` to see score movement
+with unchanged winners. It ignores row IDs but checks ordered content, metadata,
+settings, and complete results. `compare_runs` and suite pairing are strict: same
+ordered tasks, IDs, metadata, session, mode, seed, scoring policy, and
 generation settings. Explicit IDs must be unique and complete. Custom sampled
 checkers require a matching explicit `checker_id` for comparison.
 
@@ -29,7 +30,8 @@ Bootstrap intervals use source documents (`document_id`, `source_doc`, or
 `source_document`, top-level or nested under `metadata`) when present; override
 with `bootstrap_group_by`. Missing requested groups/documents must be corrected,
 not dropped. Failed/unfinished rows remain in denominators with an explicit
-failure penalty. A failed suite cannot pass.
+failure penalty and are listed in `failed_rows`, never ranked as movers. Exact
+score ties count as incorrect (`tie: true`). A failed suite cannot pass.
 
 For recurring checks, use `lab.evaluate_suite({"surface": data, ...}, name=...)`.
 Each value may instead be `{"data": data, "mode": ..., "max_passes": ...}`.
@@ -55,6 +57,3 @@ reserve their whole source as dev; do not report a screen result as a full-suite
 held-out improvement. Reuse fixed pins and run the full regression suite before
 promoting an edit. Repeated dev selection invalidates a naive interpretation of
 p-values as evidence of unseen-data gains. No calibration fitting is provided.
-
-See `docs/evaluation.md` for metric definitions, failure penalties, storage layout,
-and complete API examples.

@@ -24,17 +24,20 @@ class Recorder:
         self.stdout = stdout
         self.calls = []
         self.task = None
+        self.spec_text = None
         self.synced_files = None
 
     def __call__(self, args, **kwargs):
         self.calls.append((args, kwargs))
         if args[:2] == ["sky", "launch"]:
-            self.task = json.loads(Path(args[-1]).read_text())
-            self.synced_files = [
-                path.relative_to(self.task["workdir"]).as_posix()
-                for path in Path(self.task["workdir"]).rglob("*")
-                if path.is_file()
-            ]
+            self.spec_text = Path(args[-1]).read_text(encoding="utf-8")
+            self.task = json.loads(self.spec_text)
+            if "workdir" in self.task:
+                self.synced_files = [
+                    path.relative_to(self.task["workdir"]).as_posix()
+                    for path in Path(self.task["workdir"]).rglob("*")
+                    if path.is_file()
+                ]
         return subprocess.CompletedProcess(args, 0, self.stdout, "")
 
 
@@ -42,6 +45,12 @@ def local_transport(args, **kwargs):
     """Execute the exact SSH command through a real local shell, without SSH access."""
     assert args[:3] == ["ssh", "--", "test-host"]
     return subprocess.run(["sh", "-c", args[3]], **kwargs)
+
+
+def run_session_bootstrap(script):
+    """Run a task's session creation without replacing the child with a model worker."""
+    stub = "import os\nos.dup2=lambda *args: None\nos.execv=lambda *args: None\n"
+    subprocess.run([sys.executable, "-c", stub + script], check=True, capture_output=True)
 
 
 def test_sky_bootstrap_serializes_path_model(tmp_path):
@@ -53,9 +62,7 @@ def test_sky_bootstrap_serializes_path_model(tmp_path):
     )
     command = shlex.split(recorder.task["run"])
     assert command[:2] == [sys.executable, "-c"]
-    # Run session creation without replacing this test's child with a model worker.
-    script = "import os\nos.dup2=lambda *args: None\nos.execv=lambda *args: None\n" + command[2]
-    subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)
+    run_session_bootstrap(command[2])
     assert read_json(path / "config.json")["model"] == str(model)
 
 
@@ -78,7 +85,7 @@ def test_ssh_transport_uses_stdin_and_runs_commands_remotely():
     code = "print('sensitive snippet')"
     launcher.run(["send", "--session", "/remote/session"], input=code)
     args, kwargs = runner.calls[-1]
-    assert code not in args[-1] and kwargs["input"] == code
+    assert code not in args[-1] and kwargs["input"] == code.encode()
     launcher.run(["stop", "--session", "/remote/session", "--timeout", "10"])
     command = shlex.split(runner.calls[-1][0][-1])
     assert command[command.index("exec") + 1 :] == [
@@ -185,6 +192,71 @@ def test_sky_syncs_sanitized_package_and_keeps_foreground_worker(tmp_path):
     assert runner.calls[-1][0] == ["sky", "down", "-y", "weights-test"]
 
 
+def test_sky_checkout_installs_its_source_with_adapter_support(tmp_path):
+    runner = Recorder()
+    result = SkyPilotLauncher("weights-test", runner=runner).start(
+        "model", "/tmp/session", source=package_source(tmp_path)
+    )
+    assert shlex.split(runner.task["setup"]) == ["python3", "-m", "pip", "install", ".[adapters]"]
+    assert result["package"] == ".[adapters]"
+
+
+def installed_copy(tmp_path, monkeypatch, origin):
+    """Pretend this package is an installed copy whose metadata records ``origin``."""
+    from importlib import metadata
+
+    from oumi_weights_lab import launchers
+
+    installed = tmp_path / "site-packages" / "oumi_weights_lab" / "launchers.py"
+    monkeypatch.setattr(launchers, "__file__", str(installed))
+    record = SimpleNamespace(read_text=lambda name: None if origin is None else json.dumps(origin))
+    monkeypatch.setattr(metadata, "distribution", lambda name: record)
+
+
+def test_sky_git_install_installs_the_same_commit_on_the_worker(tmp_path, monkeypatch):
+    commit = "864206f11a3b6dd7cd9d7d2790efe95c3b84bf8c"
+    origin = {
+        "url": "https://github.com/oumi-ai/weights-lab",
+        "vcs_info": {"vcs": "git", "commit_id": commit, "requested_revision": "main"},
+    }
+    installed_copy(tmp_path, monkeypatch, origin)
+    runner = Recorder()
+    result = SkyPilotLauncher("weights-test", runner=runner).start("model", "/tmp/session")
+    requirement = (
+        f"oumi-weights-lab[adapters] @ git+https://github.com/oumi-ai/weights-lab@{commit}"
+    )
+    assert shlex.split(runner.task["setup"]) == ["python3", "-m", "pip", "install", requirement]
+    assert "workdir" not in runner.task
+    assert result["package"] == requirement
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        None,  # installed from an index or a wheel file
+        {"url": "file:///home/me/weights-lab", "dir_info": {}},
+        {"url": "file:///home/me/weights-lab", "vcs_info": {"vcs": "git", "commit_id": "a" * 40}},
+        {"url": "https://github.com/oumi-ai/weights-lab", "vcs_info": {"vcs": "git"}},
+    ],
+)
+def test_sky_installed_copy_without_a_fetchable_commit_asks_for_source(
+    tmp_path, monkeypatch, origin
+):
+    installed_copy(tmp_path, monkeypatch, origin)
+    runner = Recorder()
+    with pytest.raises(ValueError, match="--source"):
+        SkyPilotLauncher("weights-test", runner=runner).start("model", "/tmp/session")
+    assert runner.calls == []
+
+
+def test_sky_finds_the_checkout_it_runs_from():
+    from oumi_weights_lab import launchers
+
+    checkout = Path(launchers.__file__).resolve().parents[2]
+    assert launchers._source_checkout(None) == checkout
+    assert (checkout / "pyproject.toml").is_file()
+
+
 @pytest.mark.parametrize("infra", ["slurm/lab/gpu", "aws/us-east-1", "kubernetes/local"])
 def test_sky_routes_infrastructure_through_upstream_cli(tmp_path, infra):
     runner = Recorder()
@@ -226,15 +298,15 @@ def test_sky_invalid_or_modal_infrastructure_rejected_before_provisioning(infra)
 
 
 def test_sky_start_waits_for_python_and_session_files_with_quoted_home_path(tmp_path):
-    from oumi_weights_lab.session import create_session
-
     source = package_source(tmp_path)
     path = tmp_path / "session ' $(false); spaces"
     remote_path = "~/" + os.path.relpath(path, Path.home())
     probes = []
+    launched = []
 
     def bootstrap(args, **kwargs):
         if args[:2] == ["sky", "launch"]:
+            launched.append(shlex.split(json.loads(Path(args[-1]).read_text())["run"])[2])
             return subprocess.CompletedProcess(args, 0, "Setup detached; Job submitted", "")
         assert args[0] == "ssh" and args[-2] == "weights-test"
         assert kwargs["check"] is False and 0 < kwargs["timeout"] <= 15
@@ -242,7 +314,7 @@ def test_sky_start_waits_for_python_and_session_files_with_quoted_home_path(tmp_
         if len(probes) == 1:
             return subprocess.CompletedProcess(args, 127, "", "Python does not exist yet")
         if len(probes) == 3:
-            create_session(path, {"model": "model"})
+            run_session_bootstrap(launched[0])
         return subprocess.run(["sh", "-c", args[-1]], **kwargs)
 
     result = SkyPilotLauncher("weights-test", python=sys.executable, runner=bootstrap).start(
@@ -263,14 +335,16 @@ def test_sky_relative_start_metadata_and_probe_use_remote_workdir(tmp_path):
     command = shlex.split(runner.task["run"])
     assert repr(expected) in command[2]
     probe = runner.calls[-1][0]
-    assert shlex.split(probe[-1])[-1] == expected
+    assert shlex.split(probe[-1])[-2] == expected
     assert str(Path.home()) not in runner.task["run"]
 
 
 def test_sky_relative_session_readiness_send_peek_and_stop_shell_roundtrip(tmp_path):
     from oumi_weights_lab.session import create_session
 
-    path = create_session(tmp_path / "session ' $(false); spaces", {"model": "unused"})
+    path = create_session(
+        tmp_path / "session ' $(false); spaces", {"model": "unused", "launch_id": "launch"}
+    )
     # Exercise remote HOME expansion without changing this machine's HOME or writing there.
     relative = os.path.relpath(path, Path.home() / "sky_workdir")
 
@@ -279,7 +353,7 @@ def test_sky_relative_session_readiness_send_peek_and_stop_shell_roundtrip(tmp_p
         return subprocess.run(["sh", "-c", args[-1]], cwd=tmp_path, **kwargs)
 
     launcher = SkyPilotLauncher("weights-test", python=sys.executable, runner=remote_shell)
-    launcher._wait_session(relative, timeout=2, poll_interval=0.001)
+    launcher._wait_session(relative, timeout=2, poll_interval=0.001, launch_id="launch")
     queued = json.loads(launcher.run(["send", "--session", relative], input="print(1)").stdout)
     assert (path / "inbox" / f"{queued['id']}.py").read_text() == "print(1)"
     peeked = json.loads(launcher.run(["peek", f"--session={relative}"]).stdout)
@@ -295,7 +369,9 @@ def test_sky_slurm_commands_load_cluster_home_after_noninteractive_bashrc(tmp_pa
     login_home = tmp_path / "login home"
     cluster_home = login_home / ".sky_clusters" / "fixture"
     relative = "sessions/session ' $(false); spaces"
-    path = create_session(cluster_home / "sky_workdir" / relative, {"model": "unused"})
+    path = create_session(
+        cluster_home / "sky_workdir" / relative, {"model": "unused", "launch_id": "launch"}
+    )
     (login_home / ".bashrc").write_text('[ -z "$PS1" ] && return\n. "$HOME/.sky_ssh_rc"\n')
     (login_home / ".sky_ssh_rc").write_text(
         'if [ -n "$SKY_CLUSTER_NAME" ]; then\n'
@@ -314,7 +390,7 @@ def test_sky_slurm_commands_load_cluster_home_after_noninteractive_bashrc(tmp_pa
         )
 
     launcher = SkyPilotLauncher("weights-test", python=sys.executable, runner=remote_shell)
-    launcher._wait_session(relative, timeout=2, poll_interval=0.1)
+    launcher._wait_session(relative, timeout=2, poll_interval=0.1, launch_id="launch")
     queued = json.loads(
         launcher.run(["send", "--session", relative], input="print('literal $(false)')").stdout
     )
@@ -367,7 +443,7 @@ def test_sky_bootstrap_timeout_preserves_last_diagnostic(monkeypatch):
     )
     launcher = SkyPilotLauncher("weights-test", runner=probe)
     with pytest.raises(TimeoutError, match="package setup still running"):
-        launcher._wait_session("/session", timeout=1, poll_interval=0.3)
+        launcher._wait_session("/session", timeout=1, poll_interval=0.3, launch_id="launch")
     assert clock.now == 1
     assert attempts and all(0 < value <= 1 for value in attempts)
 
@@ -389,7 +465,7 @@ def test_sky_bootstrap_reports_worker_or_auth_failure_immediately(code, diagnost
 
     launcher = SkyPilotLauncher("weights-test", runner=probe)
     with pytest.raises(RuntimeError, match="bootstrap"):
-        launcher._wait_session("/session", timeout=100, poll_interval=1)
+        launcher._wait_session("/session", timeout=100, poll_interval=1, launch_id="launch")
     assert len(calls) == 1
 
 
@@ -446,3 +522,124 @@ def test_sky_checkpoint_copy_uses_cluster_ssh_alias(tmp_path):
     launcher = SkyPilotLauncher("weights-test", python=sys.executable, runner=local_sky)
     destination = launcher.download(source, tmp_path / "copied.bin")
     assert destination.read_bytes() == b"checkpoint"
+
+
+def test_ssh_run_returns_raw_bytes_when_remote_output_is_not_utf8(tmp_path):
+    from oumi_weights_lab.session import create_session, write_json
+
+    path = create_session(tmp_path / "session", {"model": "unused"})
+    write_json(path / "results" / "snippet.json", {"id": "snippet", "state": "succeeded"})
+    (path / "completed" / "snippet.py").write_text("print(1)")
+    (path / "outputs" / "snippet.log").write_bytes(b"child wrote \xff\n")
+    launcher = _SSHTransport("test-host", python=sys.executable, runner=local_transport)
+    result = launcher.run(["peek", "--session", str(path), "--id", "snippet"])
+    assert json.loads(result.stdout)["state"] == "succeeded"
+    assert result.stderr == b"child wrote \xff\n"
+
+
+def test_ssh_call_sites_never_inherit_the_callers_stdin(tmp_path):
+    calls = []
+
+    def runner(args, **kwargs):
+        calls.append(kwargs)
+        if "stdout" in kwargs:
+            raise subprocess.CalledProcessError(1, args)
+        return subprocess.CompletedProcess(args, 0, b"{}", b"")
+
+    launcher = SkyPilotLauncher("weights-test", runner=runner)
+    launcher.run(["peek", "--session", "/session"])
+    launcher.stop("/session")
+    launcher._wait_session("/session", timeout=1, poll_interval=1, launch_id="launch")
+    with pytest.raises(subprocess.CalledProcessError):
+        launcher.download("/session/artifacts/edited", tmp_path / "edited")
+    assert len(calls) == 4
+    assert all(kwargs["stdin"] is subprocess.DEVNULL for kwargs in calls)
+    launcher.run(["send", "--session", "/session"], input="print(1)")
+    assert calls[-1]["input"] == b"print(1)" and "stdin" not in calls[-1]
+
+
+def test_sky_readiness_rejects_an_existing_session_from_another_launch(tmp_path):
+    from oumi_weights_lab.session import create_session, write_json
+
+    path = create_session(tmp_path / "session", {"model": "old-model"})
+    write_json(path / "status.json", {"state": "ready", "model": "old-model"})
+    probes = []
+
+    def remote(args, **kwargs):
+        if args[:2] == ["sky", "launch"]:
+            # The new job cannot create a session over the old one.
+            script = shlex.split(json.loads(Path(args[-1]).read_text())["run"])[2]
+            with pytest.raises(subprocess.CalledProcessError):
+                run_session_bootstrap(script)
+            return subprocess.CompletedProcess(args, 0, "", "")
+        probes.append(args)
+        return subprocess.run(["sh", "-c", args[-1]], **kwargs)
+
+    launcher = SkyPilotLauncher("weights-test", python=sys.executable, runner=remote)
+    with pytest.raises(RuntimeError, match="another launch"):
+        launcher.start(
+            "new-model",
+            path,
+            source=package_source(tmp_path),
+            bootstrap_timeout=30,
+            bootstrap_poll_interval=0.001,
+        )
+    assert len(probes) == 1
+    assert read_json(path / "config.json")["model"] == "old-model"
+
+
+def local_sky_shell(args, **kwargs):
+    assert args[0] == "ssh" and args[-2] == "weights-test"
+    return subprocess.run(["sh", "-c", args[-1]], **kwargs)
+
+
+@pytest.mark.parametrize(
+    "state", ["starting", "loading", "ready", "running", "stopping", "stopped", "failed"]
+)
+def test_sky_readiness_fails_only_for_terminal_worker_states(tmp_path, state):
+    from oumi_weights_lab.cli import TERMINAL_STATES
+    from oumi_weights_lab.session import create_session, write_json
+
+    path = create_session(tmp_path / "session", {"model": "m", "launch_id": "launch"})
+    write_json(path / "status.json", {"state": state, "model": "m"})
+    launcher = SkyPilotLauncher("weights-test", python=sys.executable, runner=local_sky_shell)
+    if state in TERMINAL_STATES:
+        with pytest.raises(RuntimeError, match="bootstrap"):
+            launcher._wait_session(path, timeout=5, poll_interval=1, launch_id="launch")
+    else:
+        launcher._wait_session(path, timeout=5, poll_interval=1, launch_id="launch")
+
+
+@pytest.mark.parametrize(
+    "resume,expected",
+    [
+        ("sessions/old/artifacts/candidate", "~/sky_workdir/sessions/old/artifacts/candidate"),
+        (Path("old/candidate"), "~/sky_workdir/old/candidate"),
+        ("~/saved/candidate", "~/saved/candidate"),
+        ("/data/candidate", "/data/candidate"),
+    ],
+)
+def test_sky_resume_path_resolves_like_the_session_path(tmp_path, resume, expected):
+    recorder = Recorder()
+    path = tmp_path / "session"
+    SkyPilotLauncher("weights-test", python=sys.executable, runner=recorder).start(
+        "model", path, source=package_source(tmp_path), resume=resume
+    )
+    run_session_bootstrap(shlex.split(recorder.task["run"])[2])
+    assert read_json(path / "config.json")["resume"] == expected
+
+
+def test_sky_task_with_non_bmp_values_loads_with_libyaml(tmp_path):
+    yaml = pytest.importorskip("yaml")
+    recorder = Recorder()
+    path = tmp_path / "session 😀"
+    SkyPilotLauncher("weights-test", python=sys.executable, runner=recorder).start(
+        "org/model-😀", path, source=package_source(tmp_path), revision="rev-😀"
+    )
+    assert recorder.task["run"].isascii()
+    # SkyPilot reads the task with libyaml, which rejects JSON surrogate-pair escapes.
+    task = yaml.load(recorder.spec_text, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader))
+    assert task == recorder.task
+    run_session_bootstrap(shlex.split(task["run"])[2])
+    config = read_json(path / "config.json")
+    assert (config["model"], config["revision"]) == ("org/model-😀", "rev-😀")

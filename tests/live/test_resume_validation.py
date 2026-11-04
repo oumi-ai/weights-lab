@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 spec = importlib.util.spec_from_file_location(
-    "validate_resume", Path(__file__).resolve().parents[1] / "scripts/validate_resume.py"
+    "validate_resume", Path(__file__).with_name("validate_resume.py")
 )
 validation = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(validation)

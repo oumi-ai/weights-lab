@@ -80,3 +80,14 @@ def test_json_replacement_and_process_liveness(tmp_path):
     assert read_json(path) == {"state": "ready", "unicode": "λ"}
     assert is_process_alive(os.getpid())
     assert not is_process_alive(-1)
+
+
+def test_json_replacement_is_flushed_to_disk(tmp_path, monkeypatch):
+    import os
+
+    synced = []
+    original = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (synced.append(fd), original(fd)))
+    write_json(tmp_path / "_registry.json", {"datasets": {}})
+    # Both the replacement file and its directory entry reach disk.
+    assert len(synced) == 2

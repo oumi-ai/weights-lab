@@ -1,20 +1,32 @@
 """Deterministic offline fixtures; these tests never download a model."""
 
+import ast
 import copy
 import json
 import math
+import unicodedata
 from pathlib import Path
 
 import pytest
 
+import oumi_weights_lab
+from oumi_weights_lab.budget import BudgetExceeded
 from oumi_weights_lab.evaluation import FAILED_NLL, mcnemar
-from oumi_weights_lab.scoring import Scorer, ScoringMixin
+from oumi_weights_lab.scoring import ScoringMixin
+
+
+class WordTokenizer:
+    bos_token_id = eos_token_id = 0
+
+    def encode(self, text, add_special_tokens=False):
+        return [1] * len(text.split())
 
 
 class OfflineLab(ScoringMixin):
     def __init__(self, root):
         self.session_path = root
         self.artifacts = root / "artifacts"
+        self.tokenizer = WordTokenizer()
         self.scores = {}
         self._forward_passes = 0
 
@@ -72,7 +84,7 @@ def test_same_prediction_score_changes_and_candidate_set_metrics(lab):
     assert lab.diff(before, after) == []
     assert lab.diff(before, after, include_scores=True)[0]["change"] == "score_changed"
     passes = lab.forward_passes
-    result = Scorer(lab).compare_runs(before, after, bootstrap_samples=20)
+    result = lab.compare_runs(before, after, bootstrap_samples=20)
     aggregate = result["aggregate"]
     assert aggregate["delta"]["accuracy"] == 0
     assert aggregate["delta"]["nll"] > 0
@@ -305,13 +317,10 @@ def test_screen_never_selects_declared_or_reserved_heldout(lab):
         lab.create_screen(data, name="overlap")
 
 
-def test_screen_wrapper_and_explicit_bootstrap_group(lab):
-    scorer = Scorer(lab)
-    manifest = scorer.create_screen(rows(4), name="wrap", size=2)
-    run = scorer.evaluate(scorer.verify_screen(manifest))
-    report = scorer.compare_runs(
-        run, run, bootstrap_group_by="metadata.source", bootstrap_samples=5
-    )
+def test_screen_rows_and_explicit_bootstrap_group(lab):
+    manifest = lab.create_screen(rows(4), name="screen", size=2)
+    run = lab.evaluate(lab.verify_screen(manifest))
+    report = lab.compare_runs(run, run, bootstrap_group_by="metadata.source", bootstrap_samples=5)
     assert report["bootstrap_group_by"] == "metadata.source"
 
 
@@ -394,7 +403,7 @@ def test_running_or_interrupted_suite_never_passes_with_only_finished_surfaces(l
     assert not gate["checks"]["not-started"]["pass"]
 
 
-def test_legacy_diff_ignores_renamed_ids_but_comparison_pairs_strictly(lab):
+def test_diff_pairs_by_position_ignoring_ids_but_comparison_pairs_strictly(lab):
     data = rows(2)
     first = lab.evaluate(data)
     renamed = copy.deepcopy(data)
@@ -416,3 +425,155 @@ def test_diff_refuses_equally_truncated_successful_runs(lab):
         path.write_text(path.read_text().splitlines()[0] + "\n")
     with pytest.raises(ValueError, match="missing evaluation items"):
         lab.diff(first, second)
+
+
+def test_sampled_identity_is_the_text_the_default_checker_compares(lab):
+    runs = [
+        lab.evaluate([{"prompt": "What is 2+2?", "answer": answer}], mode="sampled")
+        for answer in ("4", 4, " 4\n")
+    ]
+    assert len({run["dataset_identity"] for run in runs}) == 1
+
+
+def test_identity_normalizes_unicode_and_surrounding_whitespace(lab):
+    nfc = [{"prompt": "Ångström café", "options": [" Å", " b"], "answer": "A"}]
+    nfd = [
+        {
+            "prompt": unicodedata.normalize("NFD", nfc[0]["prompt"]) + " ",
+            "options": [unicodedata.normalize("NFD", "Å"), "b "],
+            "answer": "A",
+        }
+    ]
+    assert lab.evaluate(nfc)["dataset_identity"] == lab.evaluate(nfd)["dataset_identity"]
+    lab.evaluate([{**nfc[0], "prompt": "Café capital is"}], held_out=True, max_passes=2)
+    renamed = unicodedata.normalize("NFD", "Café capital is")
+    with pytest.raises(ValueError, match="reserved"):
+        lab.evaluate([{**nfd[0], "prompt": renamed, "options": [" c", " d"]}])
+
+
+@pytest.mark.parametrize("held_mode", ["likelihood", "sampled"])
+@pytest.mark.parametrize("held_first", [True, False])
+def test_prompt_cannot_cross_between_dev_and_held_out_in_any_mode(lab, held_mode, held_first):
+    prompt = "France's capital is"
+    data = {
+        "likelihood": [
+            {"prompt": prompt, "options": {"paris": " Paris", "rome": " Rome"}, "answer": "paris"}
+        ],
+        "sampled": [{"prompt": prompt, "answer": " Paris"}],
+    }
+    dev_mode = "sampled" if held_mode == "likelihood" else "likelihood"
+    held = {"mode": held_mode, "held_out": True, "max_passes": 2}
+    dev = {"mode": dev_mode}
+    first, second = (held, dev) if held_first else (dev, held)
+    lab.evaluate(data[first["mode"]], **first)
+    with pytest.raises(ValueError, match="reserved"):
+        lab.evaluate(data[second["mode"]], **second)
+
+
+def test_empty_prompt_rows_reserve_only_their_full_identity(lab):
+    lab.evaluate(
+        [{"prompt": "", "options": [" a", " b"], "answer": "A"}], held_out=True, max_passes=2
+    )
+    lab.evaluate([{"prompt": "", "options": [" c", " d"], "answer": "A"}])
+    with pytest.raises(ValueError, match="reserved"):
+        lab.evaluate([{"prompt": "", "options": [" b", " a"], "answer": "B"}])
+
+
+def test_screen_reserves_prompts_through_the_shared_registry(lab):
+    data = rows(2)
+    lab.create_screen(data, name="dev")
+    with pytest.raises(ValueError, match="reserved"):
+        lab.evaluate(
+            [{"prompt": "p0", "answer": "anything"}], mode="sampled", held_out=True, max_passes=2
+        )
+
+
+def test_registry_record_without_identities_fails_closed(lab):
+    lab.evaluate(rows(1), held_out=True, max_passes=2)
+    path = lab.artifacts / "evaluations/_registry.json"
+    registry = json.loads(path.read_text())
+    for record in registry["datasets"].values():
+        del record["item_identities"]
+    path.write_text(json.dumps(registry))
+    with pytest.raises(ValueError, match="identities"):
+        lab.evaluate(rows(2)[1:])
+
+
+@pytest.mark.parametrize("tolerance,lost,passes", [(0.1, 1, True), (0.1, 2, False), (0.3, 3, True)])
+def test_accuracy_tolerance_is_compared_exactly(lab, tolerance, lost, passes):
+    data = [
+        {"id": str(i), "prompt": f"p{i}", "answer": "A", "options": [" a", " b"]} for i in range(10)
+    ]
+    wrong = {"A": -2.0, "B": 0.0}
+    lab.scores.update({"p8": wrong, "p9": wrong})
+    baseline = lab.evaluate_suite({"task": data}, name="before")
+    lab.scores.update({f"p{i}": wrong for i in range(8 - lost, 8)})
+    candidate = lab.evaluate_suite({"task": data}, name="after")
+    gate = lab.compare_suites(
+        baseline, candidate, accuracy_tolerance=tolerance, nll_tolerance=100, bootstrap_samples=5
+    )
+    assert gate["pass"] is passes
+
+
+def test_unfinished_rows_are_listed_apart_from_movers(lab):
+    data = rows(4)
+    baseline = lab.evaluate(data)
+    lab.scores["p0"] = {"A": 0.0, "B": -1.0}
+    with pytest.raises(BudgetExceeded):
+        lab.evaluate(data, name="truncated", max_passes=4)
+    report = lab.compare_runs(baseline, "truncated", bootstrap_samples=5)
+    assert [(row["index"], row["failed"]) for row in report["failed_rows"]] == [
+        (2, True),
+        (3, True),
+    ]
+    assert report["failed_rows"][0]["gold_probability_after"] is None
+    for key in ("top_probability_movers", "top_score_movers"):
+        assert [(row["index"], row["failed"]) for row in report[key]] == [(0, False), (1, False)]
+    assert report["top_probability_movers"][0]["gold_probability_delta"] < 0
+
+
+def test_answer_matching_one_label_and_another_completion_is_rejected(lab):
+    with pytest.raises(ValueError, match="ambiguous"):
+        lab.evaluate([{"prompt": "p", "options": ["B", "A"], "answer": "A"}])
+    assert lab.evaluate([{"prompt": "p", "options": ["A", "B"], "answer": "A"}])["accuracy"] == 1
+
+
+def test_non_ascii_rows_survive_evaluation_comparison_and_screens(lab):
+    data = [
+        {
+            "id": f"ид-{i}",
+            "prompt": prompt,
+            "options": [" grün", " 東京"],
+            "answer": "A",
+            "metadata": {"tags": [tag], "document_id": f"文書-{i}"},
+        }
+        for i, (prompt, tag) in enumerate([("Ünïcödé façade", "café"), ("日本の首都", "日本")])
+    ]
+    run = lab.evaluate(data, name="unicode")
+    item = json.loads((Path(run["run_dir"]) / "items.jsonl").read_text().splitlines()[0])
+    assert (item["id"], item["options"]["B"]) == ("ид-0", " 東京")
+    report = lab.compare_runs(run, run, group_by="metadata.tags", bootstrap_samples=5)
+    assert set(report["groups"]) == {'@json:["café"]', '@json:["日本"]'}
+    assert report["top_probability_movers"][0]["id"] in {"ид-0", "ид-1"}
+    screen = lab.create_screen(data, name="unicode-screen", stratify_by=["metadata.tags"])
+    assert set(screen["cells"]) == {'@json:[["café"]]', '@json:[["日本"]]'}
+    assert sorted(row["id"] for row in lab.verify_screen(screen)) == ["ид-0", "ид-1"]
+
+
+def test_evaluation_modules_never_import_scoring():
+    package = Path(oumi_weights_lab.__file__).parent
+    for module, forbidden in (
+        ("evaluation", {"scoring"}),
+        ("evaluation_data", {"scoring", "evaluation"}),
+    ):
+        tree = ast.parse((package / f"{module}.py").read_text(encoding="utf-8"))
+        imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+        assert not imported & forbidden, module
+
+
+@pytest.mark.parametrize("method", ["evaluate", "create_screen"])
+def test_unknown_mode_is_rejected_before_any_reservation(lab, method):
+    kwargs = {"name": "bad-mode"} if method == "create_screen" else {}
+    with pytest.raises(ValueError, match="mode must be one of likelihood, yes_no, sampled"):
+        getattr(lab, method)(rows(1), mode="ranking", **kwargs)
+    assert not (lab.artifacts / "evaluations").exists()

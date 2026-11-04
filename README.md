@@ -8,53 +8,26 @@
 [![Documentation](https://img.shields.io/badge/docs-oumi--weights--lab-blue.svg)](https://github.com/oumi-ai/weights-lab/tree/main/docs)
 [![About Oumi](https://img.shields.io/badge/about-oumi.ai-blue.svg)](https://oumi.ai)
 
-Oumi Weights Lab gives coding agents a persistent, auditable workspace for
-experiments with model weights and behavior.
+A persistent Python worker that lets a coding agent load an open model once, edit
+its weights reversibly, measure the effect, and export the result. Every snippet's
+source, output, and forward-pass count is saved. Version 0.1 is experimental, and
+snippets run as trusted Python with your filesystem and network access.
 
-## Features
+Tested on CPU, Apple MPS, NVIDIA H200, and SkyPilot with Slurm.
 
-- Persistent model worker with an audit trail for every Python snippet.
-- Exact, reversible slice edits, zeroing, swapping, undo, and checkpoint export ([API](docs/api.md), [edit bundles](docs/edit-bundles.md)).
-- Activation patching, gradient inspection, and document-split probes ([skill references](skills/oumi-weights-lab/references/)).
-- LoRA update spectra, numerical/stable rank, and magnitude diagnostics ([LoRA diagnostics](docs/lora-diagnostics.md)).
-- Score-sensitive comparisons, paired statistics, regression suites, and pinned dev screens ([evaluation tools](docs/evaluation.md)).
-- Save and resume edit bundles with inherited pass budgets and held-out evaluation reservations ([edit bundles](docs/edit-bundles.md)).
-- CPU, Apple MPS, and CUDA support; upstream SkyPilot and Slurm workers with deadline guards ([remote setup](docs/remote.md)).
-- Native Claude Code and Codex plugins, plus standalone skills for compatible agents including Cursor, Copilot CLI, and OpenCode ([installation](docs/skill-install.md)).
-- Optional offline fixed-weight date calculator network ([date network](docs/date-network.md)).
+## Quick start
 
-Load a language model once, then let a coding agent inspect and edit it through
-Python snippets in a persistent worker. Compare a baseline, change a weight,
-measure the effect, undo it exactly, and export the checkpoint you want to keep.
-Every snippet's source, output, timing, and forward-pass count is saved.
-
-**Version 0.1 is experimental.** Snippets run as trusted Python with filesystem and
-network access. Use a fresh session for each experiment; a saved session records
-what happened but cannot restore the live Python namespace.
-
-## Start on CPU
-
-Requires Python 3.11+ on Linux or macOS and [uv](https://docs.astral.sh/uv/).
-The first run downloads a small public model; no GPU or cloud account is needed.
+Requires Python 3.11+ on Linux or macOS, git, and [uv](https://docs.astral.sh/uv/).
 
 ```sh
-git clone https://github.com/oumi-ai/weights-lab.git
-cd weights-lab
-uv sync --python 3.12
-uv run oumi-weights-lab start --session sessions/first --model HuggingFaceTB/SmolLM2-135M --device cpu
-uv run oumi-weights-lab send --session sessions/first --code 'print(model.config)' --follow
-uv run oumi-weights-lab send --session sessions/first --file examples/inspect_model.py --follow
+uv tool install git+https://github.com/oumi-ai/weights-lab   # append @<tag> to pin
+oumi-weights-lab start --session sessions/first --model HuggingFaceTB/SmolLM2-135M --device cpu
+oumi-weights-lab send --session sessions/first --file edit.py --follow
+oumi-weights-lab stop --session sessions/first
+oumi-weights-lab backup --session sessions/first --output sessions/first.tar.gz
 ```
 
-`start` returns while the model loads. Snippets queue during loading and share
-`lab`, `model`, `tokenizer`, `Path`, and `artifacts`. Variables and edits persist.
-`--follow` waits and streams output to stderr; stdout contains a JSON result.
-Use `peek --session sessions/first` for status, or `send --wait` without streaming.
-
-## Measure an edit
-
-Save this as `edit.py`, then submit it with
-`uv run oumi-weights-lab send --session sessions/first --file edit.py --follow`:
+With `edit.py`:
 
 ```python
 rows = [{"prompt": "France's capital is", "options": [" Paris", " Rome"], "answer": 0}]
@@ -67,89 +40,29 @@ lab.undo()
 checkpoint = lab.export("restored")  # saved under artifacts/
 ```
 
-This is a workflow check, not evidence of a useful edit. Inspect parameter names
-for your model, compare in the same session, and keep held-out data separate from
-dev data. `--pass-limit N` caps session forwards; `lab.limit_passes(n)` narrows a
-snippet's budget. Use `torch.no_grad()` for inference when gradients are unnecessary.
+Snippets share `lab`, `model`, `tokenizer`, `Path`, and `artifacts`, and their state
+persists. Stdout is JSON; `--follow` streams snippet output to stderr. For LoRA
+adapters, install `'oumi-weights-lab[adapters] @ git+https://github.com/oumi-ai/weights-lab'`.
 
-Export weights before stopping, then archive the session:
+## Examples and reference checks
 
-```sh
-uv run oumi-weights-lab stop --session sessions/first
-uv run oumi-weights-lab backup --session sessions/first --output sessions/first.tar.gz
-```
+From a source checkout, run the first two with `uv run python -m examples.NAME --output-dir DIR`.
 
-The backup includes snippets, results, logs, and artifacts. It saves weights only
-when you export them into `artifacts/` first. Stop interrupts active Python and
-escalates after its grace period; native model operations may delay cancellation.
+- `examples/dogfood.py` runs baseline, edit, exact undo, export, stop, and backup on a
+  tiny public GPT-2 through the CLI.
+- `examples/parity.py` checks GPT-2 generation and continuation scores against
+  Hugging Face's own GPT-2 integration test.
+- `examples/replay_qwen_edit.py` reapplies the released
+  [weight-space programming edit](https://rikiyat.github.io/blog/weight-space-programming/)
+  of Qwen3.5-0.8B with `lab.swap`; see its docstring to run it.
+  `tests/live/validate_qwen_benchmark.py` evaluates it on MATH-500. On an H200
+  (500 problems, 4 samples each), the edit scored 51.25% against 7.85% for the base
+  model, and samples reaching the 32,768-token cap fell from 92.90% to 30.55%. This
+  reproduces the released edit, not its discovery.
 
-## Run the complete demo
+## Documentation
 
-```sh
-uv run python -m examples.dogfood --output-dir sessions/tiny-demo --summary
-```
-
-The pinned tiny GPT-2 demo runs baseline → edit → exact undo → export → stop →
-backup on CPU. In the measured run, all three continuation-score maps changed,
-zero predictions changed, undo restored exact weights and scores, and the worker
-used 21 forward passes. See the [terminal transcript and detailed results](docs/dogfood.md).
-Choose an unused output directory each time.
-
-## Give an agent a model workspace
-
-The [agent skill and plugin](docs/skill-install.md) guide experiments, including
-[checkpoint comparisons, activation patching, gradients, and probes](skills/oumi-weights-lab/references/).
-Install as a Claude Code or Codex plugin, or as a standalone skill for Codex,
-Claude Code, Cursor, Copilot CLI, and OpenCode; see the
-[per-harness install commands](docs/skill-install.md).
-The [Python API](docs/api.md) covers reversible edits, evaluation, pass budgets,
-and experimental fixed-weight components. [Edit bundles](docs/edit-bundles.md) save
-edits, undo history, budgets, and evaluation reservations for a fresh worker.
-[Evaluation tools](docs/evaluation.md) add score-sensitive comparisons, paired
-statistics, regression suites, and pinned dev screens. Inspect effective adapter
-rank with [LoRA diagnostics](docs/lora-diagnostics.md), or run the optional
-[fixed-weight date network](docs/date-network.md) offline.
-LoRA loading requires `uv sync --extra adapters`.
-
-For a remote worker, use upstream SkyPilot:
-
-```sh
-uv run oumi-weights-lab start --cluster my-lab --source . --accelerators L4:1 --model Qwen/Qwen3-0.6B --session /tmp/lab
-uv run oumi-weights-lab send --cluster my-lab --session /tmp/lab --code 'print(lab.forward_passes)' --wait
-uv run oumi-weights-lab stop --cluster my-lab --session /tmp/lab
-uv run oumi-weights-lab backup --cluster my-lab --session /tmp/lab --output ./lab.tar.gz
-sky down my-lab
-```
-
-`--cluster` selects SkyPilot. It also supports Slurm through
-`--infra slurm/mycluster/mypartition`. Read [remote setup and cleanup](docs/remote.md)
-before provisioning; export and download results before teardown destroys the disk.
-Remote workers stop after 15 idle minutes or four hours total by default, attempt
-an edit-bundle save, and then allow SkyPilot's autodown timer to release the cluster.
-Override with `--idle-timeout` and `--max-lifetime` (seconds).
-
-## What has been measured
-
-CPU, Apple MPS, NVIDIA H200 CUDA, SkyPilot cloud execution, and upstream SkyPilot
-through a real single-node Slurm scheduler have passed checks. See
-[validation evidence and limits](docs/validation.md) and the
-[machine-readable results](docs/validation-results.json).
-
-Evaluating the base Qwen checkpoint and a **released edited checkpoint** measured
-7.85% versus 51.25% accuracy on the full MATH-500 comparison; samples hitting the
-32,768-token limit fell from 92.90% to 30.55%. This validates the released edit,
-not autonomous discovery. See the [benchmark protocol and limits](docs/validation.md),
-the separate [exact tensor replay](docs/qwen-replay.md), and
-[GPT-2 generation and likelihood parity](docs/parity.md).
-
-## Development
-
-```sh
-uv run --extra adapters pytest
-uv run ruff check .
-uv run ruff format --check .
-uv build
-```
-
-Tests build tiny random models locally; public-model demos download pinned weights.
-See [contribution instructions](CONTRIBUTING.md) and the [documentation index](docs/README.md).
+- [Python API](docs/api.md)
+- [Agent skill and plugin install](docs/skill-install.md)
+- [Remote workers on SkyPilot and Slurm](docs/remote.md)
+- [Contributing](CONTRIBUTING.md)

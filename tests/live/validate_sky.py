@@ -33,6 +33,7 @@ def run_logged(command, log, *, source=None, timeout=300):
         result = subprocess.run(
             command,
             input=source,
+            stdin=subprocess.DEVNULL if source is None else None,
             stdout=output,
             stderr=subprocess.STDOUT,
             timeout=timeout,
@@ -99,7 +100,7 @@ def validate(
 ):
     if not isinstance(max_seconds, int) or max_seconds < 60 or max_seconds > 21600:
         raise ValueError("max_seconds must be between 60 and 21600")
-    source = Path(source or Path(__file__).resolve().parents[1]).resolve()
+    source = Path(source or Path(__file__).resolve().parents[2]).resolve()
     root = Path(output).resolve()
     root.mkdir(parents=True, exist_ok=False)
     cluster = cluster or f"oumi-weights-lab-val-{datetime.now(UTC):%Y%m%d-%H%M%S-%f}"
@@ -117,7 +118,7 @@ def validate(
     prepared = Path(prepared_benchmark).resolve() if prepared_benchmark else None
     if prepared:
         # Validate local frozen inputs before provisioning anything.
-        runpy.run_path(str(source / "scripts/validate_qwen_benchmark.py"))["read_prepared"](
+        runpy.run_path(str(source / "tests/live/validate_qwen_benchmark.py"))["read_prepared"](
             prepared
         )
     started, deadline = time.time(), time.time() + max_seconds
@@ -162,6 +163,7 @@ def validate(
             # Checkpoint archives must reach the launcher's binary destination intact.
             return subprocess.run(
                 command,
+                stdin=kwargs.get("stdin"),
                 stdout=kwargs["stdout"],
                 stderr=subprocess.PIPE,
                 timeout=timeout,
@@ -169,11 +171,13 @@ def validate(
             )
         if command[0] == "ssh":
             # Short CLI calls need clean JSON stdout even when SSH warns on stderr.
+            # Launcher commands exchange bytes unless the caller asks for text.
             result = subprocess.run(
                 command,
                 input=kwargs.get("input"),
+                stdin=kwargs.get("stdin"),
                 capture_output=True,
-                text=kwargs.get("text", True),
+                text=kwargs.get("text", False),
                 timeout=timeout,
             )
             with (root / "transport.log").open("a") as log:
@@ -268,7 +272,7 @@ def validate(
         if result["state"] != "succeeded":
             raise RuntimeError("CUDA transport snippet did not succeed")
         report["transport_snippet"] = result
-        upload(source / "scripts/validate_runtime.py", "/tmp/validate_runtime.py")
+        upload(source / "tests/live/validate_runtime.py", "/tmp/validate_runtime.py")
         execute(
             [
                 "/tmp/validate_runtime.py",
@@ -289,7 +293,7 @@ def validate(
             remote = "/tmp/oumi-weights-lab-benchmark"
             for name in ("manifest.json", "dataset.jsonl", "prompts.jsonl", "upstream_mathqa.py"):
                 upload(prepared / name, f"{remote}/{name}")
-            benchmark = source / "scripts/validate_qwen_benchmark.py"
+            benchmark = source / "tests/live/validate_qwen_benchmark.py"
             upload(benchmark, "/tmp/validate_qwen_benchmark.py")
             required = runpy.run_path(str(benchmark))["REQUIRED"]
             install = [

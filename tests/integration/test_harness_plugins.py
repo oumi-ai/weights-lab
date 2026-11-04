@@ -16,7 +16,7 @@ pytestmark = pytest.mark.integration
 def harness_image():
     image = os.environ.get("OUMI_WEIGHTS_LAB_HARNESS_IMAGE")
     if not image:
-        pytest.skip("set OUMI_WEIGHTS_LAB_HARNESS_IMAGE; see docs/harness-integration.md")
+        pytest.skip("set OUMI_WEIGHTS_LAB_HARNESS_IMAGE; see CONTRIBUTING.md")
     if not shutil.which("docker"):
         pytest.skip("Docker CLI is required for isolated harness integration")
     for args in (["info"], ["image", "inspect", image]):

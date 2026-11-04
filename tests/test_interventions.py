@@ -254,3 +254,57 @@ def test_patch_metadata_and_hook_cleanup_survive_baseexception(tiny_lab):
     assert len(module._forward_hooks) == hook_count
     assert tiny_lab.patches() == []
     assert tiny_lab.revision > revision
+
+
+def interrupt_after_registration(monkeypatch, module):
+    """Simulate a SIGALRM timeout landing as soon as a forward hook is registered."""
+    register = module.register_forward_hook
+
+    def interrupting(*args, **kwargs):
+        register(*args, **kwargs)
+        raise Interrupted("timeout after hook registration")
+
+    monkeypatch.setattr(module, "register_forward_hook", interrupting)
+
+
+@pytest.mark.parametrize("boundary", ["registration", "metadata_append"])
+def test_patch_interrupted_while_entering_leaves_no_hook_or_metadata(
+    tiny_lab, monkeypatch, boundary
+):
+    module = tiny_lab.model.get_submodule("transformer.h.0")
+    hook_count = len(module._forward_hooks)
+    if boundary == "registration":
+        interrupt_after_registration(monkeypatch, module)
+    else:
+        tiny_lab._patches = InterruptingList(operation="append")
+    with pytest.raises(Interrupted), tiny_lab.patch("transformer.h.0", lambda value: value * 0):
+        pytest.fail("the patch context must not be entered")
+    assert len(module._forward_hooks) == hook_count
+    assert tiny_lab.patches() == []
+    assert tiny_lab.export("after-interrupted-patch").is_dir()
+
+
+def test_record_interrupted_while_registering_leaves_no_hook(tiny_lab, monkeypatch):
+    module = tiny_lab.model.get_submodule("transformer.h.0")
+    interrupt_after_registration(monkeypatch, module)
+    with pytest.raises(Interrupted), tiny_lab.record(["transformer.ln_f", "transformer.h.0"]):
+        pytest.fail("the record context must not be entered")
+    assert not module._forward_hooks
+    assert not tiny_lab.model.get_submodule("transformer.ln_f")._forward_hooks
+
+
+@pytest.mark.parametrize("boundary", ["registration", "attachment_append"])
+def test_attach_interrupted_while_registering_leaves_no_hook(tiny_lab, monkeypatch, boundary):
+    tiny_lab.attach(lambda prompt: prompt, mode="prefix").remove()
+    hook_count = len(tiny_lab.model._forward_hooks)
+    revision = tiny_lab.revision
+    if boundary == "registration":
+        interrupt_after_registration(monkeypatch, tiny_lab.model)
+    else:
+        tiny_lab._attachments = InterruptingList(tiny_lab._attachments, operation="append")
+    with pytest.raises(Interrupted):
+        tiny_lab.attach(lambda *_: torch.zeros(6), mode="logits")
+    assert len(tiny_lab.model._forward_hooks) == hook_count
+    assert tiny_lab.attachments() == []
+    assert tiny_lab.revision >= revision
+    assert tiny_lab.export("after-interrupted-attach").is_dir()

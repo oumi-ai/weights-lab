@@ -5,7 +5,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +23,8 @@ def _digest(value: Any) -> str:
     digest.update(str((str(value.dtype), tuple(value.shape))).encode())
     for _, chunk in _regions(value.detach()):
         data = chunk.to(device="cpu").contiguous().reshape(-1).view(torch.uint8)
-        digest.update(data.numpy().tobytes())
+        # Hash the buffer in place; hashlib releases the GIL for large updates.
+        digest.update(data.numpy())
     return digest.hexdigest()
 
 
@@ -46,7 +49,12 @@ def _fingerprint(lab: Any, originals: dict | None = None) -> str:
             if key in storage and storage[key] is not value:
                 raise ValueError("distinct tensors sharing storage cannot be saved as edit bundles")
             storage[key] = value
-    tensors = {name: _digest(originals.get(id(value), value)) for name, value in state.items()}
+    targets = {name: originals.get(id(value), value) for name, value in state.items()}
+    # Hashing every tensor dominates a deadline save on large models, so hash in
+    # parallel. MPS is not safe to drive from several threads; hash it serially.
+    serial = any(value.device.type == "mps" for value in targets.values())
+    with ThreadPoolExecutor(max_workers=1 if serial else min(8, os.cpu_count() or 1)) as pool:
+        tensors = dict(zip(targets, pool.map(_digest, targets.values()), strict=True))
     # Tied tensors are part of the model contract, not just equal-valued weights.
     aliases: dict[int, list[str]] = {}
     for name, value in lab.model.named_parameters(remove_duplicate=False):
@@ -305,7 +313,6 @@ class PersistenceMixin:
             self._editbook = book
             self._budget = budget
             self._forward_passes = used
-            self._attachment_revision = manifest["component_revision"]
-            self._patch_revision = 0
-            self._attachments = []
-            self._patches = []
+            # Keep Lab.revision monotonic across resumes without touching the
+            # attachment and patch counters, which may already be nonzero here.
+            self._resumed_component_revision = manifest["component_revision"]

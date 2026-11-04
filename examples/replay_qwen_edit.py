@@ -1,7 +1,14 @@
 """Replay the released Qwen edit inside a oumi-weights-lab worker.
 
-Submit this file with oumi-weights-lab send --file. Optionally set a qwen_replay
-configuration dictionary in an earlier snippet; see docs/qwen-replay.md.
+Start the pinned base model, then submit this file:
+
+    oumi-weights-lab start --session sessions/qwen-replay --model Qwen/Qwen3.5-0.8B \
+      --revision 2fc06364715b967f1860aea9cf38778875588b17 --device cpu \
+      --dtype bfloat16 --pass-limit 0 --snippet-timeout 3600
+    oumi-weights-lab send --session sessions/qwen-replay \
+      --file examples/replay_qwen_edit.py --follow --timeout 3600
+
+Optionally set a qwen_replay configuration dictionary in an earlier snippet.
 This replays released tensor values, not the discovery or published benchmark.
 """
 
@@ -268,4 +275,4 @@ def replay_qwen_edit(
 if __name__ == "__oumi_weights_lab__":
     print(json.dumps(replay_qwen_edit(lab, **globals().get("qwen_replay", {})), indent=2))
 elif __name__ == "__main__":
-    raise SystemExit("Submit this file with oumi-weights-lab send --file; see docs/qwen-replay.md")
+    raise SystemExit("Submit this file with oumi-weights-lab send --file; see its docstring")

@@ -9,7 +9,7 @@ from unittest.mock import Mock
 import pytest
 
 spec = importlib.util.spec_from_file_location(
-    "validate_sky", Path(__file__).resolve().parents[1] / "scripts/validate_sky.py"
+    "validate_sky", Path(__file__).with_name("validate_sky.py")
 )
 validate_sky = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(validate_sky)
@@ -232,3 +232,48 @@ def test_short_ssh_json_survives_stderr_warning_and_initial_report_exists(tmp_pa
         validate_sky.validate(root, max_seconds=60)
     assert '"state":"succeeded"' in (root / "transport.log").read_text()
     assert "SSH warning" in (root / "transport.log").read_text()
+
+
+def test_ssh_commands_pass_bytes_input_and_return_raw_output(tmp_path, monkeypatch):
+    root = tmp_path / "validation"
+    real_run = subprocess.run
+
+    def process(args, **kwargs):
+        if args[0] == "sky":
+            return subprocess.CompletedProcess(args, 0, "[]", "")
+        # Execute the remote command locally, exactly as the runner invokes ssh.
+        return real_run(["sh", "-c", args[-1]], **kwargs)
+
+    class Launcher:
+        def __init__(self, *args, runner, **kwargs):
+            self.runner = runner
+
+        def start(self, *args, **kwargs):
+            result = self.runner(
+                ["ssh", "--", "cluster", "cat"], input=b"\xffsnippet", capture_output=True
+            )
+            assert result.stdout == b"\xffsnippet"
+            quiet = self.runner(
+                ["ssh", "--", "cluster", "cat"], stdin=subprocess.DEVNULL, capture_output=True
+            )
+            assert quiet.stdout == b""
+            raise RuntimeError("probe finished")
+
+        def stop(self, *args, **kwargs):
+            return None
+
+        def teardown(self):
+            return subprocess.CompletedProcess(["sky", "down"], 0)
+
+    real_popen = subprocess.Popen
+
+    def spawn(args, **kwargs):
+        # Only the cleanup watchdog is faked; subprocess.run still needs real processes.
+        return SimpleNamespace(pid=123) if "--watchdog" in args else real_popen(args, **kwargs)
+
+    monkeypatch.setattr(validate_sky.subprocess, "run", process)
+    monkeypatch.setattr(validate_sky.subprocess, "Popen", spawn)
+    monkeypatch.setattr(validate_sky, "SkyPilotLauncher", Launcher)
+    with pytest.raises(RuntimeError, match="probe finished"):
+        validate_sky.validate(root, max_seconds=60)
+    assert "snippet" in (root / "transport.log").read_text()

@@ -2,7 +2,6 @@ import pytest
 import torch
 
 from oumi_weights_lab import BudgetExceeded
-from oumi_weights_lab.circuits import DateFacts
 
 
 def test_logit_attachment_changes_scores_then_removes_exactly(tiny_lab):
@@ -34,8 +33,13 @@ def test_prefix_attachment_scoring_budget_and_cleanup(tiny_lab):
     with pytest.raises(BudgetExceeded):
         lab.model(**lab.tokenizer("hello", return_tensors="pt"))
     assert lab.budget.used == lab.forward_passes
-    with lab.attach(DateFacts(), mode="prefix"):
-        assert lab._prepare_prompt("2026-11-03").startswith("Calendar facts:")
+
+    class Facts:
+        def __call__(self, prompt):
+            return "Facts: " + prompt
+
+    with lab.attach(Facts(), mode="prefix"):
+        assert lab._prepare_prompt("hello").startswith("Facts:")
     assert lab.attachments() == []
 
 
@@ -44,3 +48,25 @@ def test_attachment_context_removes_hooks_on_errors(tiny_lab):
     with pytest.raises(RuntimeError), tiny_lab.attach(lambda *_: 0):
         raise RuntimeError("test")
     assert len(tiny_lab.model._forward_hooks) == count
+
+
+def test_logit_attachment_updates_tuple_outputs(tiny_lab):
+    lab = tiny_lab
+    inputs = lab.tokenizer("hello world", return_tensors="pt")
+    with torch.no_grad():
+        baseline = lab.model(**inputs, return_dict=False)[0].clone()
+        with lab.attach(lambda *_: 5.0):
+            changed = lab.model(**inputs, return_dict=False)
+    assert changed[0].shape == baseline.shape
+    torch.testing.assert_close(changed[0], baseline + 5)
+
+
+@pytest.mark.parametrize("return_dict", [True, False])
+def test_logit_attachment_rejects_model_computed_loss(tiny_lab, return_dict):
+    lab = tiny_lab
+    inputs = lab.tokenizer("hello world hello", return_tensors="pt")
+    with torch.no_grad(), lab.attach(lambda *_: torch.tensor([0, 0, 0, 0, 50.0, 0])):
+        with pytest.raises(ValueError, match="labels"):
+            lab.model(**inputs, labels=inputs["input_ids"], return_dict=return_dict)
+        # Without labels the attached logits are available for an explicit loss.
+        lab.model(**inputs, labels=None, return_dict=return_dict)

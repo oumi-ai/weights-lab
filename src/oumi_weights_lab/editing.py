@@ -38,12 +38,13 @@ def _stats(tensor: Any, other: Any = None) -> dict[str, Any]:
     mean = moment = square = 0.0
     minimum, maximum = math.inf, -math.inf
     for indices, chunk in _regions(tensor.detach()):
-        values = chunk.to(device="cpu", dtype=torch.float64)
+        # MPS has no float64: move to CPU before widening.
+        values = chunk.cpu().to(torch.float64)
         if other is not None:
             reference = other.detach()
             for index in indices:
                 reference = reference[index]
-            values = values - reference.to(device="cpu", dtype=torch.float64)
+            values = values - reference.cpu().to(torch.float64)
         finite = values[torch.isfinite(values)]
         if finite.numel():
             chunk_count = finite.numel()
@@ -284,7 +285,13 @@ class EditingMixin:
 
     @property
     def revision(self) -> int:
-        return self.editbook.revision
+        """Increases whenever API edits, undo, attachments, or patches change outputs."""
+        return (
+            self.editbook.revision
+            + getattr(self, "_resumed_component_revision", 0)
+            + getattr(self, "_attachment_revision", 0)
+            + getattr(self, "_patch_revision", 0)
+        )
 
     @property
     def active_edit_ids(self) -> list[str]:

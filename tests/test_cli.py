@@ -6,6 +6,7 @@ import tarfile
 
 import pytest
 
+from oumi_weights_lab import cli, session
 from oumi_weights_lab.cli import main
 from oumi_weights_lab.session import create_session, read_json, submit, write_json
 
@@ -118,3 +119,49 @@ def test_backup_refuses_symlink_to_external_file(session_path, tmp_path, capsys)
     assert main(["backup", "--session", str(session_path), "--output", str(destination)]) != 0
     assert "symbolic links" in capsys.readouterr().err
     assert not destination.exists()
+
+
+def test_wait_result_rechecks_for_a_result_after_seeing_a_terminal_status(
+    session_path, monkeypatch
+):
+    snippet_id = submit(session_path, "print(1)")
+    result = {"id": snippet_id, "state": "cancelled", "error": "worker stopped"}
+
+    def racing_status(path):
+        # The worker finalizes this snippet and exits between the two checks.
+        write_json(path / "results" / f"{snippet_id}.json", result)
+        return {"state": "stopped"}
+
+    monkeypatch.setattr(cli, "_status", racing_status)
+    assert cli._wait_result(session_path, snippet_id, timeout=5, follow=False) == result
+
+
+def test_stop_records_cancelled_results_before_the_terminal_status(
+    session_path, monkeypatch, capsys
+):
+    snippet_id = submit(session_path, "print('pending')")
+    write = cli.session.write_json
+
+    def checked_write(path, value):
+        if path.name == "status.json" and value.get("state") == "stopped":
+            assert (session_path / "results" / f"{snippet_id}.json").exists()
+        write(path, value)
+
+    monkeypatch.setattr(cli.session, "write_json", checked_write)
+    assert main(["stop", "--session", str(session_path), "--timeout", "0.1"]) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "stopped"
+
+
+def test_terminal_states_are_the_worker_status_terminal_states():
+    # status.json holds only worker states; snippet result states never appear there.
+    assert cli.TERMINAL_STATES == {"stopped", "failed"}
+
+
+def test_start_parser_defaults_use_shared_session_constants():
+    parser = cli._parser()
+    start = ["start", "--session", "s", "--model", "m"]
+    args = parser.parse_args(start)
+    assert args.snippet_timeout == session.DEFAULT_SNIPPET_TIMEOUT
+    assert args.shutdown_grace == session.DEFAULT_SHUTDOWN_GRACE
+    for dtype in session.DTYPES:
+        assert parser.parse_args([*start, "--dtype", dtype]).dtype == dtype

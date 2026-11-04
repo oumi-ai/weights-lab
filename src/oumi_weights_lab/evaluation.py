@@ -10,13 +10,22 @@ import hashlib
 import json
 import math
 import random
-import re
 import uuid
 from collections import defaultdict
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from .session import read_json, session_lock, write_json
+from .evaluation_data import (
+    _digest,
+    _guard_dataset_roles,
+    _load_registry,
+    _reservation_keys,
+    _reserve,
+    _safe_name,
+    _tasks,
+)
+from .session import read_json, write_json
 
 FAILED_NLL = -math.log(1e-12)
 PROTOCOL_KEYS = (
@@ -28,19 +37,15 @@ PROTOCOL_KEYS = (
     "checker_custom",
     "checker_id",
 )
-
-
-def _digest(value: Any) -> str:
-    payload = json.dumps(
-        value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False
-    )
-    return hashlib.sha256(payload.encode()).hexdigest()
-
-
-def _safe_name(name: str) -> str:
-    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}", name):
-        raise ValueError("name must be a safe identifier of at most 100 characters")
-    return name
+# Fields that name a row's source document, checked in this order for bootstrap clusters.
+DOCUMENT_FIELDS = (
+    "source_document",
+    "source_doc",
+    "document_id",
+    "metadata.source_document",
+    "metadata.source_doc",
+    "metadata.document_id",
+)
 
 
 def _field(row: dict, key: str) -> Any:
@@ -55,7 +60,7 @@ def _field(row: dict, key: str) -> Any:
 def _label(value: Any) -> str:
     if isinstance(value, str):
         return "@str:" + value if value.startswith("@") else value
-    return "@json:" + json.dumps(value, sort_keys=True, allow_nan=False)
+    return "@json:" + json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False)
 
 
 def mcnemar(fixed: int, broken: int) -> float:
@@ -219,6 +224,60 @@ def _read_run(lab: Any, run: Any) -> tuple[dict, list[dict], list[dict]]:
 class EvaluationMixin:
     """Reusable helpers; comparisons read saved runs and never call the model."""
 
+    def _run_summary(self, run: Any) -> tuple[dict[str, Any], Path]:
+        if isinstance(run, dict):
+            path = Path(run["run_dir"])
+        else:
+            path = Path(run)
+            if not path.exists():
+                path = Path(self.artifacts) / "evaluations" / path
+            if path.name == "summary.json":
+                path = path.parent
+        return read_json(path / "summary.json"), path
+
+    def diff(
+        self, before: Any, after: Any, *, include_scores: bool = False
+    ) -> list[dict[str, Any]]:
+        """Return changed items between two successful runs of the same dataset.
+
+        Rows pair by position. Both runs need the same session, mode, scoring
+        protocol, and ordered prompts, options, answers, and metadata; only row
+        IDs may differ. Use compare_runs for ID-checked pairing and statistics.
+        """
+        left, _ = self._run_summary(before)
+        right, _ = self._run_summary(after)
+        if left["state"] != "succeeded" or right["state"] != "succeeded":
+            raise ValueError("diff requires two successful evaluation runs")
+        if any(left[key] != right[key] for key in ("session_id", "dataset_hash", "mode")):
+            raise ValueError("diff requires the same session, dataset, and scoring mode")
+        _, left_tasks, left_items = _read_run(self, before)
+        _, right_tasks, right_items = _read_run(self, after)
+        if any(left.get(key) != right.get(key) for key in PROTOCOL_KEYS):
+            raise ValueError("diff requires the same scoring protocol/settings")
+        if left.get("checker_custom") and not left.get("checker_id"):
+            raise ValueError("custom sampled checkers require explicit checker_id for comparison")
+        comparable_left = [
+            {key: value for key, value in task.items() if key != "id"} for task in left_tasks
+        ]
+        comparable_right = [
+            {key: value for key, value in task.items() if key != "id"} for task in right_tasks
+        ]
+        if comparable_left != comparable_right:
+            raise ValueError("diff requires identical ordered task content and metadata")
+        changes = []
+        for old, new in zip(left_items, right_items, strict=True):
+            same_prediction = (old["prediction"], old["correct"]) == (
+                new["prediction"],
+                new["correct"],
+            )
+            if same_prediction and (not include_scores or old.get("scores") == new.get("scores")):
+                continue
+            kind = "score_changed" if same_prediction else "changed"
+            if old["correct"] != new["correct"]:
+                kind = "improved" if new["correct"] else "regressed"
+            changes.append({"index": old["index"], "change": kind, "before": old, "after": new})
+        return changes
+
     def compare_runs(
         self,
         before: Any,
@@ -264,18 +323,7 @@ class EvaluationMixin:
         cluster_by = bootstrap_group_by
         if cluster_by:
             [_field(task, cluster_by) for task in tasks_a]
-        for field in (
-            ()
-            if cluster_by
-            else (
-                "source_document",
-                "source_doc",
-                "document_id",
-                "metadata.source_document",
-                "metadata.source_doc",
-                "metadata.document_id",
-            )
-        ):
+        for field in () if cluster_by else DOCUMENT_FIELDS:
             try:
                 [_field(task, field) for task in tasks_a]
             except ValueError:
@@ -284,14 +332,7 @@ class EvaluationMixin:
             break
         # Explicit document metadata must never silently degrade to independent rows.
         if cluster_by is None:
-            for field in (
-                "source_document",
-                "source_doc",
-                "document_id",
-                "metadata.source_document",
-                "metadata.source_doc",
-                "metadata.document_id",
-            ):
+            for field in DOCUMENT_FIELDS:
                 if any(_has_field(task, field) for task in tasks_a):
                     raise ValueError(f"missing document group field: {field}")
         clusters = [
@@ -311,26 +352,34 @@ class EvaluationMixin:
         }
         movers = []
         for i, ((x, y), old, new) in enumerate(zip(pairs, items_a, items_b, strict=True)):
-            delta_p = (y["gold_probability"] - x["gold_probability"]) if "nll" in x else None
+            # A failed side has a penalty, not a measured probability or score.
+            failed = x["failed"] or y["failed"]
+            before_p = None if x["failed"] else x.get("gold_probability")
+            after_p = None if y["failed"] else y.get("gold_probability")
             old_score, new_score = (
                 old["scores"].get(old["answer"]) if old.get("scores") else None,
                 new["scores"].get(new["answer"]) if new.get("scores") else None,
-            )
-            delta_score = (
-                new_score - old_score if old_score is not None and new_score is not None else None
             )
             movers.append(
                 {
                     "index": i,
                     "id": tasks_a[i].get("id", i),
-                    "gold_probability_before": x.get("gold_probability"),
-                    "gold_probability_after": y.get("gold_probability"),
-                    "gold_probability_delta": delta_p,
-                    "gold_score_delta": delta_score,
+                    "failed": failed,
+                    "gold_probability_before": before_p,
+                    "gold_probability_after": after_p,
+                    "gold_probability_delta": (
+                        after_p - before_p if before_p is not None and after_p is not None else None
+                    ),
+                    "gold_score_delta": (
+                        new_score - old_score
+                        if not failed and old_score is not None and new_score is not None
+                        else None
+                    ),
                     "correct_before": x["correct"],
                     "correct_after": y["correct"],
                 }
             )
+        ranked = [mover for mover in movers if not mover["failed"]]
         return {
             "before_state": a["state"],
             "after_state": b["state"],
@@ -339,11 +388,12 @@ class EvaluationMixin:
             "groups": grouped,
             "bootstrap_group_by": cluster_by,
             "top_probability_movers": sorted(
-                movers, key=lambda r: abs(r["gold_probability_delta"] or 0), reverse=True
+                ranked, key=lambda r: abs(r["gold_probability_delta"] or 0), reverse=True
             )[:top],
             "top_score_movers": sorted(
-                movers, key=lambda r: abs(r["gold_score_delta"] or 0), reverse=True
+                ranked, key=lambda r: abs(r["gold_score_delta"] or 0), reverse=True
             )[:top],
+            "failed_rows": [mover for mover in movers if mover["failed"]],
             "probability_scope": "candidate_set",
             "ece_bins": 10,
             "caveat": (
@@ -435,9 +485,12 @@ class EvaluationMixin:
                 missing = set(required_groups or []) - report["groups"].keys()
                 passed = not missing and old["state"] == new["state"] == "succeeded"
                 verdicts = {}
+                # Exact: read the tolerance as its shortest decimal, so 1 of 10 rows meets 0.1.
+                max_loss = Fraction(repr(acc_tol))
                 for key, surface in surfaces.items():
                     delta = surface["delta"]
-                    verdicts[key] = delta["accuracy"] >= -acc_tol and (
+                    lost = surface["before"]["correct"] - surface["after"]["correct"]
+                    verdicts[key] = Fraction(lost, surface["after"]["n"]) <= max_loss and (
                         delta["nll"] is None or delta["nll"] <= nll_tol
                     )
                     passed = passed and verdicts[key]
@@ -472,11 +525,7 @@ class EvaluationMixin:
         held_out: bool = False,
     ) -> dict:
         """Pin a repeatable stratified dev subset. Screens never establish a held-out result."""
-        from .scoring import _dataset_hash, _tasks
-
         _safe_name(name)
-        if mode not in {"likelihood", "yes_no", "sampled"}:
-            raise ValueError("mode must be likelihood, yes_no, or sampled")
         if held_out:
             raise ValueError("screens are dev-only; held-out data cannot be selected")
         for key, value, minimum in (
@@ -516,39 +565,27 @@ class EvaluationMixin:
         ]
         if len(row_keys) != len(set(row_keys)):
             raise ValueError("screen rows require unique IDs or unique semantic content")
-        identity = _dataset_hash(
-            sorted(json.dumps(row, sort_keys=True, ensure_ascii=False) for row in identities)
-        )
+        cells: dict[str, list[int]] = defaultdict(list)
+        for i, task in enumerate(tasks):
+            cells[_label([_field(task, key) for key in stratify_by])].append(i)
+        target = len(tasks) if size is None else min(size, len(tasks))
+        minimum = sum(min(min_per_cell, len(indices)) for indices in cells.values())
+        if target < minimum:
+            raise ValueError("size cannot satisfy min_per_cell in every stratum")
+        rng, selected = random.Random(seed), []
+        for cell in sorted(cells):
+            members = sorted(cells[cell], key=lambda i: row_keys[i])
+            selected.extend(rng.sample(members, min(min_per_cell, len(members))))
+        remaining = sorted(set(range(len(tasks))) - set(selected), key=lambda i: row_keys[i])
+        selected.extend(rng.sample(remaining, target - len(selected)))
+        selected.sort(key=lambda i: row_keys[i])
+        rows = [tasks[i] for i in selected]
         root = Path(self.artifacts) / "screens" / name
-        eval_root = Path(self.artifacts) / "evaluations"
-        eval_root.mkdir(parents=True, exist_ok=True)
         # A screen consumes dev access to its whole source, not just selected rows.
-        with session_lock(Path(self.session_path)):
-            registry_path = eval_root / "_registry.json"
-            registry = (
-                read_json(registry_path)
-                if registry_path.exists()
-                else {"session_id": uuid.uuid4().hex, "datasets": {}}
-            )
-            _guard_dataset_roles(eval_root, registry, identities, held_out=False)
-            prior = registry["datasets"].get(identity)
-            if prior and prior["role"] == "held_out":
-                raise ValueError("screen source is reserved as held-out")
-            cells: dict[str, list[int]] = defaultdict(list)
-            for i, task in enumerate(tasks):
-                cells[_label([_field(task, key) for key in stratify_by])].append(i)
-            target = len(tasks) if size is None else min(size, len(tasks))
-            minimum = sum(min(min_per_cell, len(indices)) for indices in cells.values())
-            if target < minimum:
-                raise ValueError("size cannot satisfy min_per_cell in every stratum")
-            rng, selected = random.Random(seed), []
-            for cell in sorted(cells):
-                members = sorted(cells[cell], key=lambda i: row_keys[i])
-                selected.extend(rng.sample(members, min(min_per_cell, len(members))))
-            remaining = sorted(set(range(len(tasks))) - set(selected), key=lambda i: row_keys[i])
-            selected.extend(rng.sample(remaining, target - len(selected)))
-            selected.sort(key=lambda i: row_keys[i])
-            rows = [tasks[i] for i in selected]
+        with _reserve(self.artifacts, self.session_path, identities, held_out=False) as (
+            _,
+            identity,
+        ):
             root.mkdir(parents=True, exist_ok=False)
             source_path = (
                 str(Path(data).resolve())
@@ -585,15 +622,10 @@ class EvaluationMixin:
             }
             write_json(root / "rows.json", {"tasks": rows})
             write_json(root / "screen.json", manifest)
-            record = registry["datasets"].setdefault(identity, {"role": "dev", "runs": []})
-            record["item_identities"] = sorted({_digest(row) for row in identities})
-            write_json(registry_path, registry)
         return manifest
 
     def verify_screen(self, screen: Any) -> list[dict]:
         """Verify all pins and source bytes; return rows suitable for evaluate()."""
-        from .scoring import _tasks
-
         path = Path(screen["screen_path"] if isinstance(screen, dict) else screen)
         if not path.exists():
             path = Path(self.artifacts) / "screens" / path / "screen.json"
@@ -616,9 +648,8 @@ class EvaluationMixin:
         present = {_digest(row) for row in tasks}
         if any(_digest(row) not in present for row in rows):
             raise ValueError("pinned screen item is missing from source")
-        eval_root = Path(self.artifacts) / "evaluations"
-        registry = read_json(eval_root / "_registry.json")
-        _guard_dataset_roles(eval_root, registry, identities, held_out=False)
+        registry = _load_registry(Path(self.artifacts) / "evaluations")
+        _guard_dataset_roles(registry, _reservation_keys(identities), held_out=False)
         return rows
 
 
@@ -649,31 +680,3 @@ def _tolerance(value: Any, name: str) -> float:
     ):
         raise ValueError("tolerances must be finite nonnegative numbers or dataset-name mappings")
     return float(value)
-
-
-def _guard_dataset_roles(
-    root: Path, registry: dict, identities: list[dict], *, held_out: bool
-) -> None:
-    """Keep row-level dev/held-out reservations durable across registry-only resumes."""
-    from .scoring import _tasks
-
-    requested = {_digest(row) for row in identities}
-    for record in registry["datasets"].values():
-        if record["role"] != "held_out" and not held_out:
-            continue
-        prior = record.get("item_identities")
-        if prior is None:
-            # Compatibility for registries written before row identities were saved.
-            prior = set()
-            for name in record["runs"]:
-                path = root / name
-                if not (path / "dataset.json").exists():
-                    raise ValueError("cannot verify legacy reserved dataset without its saved rows")
-                summary = read_json(path / "summary.json")
-                _, old = _tasks(read_json(path / "dataset.json")["tasks"], summary["mode"])
-                prior.update(_digest(row) for row in old)
-            if not prior:
-                raise ValueError("cannot verify legacy reserved dataset without its saved rows")
-            record["item_identities"] = sorted(prior)
-        if requested & set(prior):
-            raise ValueError("dataset overlaps reserved dev or held-out data")

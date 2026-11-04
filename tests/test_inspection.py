@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import GPT2Config, GPT2LMHeadModel
+from transformers import GPT2Config, GPT2LMHeadModel, LlamaConfig, LlamaForCausalLM
 
 from oumi_weights_lab.inspection import InspectionMixin, train_probe
 
@@ -89,15 +89,57 @@ def test_hook_model_forward_error_removes_handles():
     assert not lab.model.layer._forward_hooks
 
 
-def test_record_real_transformer_tuple_output():
+def output_type(model, module, ids):
+    types = []
+    handle = model.get_submodule(module).register_forward_hook(
+        lambda hooked, inputs, output: types.append(type(output))
+    )
+    try:
+        model(ids)
+    finally:
+        handle.remove()
+    return types[0]
+
+
+@pytest.mark.parametrize(
+    "module,kind,position",
+    # GPT2Block returns a plain tensor; GPT2Attention returns (output, weights).
+    [("transformer.h.0", torch.Tensor, -1), ("transformer.h.0.attn", tuple, 1)],
+)
+def test_record_and_patch_real_transformer_outputs(module, kind, position):
     model = tiny_model().eval()
     lab = Inspect(model)
-    with lab.record("transformer.h.0") as captured:
-        model(torch.tensor([[1, 2, 3]]))
-    assert captured["transformer.h.0"][0].shape == (1, 1, 8)
-    with lab.patch("transformer.h.0", lambda values: values * 0):
-        patched = model(torch.tensor([[1, 2, 3]])).logits
-    assert patched.shape == (1, 3, 11)
+    ids = torch.tensor([[1, 2, 3]])
+    with torch.no_grad():
+        assert issubclass(output_type(model, module, ids), kind)
+        with lab.record(module) as captured:
+            baseline = model(ids).logits
+        assert captured[module][0].shape == (1, 1, 8)
+        with lab.patch(module, lambda values: values * 0, positions=position):
+            patched = model(ids).logits
+    assert patched.shape == baseline.shape == (1, 3, 11)
+    # One layer: only the patched position's residual stream, and logits, can move.
+    changed = (patched != baseline).any(-1)[0].tolist()
+    assert changed == [index == position % 3 for index in range(3)]
+    assert not model.get_submodule(module)._forward_hooks
+
+
+def test_patch_and_record_reject_aliased_positions():
+    model = TupleModel()
+    lab = Inspect(model)
+    value = torch.ones(1, 3, 4)
+    for positions in ([2, -1], [0, -3], [1, 1]):
+        with (
+            pytest.raises(ValueError, match="distinct"),
+            lab.patch("layer", torch.zeros(1, 2, 4), positions=positions),
+        ):
+            model(value)
+        with pytest.raises(ValueError, match="distinct"), lab.record("layer", positions=positions):
+            model(value)
+    assert not model.layer._forward_hooks
+    with lab.record("layer", positions=[0, -1]) as captured:
+        model(value)
+    assert torch.equal(captured["layer"][0], (value * 2)[:, [0, 2]])
 
 
 def test_gradient_matches_manual_per_row_and_restores_flags():
@@ -143,6 +185,62 @@ def test_gradient_masks_labels_and_rejects_long_rows():
         lab.gradient({"input_ids": ids, "labels": torch.full_like(ids, -100)})
     with pytest.raises(ValueError, match="parameters"):
         lab.gradient({"input_ids": ids}, parameters=["missing"])
+
+
+def eager_llama():
+    torch.manual_seed(0)
+    config = LlamaConfig(
+        vocab_size=11,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+    )
+    config._attn_implementation = "eager"
+    return LlamaForCausalLM(config).eval(), "model.layers.0.mlp.down_proj.weight"
+
+
+def eager_gpt2():
+    model = tiny_model()
+    model.config._attn_implementation = "eager"
+    return model.eval(), "transformer.h.0.mlp.c_proj.weight"
+
+
+@pytest.mark.parametrize("build", [eager_llama, eager_gpt2], ids=["rope", "absolute"])
+def test_padded_gradients_match_unpadded_rows(build):
+    model, name = build()
+    lab = Inspect(model)
+    expected = lab.gradient({"input_ids": torch.tensor([[3, 4, 5]])}, parameters=[name])[name]
+    batch = {
+        "input_ids": torch.tensor([[0, 0, 3, 4, 5], [3, 4, 5, 0, 0]]),
+        "attention_mask": torch.tensor([[0, 0, 1, 1, 1], [1, 1, 1, 0, 0]]),
+    }
+    actual = lab.gradient(batch, parameters=[name])[name]
+    torch.testing.assert_close(actual[0], expected[0])  # left padding
+    torch.testing.assert_close(actual[1], expected[0])  # right padding
+    explicit = dict(batch, position_ids=torch.tensor([[0, 0, 0, 1, 2], [0, 1, 2, 3, 4]]))
+    torch.testing.assert_close(lab.gradient(explicit, parameters=[name])[name], actual)
+
+
+def test_gradient_accepts_tied_parameter_aliases():
+    model = tiny_model().eval()
+    lab = Inspect(model)
+    assert model.lm_head.weight is model.transformer.wte.weight
+    ids = torch.tensor([[1, 2, 3, 4]])
+    expected = torch.autograd.grad(model(ids, labels=ids).loss, model.lm_head.weight)[0]
+    tied = lab.gradient({"input_ids": ids}, parameters=["lm_head.weight"])
+    assert list(tied) == ["lm_head.weight"]
+    torch.testing.assert_close(tied["lm_head.weight"][0], expected)
+    both = lab.gradient({"input_ids": ids}, parameters=["lm_head.weight", "transformer.wte.weight"])
+    assert list(both) == ["lm_head.weight", "transformer.wte.weight"]
+    assert both["lm_head.weight"] is both["transformer.wte.weight"]
+    assert "lm_head.weight" not in lab.gradient({"input_ids": ids})
+    with pytest.raises(ValueError, match="distinct"):
+        lab.gradient({"input_ids": ids}, parameters=["lm_head.weight", "lm_head.weight"])
 
 
 def test_gradient_failure_restores_model():
@@ -200,6 +298,14 @@ def test_probe_rejects_leaky_or_invalid_splits():
         train_probe(features * float("nan"), labels, groups)
 
 
+@pytest.mark.parametrize("short", ["features", "labels", "groups"])
+def test_probe_rejects_mismatched_row_counts(short):
+    data = dict(zip(("features", "labels", "groups"), probe_data(), strict=True))
+    data[short] = data[short][:-1]
+    with pytest.raises(ValueError, match="same number of rows"):
+        train_probe(**data)
+
+
 def test_probe_tensor_document_ids_keep_related_rows_together():
     features, labels, _ = probe_data()
     result = train_probe(
@@ -207,3 +313,12 @@ def test_probe_tensor_document_ids_keep_related_rows_together():
     )
     assert result["train_groups"] == [1, 2]
     assert result["test_groups"] == [3]
+
+
+@pytest.mark.parametrize("positions", [True, [False, 1]])
+def test_positions_reject_booleans(positions):
+    model = TupleModel()
+    lab = Inspect(model)
+    with pytest.raises(ValueError, match="integer"), lab.record("layer", positions=positions):
+        model(torch.ones(1, 3, 4))
+    assert not model.layer._forward_hooks

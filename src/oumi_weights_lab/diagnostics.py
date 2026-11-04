@@ -49,7 +49,8 @@ def _base_norm(module, shape):
     pieces = [detached.view(-1)] if detached.is_contiguous() else detached
     for row in pieces:
         for chunk in row.split(65536):
-            value = chunk.to(device="cpu", dtype=torch.float64)
+            # MPS has no float64: move to CPU before widening.
+            value = chunk.cpu().to(torch.float64)
             if not torch.isfinite(value).all():
                 raise ValueError("base weights must be finite")
             total = math.hypot(total, torch.linalg.vector_norm(value).item())
@@ -89,8 +90,8 @@ def _measure(module, name, adapter, top_k, active):
         raise ValueError(f"{label}: missing or invalid per-adapter scaling") from exc
     if not math.isfinite(scaling):
         raise ValueError(f"{label}: scaling must be finite")
-    a = a.detach().to(device="cpu", dtype=torch.float64)
-    b = b.detach().to(device="cpu", dtype=torch.float64)
+    a = a.detach().cpu().to(torch.float64)
+    b = b.detach().cpu().to(torch.float64)
     if not torch.isfinite(a).all() or not torch.isfinite(b).all():
         raise ValueError(f"{label}: LoRA factors must be finite")
     # B = Qb Rb, A.T = Qa Ra. Orthogonal Q factors preserve singular values.

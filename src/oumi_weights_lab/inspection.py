@@ -32,11 +32,36 @@ def _positions(value, positions):
         if isinstance(positions, int)
         else list(positions)
     )
-    if not selected or any(not isinstance(index, int) for index in selected):
+    if not selected or any(
+        not isinstance(index, int) or isinstance(index, bool) for index in selected
+    ):
         raise ValueError("positions must be an integer or a nonempty list of integers")
     if any(index < -value.shape[1] or index >= value.shape[1] for index in selected):
         raise ValueError("token position is outside the module output")
+    # Aliases such as [2, -1] on three tokens would silently drop one replacement.
+    selected = [index % value.shape[1] for index in selected]
+    if len(set(selected)) != len(selected):
+        raise ValueError("positions must select distinct tokens")
     return selected
+
+
+def _remove_forward_hook(module, hook):
+    """Remove ``hook`` by identity, including when an interrupt lost its handle."""
+    keys = [key for key, value in module._forward_hooks.items() if value is hook]
+    for key in keys:
+        for attribute in (
+            "_forward_hooks",
+            "_forward_hooks_with_kwargs",
+            "_forward_hooks_always_called",
+        ):
+            getattr(module, attribute, {}).pop(key, None)
+
+
+def _accepts_position_ids(model):
+    import inspect
+
+    base = model.get_base_model() if hasattr(model, "peft_config") else model
+    return "position_ids" in inspect.signature(base.forward).parameters
 
 
 class InspectionMixin:
@@ -64,7 +89,7 @@ class InspectionMixin:
             raise ValueError("choose a nonempty list of distinct module names")
         targets = [(name, self.model.get_submodule(name)) for name in names]
         captured = {name: [] for name in names}
-        handles = []
+        registered = []
         try:
             for name, target in targets:
 
@@ -74,11 +99,13 @@ class InspectionMixin:
                         value[:, _positions(value, positions)].detach().cpu().clone()
                     )
 
-                handles.append(target.register_forward_hook(capture))
+                # Record before registering so an interrupt cannot orphan the hook.
+                registered.append((target, capture))
+                target.register_forward_hook(capture)
             yield captured
         finally:
-            for handle in handles:
-                handle.remove()
+            for target, hook in registered:
+                _remove_forward_hook(target, hook)
 
     @contextmanager
     def patch(self, module, values, positions=None):
@@ -105,7 +132,6 @@ class InspectionMixin:
                 return type(output)(*entries) if hasattr(output, "_fields") else entries
             return updated
 
-        handle = target.register_forward_hook(replace)
         self._patch_revision = getattr(self, "_patch_revision", 0) + 1
         if not hasattr(self, "_patches"):
             self._patches = []
@@ -115,12 +141,17 @@ class InspectionMixin:
             "positions": repr(positions),
             "kind": "callable" if callable(values) else "tensor",
         }
-        self._patches.append(metadata)
+        # Worker timeouts raise BaseException anywhere, so register inside cleanup.
         try:
+            target.register_forward_hook(replace)
+            self._patches.append(metadata)
             yield
         finally:
-            handle.remove()
-            self._patches.remove(metadata)
+            _remove_forward_hook(target, replace)
+            for index, item in enumerate(self._patches):
+                if item is metadata:
+                    del self._patches[index]
+                    break
             self._patch_revision += 1
 
     def gradient(self, prompt, target=None, parameters=None, max_tokens=512):
@@ -128,6 +159,11 @@ class InspectionMixin:
 
         A string target masks the prompt so only the answer contributes to loss.
         Dict inputs may contain their own labels, with -100 marking ignored tokens.
+        Padding in attention_mask is never scored or used to predict a real token;
+        without explicit position_ids, padded rows count positions from their first
+        real token. Tied aliases (such as lm_head.weight) are accepted, and aliases
+        requested together share one returned tensor. parameters=None returns each
+        tensor once, under its first name.
         Existing parameter gradients, train/eval flags, and requires_grad flags survive.
         """
         import torch
@@ -167,22 +203,38 @@ class InspectionMixin:
         labels = inputs.pop("labels", ids.clone()).clone()
         if labels.shape != ids.shape:
             raise ValueError("labels must have the same shape as input_ids")
-        if "attention_mask" in inputs:
-            if inputs["attention_mask"].shape != ids.shape:
+        mask = inputs.get("attention_mask")
+        if mask is not None:
+            if mask.shape != ids.shape:
                 raise ValueError("attention_mask must have the same shape as input_ids")
-            labels[inputs["attention_mask"] == 0] = -100
+            labels[mask == 0] = -100
+            # After the causal shift, a pad position would predict the next real token.
+            labels[:, 1:][mask[:, :-1] == 0] = -100
+            # Absolute position embeddings must not count left padding.
+            if (
+                "position_ids" not in inputs
+                and (mask == 0).any()
+                and _accepts_position_ids(self.model)
+            ):
+                inputs["position_ids"] = (mask.long().cumsum(-1) - 1).clamp(min=0)
         if any(not (row[1:] != -100).any().item() for row in labels):
             raise ValueError("each row must have at least one scored token after its first token")
-        named = dict(self.model.named_parameters())
-        names = list(named) if parameters is None else list(parameters)
+        # Tied weights have several names; parts() lists every alias.
+        named = dict(self.model.named_parameters(remove_duplicate=False))
+        names = (
+            [name for name, _ in self.model.named_parameters()]
+            if parameters is None
+            else list(parameters)
+        )
         if not names or len(set(names)) != len(names) or any(name not in named for name in names):
             raise ValueError("parameters must name distinct existing model parameters")
-        selected = [named[name] for name in names]
+        # Aliases of one tensor share one gradient, computed once.
+        selected = list({id(named[name]): named[name] for name in names}.values())
         if any(not parameter.is_floating_point() for parameter in selected):
             raise ValueError("gradients require floating point parameters")
         flags = [parameter.requires_grad for parameter in selected]
         modes = [(module, module.training) for module in self.model.modules()]
-        gradients = {name: [] for name in names}
+        gradients = {id(parameter): [] for parameter in selected}
         try:
             for parameter in selected:
                 parameter.requires_grad_(True)
@@ -202,8 +254,8 @@ class InspectionMixin:
                         if loss.requires_grad
                         else [None] * len(selected)
                     )
-                    for name, parameter, value in zip(names, selected, values, strict=True):
-                        gradients[name].append(
+                    for parameter, value in zip(selected, values, strict=True):
+                        gradients[id(parameter)].append(
                             torch.zeros_like(parameter, device="cpu")
                             if value is None
                             else value.detach().cpu()
@@ -213,7 +265,8 @@ class InspectionMixin:
                 parameter.requires_grad_(flag)
             for module, training in modes:
                 module.training = training
-        return {name: torch.stack(rows) for name, rows in gradients.items()}
+        stacked = {key: torch.stack(rows) for key, rows in gradients.items()}
+        return {name: stacked[id(named[name])] for name in names}
 
     def probe(
         self, features, labels, groups, train_groups=None, seed=0, test_fraction=0.25, ridge=1e-3
@@ -227,7 +280,8 @@ def train_probe(
     """Fit a ridge classifier with an intercept and split whole source documents."""
     import torch
 
-    features = torch.as_tensor(features).detach().to(device="cpu", dtype=torch.float64)
+    # MPS has no float64: move to CPU before widening.
+    features = torch.as_tensor(features).detach().cpu().to(torch.float64)
     labels = torch.as_tensor(labels).detach().cpu()
 
     def document_ids(values):

@@ -13,11 +13,20 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import uuid
 from pathlib import Path, PurePosixPath
 
 from .budget import PassBudget
-from .session import validate_lifecycle
+from .session import (
+    DEFAULT_POLL_INTERVAL,
+    DEFAULT_SNIPPET_TIMEOUT,
+    DTYPES,
+    TERMINAL_STATES,
+    validate_lifecycle,
+)
 
+# argv: session path, launch ID. A session left at the path by an earlier launch has
+# another ID; the new job cannot create its own there, so report it immediately.
 _SESSION_PROBE = (
     "import json,sys\nfrom pathlib import Path\n"
     "p=Path(sys.argv[1]).expanduser().resolve()\n"
@@ -31,7 +40,11 @@ _SESSION_PROBE = (
     "    or not isinstance(status,dict) or not status.get('state')):\n"
     "    print('invalid session configuration or status',file=sys.stderr)\n"
     "    raise SystemExit(2)\n"
-    "if status.get('state') in {'failed','stopped','cancelled'}:\n"
+    "if config.get('launch_id')!=sys.argv[2]:\n"
+    "    print(f'{p} already holds a session from another launch; '\n"
+    "          'start with a new session path',file=sys.stderr)\n"
+    "    raise SystemExit(2)\n"
+    f"if status.get('state') in {sorted(TERMINAL_STATES)!r}:\n"
     "    print(json.dumps(status),file=sys.stderr)\n"
     "    raise SystemExit(2)\n"
 )
@@ -70,11 +83,11 @@ def _configuration(model, config):
         "model": str(model),
         "device": "auto",
         "dtype": "auto",
-        "snippet_timeout": 300,
-        "poll_interval": 0.1,
+        "snippet_timeout": DEFAULT_SNIPPET_TIMEOUT,
+        "poll_interval": DEFAULT_POLL_INTERVAL,
         **config,
     }
-    if configuration["dtype"] not in {"auto", "float32", "float16", "bfloat16"}:
+    if configuration["dtype"] not in DTYPES:
         raise ValueError("unsupported model dtype")
     if not re.fullmatch(
         r"auto|cpu(?::[0-9]+)?|cuda(?::[0-9]+)?|mps(?::[0-9]+)?", str(configuration["device"])
@@ -89,20 +102,57 @@ def _configuration(model, config):
 
 
 def _source_checkout(source):
+    """Return the checkout to ship to the worker, or None when running an installed copy."""
     if source is not None:
         return Path(source)
-    checkout = Path(__file__).resolve().parents[2]
-    if not (checkout / "pyproject.toml").is_file():
-        raise ValueError("source checkout unavailable; supply source='/path/to/weights-lab'")
-    return checkout
+    package = Path(__file__).resolve().parent
+    checkout = package.parents[1]
+    if package == checkout / "src" / "oumi_weights_lab" and (checkout / "pyproject.toml").is_file():
+        return checkout
+    return None
+
+
+def _installed_commit():
+    """Return the remote git URL and commit this package was installed from, if any."""
+    from importlib import metadata
+
+    try:
+        text = metadata.distribution("oumi-weights-lab").read_text("direct_url.json")
+        origin = json.loads(text) if text else {}
+    except (metadata.PackageNotFoundError, ValueError):
+        return None
+    vcs = origin.get("vcs_info") or {}
+    url, commit = origin.get("url", ""), vcs.get("commit_id", "")
+    # A worker can fetch a network URL, not a path on the caller's machine.
+    if vcs.get("vcs") != "git" or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        return None
+    if not url.startswith(("https://", "ssh://")):
+        return None
+    return url, commit
+
+
+def _worker_requirement(checkout):
+    """Install what the caller runs: its checkout, or the same git commit."""
+    if checkout is not None:
+        return ".[adapters]"
+    installed = _installed_commit()
+    if installed is None:
+        raise ValueError(
+            "cannot tell which oumi-weights-lab source to install on the worker; run from a "
+            "checkout, install from git+https://github.com/oumi-ai/weights-lab, or pass --source"
+        )
+    url, commit = installed
+    return f"oumi-weights-lab[adapters] @ git+{url}@{commit}"
 
 
 def _worker_script(session, configuration):
+    # ascii() keeps the script pure ASCII. The task file is written with json.dumps,
+    # which escapes non-BMP characters as surrogate pairs that libyaml rejects.
     script = (
         "import os,sys\nfrom pathlib import Path\n"
         "from oumi_weights_lab.session import create_session\n"
-        f"p=Path({str(session)!r}).expanduser().resolve()\n"
-        f"create_session(p, {configuration!r})\n"
+        f"p=Path({ascii(str(session))}).expanduser().resolve()\n"
+        f"create_session(p, {ascii(configuration)})\n"
         "command=[sys.executable,'-m','oumi_weights_lab','_worker','--session',str(p)]\n"
         "log=(p/'worker.log').open('ab',buffering=0)\n"
     )
@@ -127,12 +177,20 @@ class _SSHTransport:
         return ["ssh", "--", self.host, command]
 
     def run(self, args, *, input=None):
+        """Run a remote CLI command; returned stdout and stderr are raw bytes.
+
+        Snippet output need not be UTF-8. Without input, stdin is closed so a caller's
+        shell loop input is not consumed by ssh.
+        """
+        if input is None:
+            stdin = {"stdin": subprocess.DEVNULL}
+        else:
+            stdin = {"input": input.encode("utf-8") if isinstance(input, str) else input}
         return _checked(
             self.runner,
             self._command(["-m", "oumi_weights_lab", *args]),
-            input=input,
-            text=True,
             capture_output=True,
+            **stdin,
         )
 
     def download(self, remote_path, destination):
@@ -150,6 +208,7 @@ class _SSHTransport:
                 _checked(
                     self.runner,
                     self._command(["-c", _EXPORT, str(remote_path)]),
+                    stdin=subprocess.DEVNULL,
                     stdout=output,
                     stderr=subprocess.PIPE,
                 )
@@ -289,22 +348,29 @@ class SkyPilotLauncher:
                 valid = False
             if not valid:
                 raise ValueError(f"{name} must be finite and positive")
-        source = _source_checkout(source)
+        checkout = _source_checkout(source)
+        requirement = _worker_requirement(checkout)
+        if config.get("resume") is not None:
+            # A relative bundle path resolves like the session path, not under the new
+            # session's empty artifacts directory.
+            config["resume"] = self._path(config["resume"])
         configuration = _configuration(
             model, {"idle_timeout": 900, "max_lifetime": 14400, **config}
         )
+        launch_id = uuid.uuid4().hex
+        configuration["launch_id"] = launch_id
         session = self._path(session)
         script = _worker_script(session, configuration)
         with tempfile.TemporaryDirectory(prefix="oumi-weights-lab-sky-") as temporary:
             root = Path(temporary)
-            workdir = sanitized_workdir(source, root / "package")
             task = {
                 "name": "oumi-weights-lab",
-                "workdir": str(workdir),
                 "resources": {} if accelerators is None else {"accelerators": accelerators},
-                "setup": shlex.join([self.python, "-m", "pip", "install", "."]),
+                "setup": shlex.join([self.python, "-m", "pip", "install", requirement]),
                 "run": shlex.join([self.python, "-c", script]),
             }
+            if checkout is not None:
+                task["workdir"] = str(sanitized_workdir(checkout, root / "package"))
             spec = root / "task.yaml"
             spec.write_text(json.dumps(task), encoding="utf-8")
             _checked(
@@ -325,18 +391,21 @@ class SkyPilotLauncher:
                 text=True,
                 capture_output=True,
             )
-        self._wait_session(session, float(bootstrap_timeout), float(bootstrap_poll_interval))
+        self._wait_session(
+            session, float(bootstrap_timeout), float(bootstrap_poll_interval), launch_id=launch_id
+        )
         return {
             "launcher": "sky",
             "cluster": self.cluster,
             "session": str(session),
+            "package": requirement,
             "state": "starting",
         }
 
-    def _wait_session(self, session, timeout, poll_interval):
+    def _wait_session(self, session, timeout, poll_interval, *, launch_id):
         """Detached Sky setup may still be installing Python after job submission."""
         command = _SSHTransport(self.cluster, self.python)._command(
-            ["-c", _SESSION_PROBE, self._path(session)]
+            ["-c", _SESSION_PROBE, self._path(session), launch_id]
         )
         command[1:1] = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
         deadline = time.monotonic() + timeout
@@ -347,7 +416,12 @@ class SkyPilotLauncher:
                 raise TimeoutError(f"SkyPilot bootstrap timed out after {timeout:g}s: {diagnostic}")
             try:
                 result = self.runner(
-                    command, check=False, text=True, capture_output=True, timeout=min(15, remaining)
+                    command,
+                    check=False,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    timeout=min(15, remaining),
                 )
                 diagnostic = (
                     result.stderr or result.stdout or f"probe exited {result.returncode}"
@@ -386,6 +460,7 @@ class SkyPilotLauncher:
         return _SSHTransport(self.cluster, self.python, runner=self.runner).run(args, input=input)
 
     def stop(self, session, timeout=10):
+        """Stop the remote worker; returns `run()`'s CompletedProcess."""
         return self.run(["stop", "--session", str(session), "--timeout", str(timeout)])
 
     def download(self, remote_path, destination):

@@ -10,9 +10,7 @@ desired leading whitespace in the answer itself. Scores are sums, not averages.
 
 from __future__ import annotations
 
-import hashlib
 import json
-import re
 import threading
 import time
 import uuid
@@ -21,88 +19,27 @@ from pathlib import Path
 from typing import Any
 
 from .budget import PassBudget
-from .evaluation import EvaluationMixin, _digest, _guard_dataset_roles
-from .session import read_json, session_lock, write_json
+from .evaluation import EvaluationMixin
+from .evaluation_data import _choices, _digest, _reserve, _safe_name, _tasks
+from .session import write_json
 
 
-def _choices(options: list[str] | dict[str, str]) -> dict[str, str]:
-    if isinstance(options, list):
-        choices = {
-            chr(65 + index) if index < 26 else str(index): option
-            for index, option in enumerate(options)
-        }
-    elif isinstance(options, dict):
-        choices = options.copy()
-    else:
-        raise ValueError("options must be a list of completions or a label-to-completion mapping")
-    if not choices or any(
-        not isinstance(label, str) or not label or not isinstance(value, str) or not value
-        for label, value in choices.items()
-    ):
-        raise ValueError("options need nonempty string labels and completions")
-    return choices
+def _generation_kwargs(generation_config: dict[str, Any] | None) -> dict[str, Any]:
+    """Greedy defaults plus the caller's settings, refusing what generate() would reject."""
+    from transformers import GenerationConfig
 
-
-def _answer_label(answer: Any, choices: dict[str, str]) -> str:
-    if isinstance(answer, int) and not isinstance(answer, bool):
-        if 0 <= answer < len(choices):
-            return list(choices)[answer]
-    elif isinstance(answer, str):
-        if answer in choices:
-            return answer
-        matches = [label for label, completion in choices.items() if completion == answer]
-        if len(matches) == 1:
-            return matches[0]
-    raise ValueError(
-        "answer must identify an option by label, zero-based index, or unique completion"
-    )
-
-
-def _tasks(data: Any, mode: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    if isinstance(data, (str, Path)):
-        with Path(data).open(encoding="utf-8") as stream:
-            data = [json.loads(line) for line in stream if line.strip()]
-    if not isinstance(data, list) or not data:
-        raise ValueError("evaluation data must be a nonempty list or JSONL path")
-    tasks = []
-    identities = []
-    for row in data:
-        if not isinstance(row, dict) or not isinstance(row.get("prompt"), str):
-            raise ValueError("every task requires a string prompt")
-        if "answer" not in row:
-            raise ValueError("every task requires an answer")
-        if set(row) & {"index", "prediction", "scores", "correct", "generated", "error"}:
-            raise ValueError("task metadata cannot use reserved evaluation result keys")
-        task = row.copy()
-        if mode == "yes_no":
-            task["options"] = _choices(row.get("options", {"yes": " yes", "no": " no"}))
-            answer = row["answer"]
-            if isinstance(answer, bool):
-                answer = "yes" if answer else "no"
-            task["answer"] = _answer_label(answer, task["options"])
-        elif mode == "likelihood":
-            task["options"] = _choices(row.get("options"))
-            task["answer"] = _answer_label(row["answer"], task["options"])
-        elif "options" in row:
-            task["options"] = _choices(row["options"])
-        identity = {"prompt": task["prompt"], "answer": task["answer"]}
-        if "options" in task:
-            identity["options"] = sorted(task["options"].values())
-            try:
-                identity["answer"] = task["options"][_answer_label(task["answer"], task["options"])]
-            except ValueError:
-                if mode != "sampled":
-                    raise
-        identities.append(identity)
-        tasks.append(task)
-    # Fail before creating a run or consuming a held-out reservation.
-    json.dumps(tasks, allow_nan=False)
-    return tasks, identities
-
-
-def _dataset_hash(tasks: list[dict[str, Any]]) -> str:
-    canonical = json.dumps(tasks, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    config = {"max_new_tokens": 32, "do_sample": False, **(generation_config or {})}
+    known = {key for key in vars(GenerationConfig()) if not key.startswith("_")}
+    unknown = sorted(set(config) - known)
+    if unknown:
+        raise ValueError(f"generation_config has unknown keys: {unknown}")
+    if config.get("num_return_sequences", 1) != 1:
+        raise ValueError("sampled scoring requires num_return_sequences=1")
+    try:
+        GenerationConfig(**config).validate()
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"invalid generation_config: {error}") from error
+    return config
 
 
 class ScoringMixin(EvaluationMixin):
@@ -163,20 +100,35 @@ class ScoringMixin(EvaluationMixin):
             ids = [token]
         return ids
 
+    def _encode(
+        self, prompt: str, choices: dict[str, str]
+    ) -> tuple[list[int], dict[str, list[int]]]:
+        prompt_ids = self._prompt_ids(self._scoring_prompt(prompt))
+        answers = {}
+        for label, continuation in choices.items():
+            answers[label] = list(self.tokenizer.encode(continuation, add_special_tokens=False))
+            if not answers[label]:
+                raise ValueError(f"option {label!r} encodes to no continuation tokens")
+        return prompt_ids, answers
+
+    def _check_inputs(self, tasks: list[dict[str, Any]], mode: str) -> None:
+        """Tokenize every row, so input errors fail before a held-out reservation."""
+        for task in tasks:
+            if mode == "sampled":
+                self._prompt_ids(self._scoring_prompt(task["prompt"]))
+            else:
+                self._encode(task["prompt"], task["options"])
+
     def score(
         self, prompt: str, options: list[str] | dict[str, str], *, max_passes: int | None = None
     ) -> dict[str, float]:
         """Return summed continuation log probabilities using the module's token-boundary policy."""
         import torch
 
-        choices = _choices(options)
-        prompt_ids = self._prompt_ids(self._scoring_prompt(prompt))
+        prompt_ids, answers = self._encode(prompt, _choices(options))
         scores = {}
         with self.limit_passes(max_passes), self._evaluation_mode():
-            for label, continuation in choices.items():
-                answer_ids = list(self.tokenizer.encode(continuation, add_special_tokens=False))
-                if not answer_ids:
-                    raise ValueError(f"option {label!r} encodes to no continuation tokens")
+            for label, answer_ids in answers.items():
                 ids = torch.tensor([prompt_ids + answer_ids], device=self.model.device)
                 output = self.model(input_ids=ids, attention_mask=torch.ones_like(ids))
                 start = len(prompt_ids) - 1
@@ -196,9 +148,6 @@ class ScoringMixin(EvaluationMixin):
         ids = torch.tensor(
             [self._prompt_ids(self._scoring_prompt(prompt))], device=self.model.device
         )
-        config = {"max_new_tokens": 32, "do_sample": False, **generation_config}
-        if config.get("num_return_sequences", 1) != 1:
-            raise ValueError("sampled scoring requires num_return_sequences=1")
         devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
         # manual_seed also changes MPS state when the model runs on CPU.
         mps_state = torch.mps.get_rng_state() if torch.backends.mps.is_available() else None
@@ -209,7 +158,7 @@ class ScoringMixin(EvaluationMixin):
             ):
                 torch.manual_seed(seed)
                 generated = self.model.generate(
-                    input_ids=ids, attention_mask=torch.ones_like(ids), **config
+                    input_ids=ids, attention_mask=torch.ones_like(ids), **generation_config
                 )
         finally:
             if mps_state is not None:
@@ -237,9 +186,9 @@ class ScoringMixin(EvaluationMixin):
         A held-out dataset requires an explicit max_passes and can be used only
         once, even after edits or a failed evaluation. Dev datasets cannot later
         become held-out datasets, and held-out datasets cannot become dev data.
+        Rows are tokenized and generation settings validated before any
+        reservation, so those errors never consume held-out data.
         """
-        if mode not in {"likelihood", "yes_no", "sampled"}:
-            raise ValueError("mode must be likelihood, yes_no, or sampled")
         if held_out and max_passes is None:
             raise ValueError("held-out evaluation requires explicit max_passes")
         PassBudget(max_passes)
@@ -252,55 +201,29 @@ class ScoringMixin(EvaluationMixin):
         if generation_config is not None and not isinstance(generation_config, dict):
             raise ValueError("generation_config must be a dictionary")
         json.dumps(generation_config or {}, allow_nan=False)
-        if mode == "sampled":
-            generation_config = {
-                "max_new_tokens": 32,
-                "do_sample": False,
-                **(generation_config or {}),
-            }
         tasks, identities = _tasks(data, mode)
-        dataset_hash = _dataset_hash(
+        if mode == "sampled":
+            generation_config = _generation_kwargs(generation_config)
+        name = _safe_name(name or f"run-{uuid.uuid4().hex[:12]}")
+        self._check_inputs(tasks, mode)
+        dataset_hash = _digest(
             [
                 {key: task[key] for key in ("prompt", "answer", "options") if key in task}
                 for task in tasks
             ]
         )
-        # The held-out guard is invariant to row order, labels, and supported
-        # answer encodings. Ordered task identity remains separate for diff.
-        canonical_rows = sorted(
-            json.dumps(row, sort_keys=True, ensure_ascii=False) for row in identities
-        )
-        dataset_identity = _dataset_hash(canonical_rows)
-        name = name or f"run-{uuid.uuid4().hex[:12]}"
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}", name):
-            raise ValueError("run name must be a safe identifier of at most 100 characters")
-        root = Path(self.artifacts) / "evaluations"
-        root.mkdir(parents=True, exist_ok=True)
-        run_dir = root / name
-        with session_lock(Path(self.session_path)):
-            registry_path = root / "_registry.json"
-            registry = (
-                read_json(registry_path)
-                if registry_path.exists()
-                else {"session_id": uuid.uuid4().hex, "datasets": {}}
-            )
-            previous = registry["datasets"].get(dataset_identity)
-            role = "held_out" if held_out else "dev"
-            if previous is not None and (previous["role"] == "held_out" or held_out):
-                raise ValueError("dataset is already reserved as dev or consumed as held-out")
-            _guard_dataset_roles(root, registry, identities, held_out=held_out)
+        run_dir = Path(self.artifacts) / "evaluations" / name
+        with _reserve(
+            self.artifacts, self.session_path, identities, held_out=held_out, run=name
+        ) as (session_id, dataset_identity):
             run_dir.mkdir(exist_ok=False)
-            record = registry["datasets"].setdefault(dataset_identity, {"role": role, "runs": []})
-            record["item_identities"] = sorted({_digest(row) for row in identities})
-            record["runs"].append(name)
-            write_json(registry_path, registry)
         started = time.time()
         before = self.forward_passes
         summary = {
             "name": name,
             "state": "running",
             "run_dir": str(run_dir.resolve()),
-            "session_id": registry["session_id"],
+            "session_id": session_id,
             "model_id": getattr(self, "model_id", ""),
             "model_commit": getattr(self, "model_commit", None),
             "model_revision": getattr(self, "revision", 0),
@@ -336,9 +259,7 @@ class ScoringMixin(EvaluationMixin):
                 for index, task in enumerate(tasks):
                     item = {"index": index, **task}
                     if mode == "sampled":
-                        generated = self._sample(
-                            task["prompt"], generation_config or {}, seed + index
-                        )
+                        generated = self._sample(task["prompt"], generation_config, seed + index)
                         correct = (
                             checker(generated, task["answer"])
                             if checker is not None
@@ -349,10 +270,14 @@ class ScoringMixin(EvaluationMixin):
                         )
                     else:
                         scores = self.score(task["prompt"], task["options"])
-                        prediction = max(scores, key=scores.get)
+                        best = max(scores.values())
+                        leaders = [label for label, value in scores.items() if value == best]
+                        # An exact tie names no prediction, so it is never correct.
+                        prediction = leaders[0] if len(leaders) == 1 else None
                         item.update(
                             scores=scores,
                             prediction=prediction,
+                            tie=prediction is None,
                             correct=prediction == task["answer"],
                         )
                     stream.write(json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n")
@@ -371,87 +296,3 @@ class ScoringMixin(EvaluationMixin):
             )
             write_json(run_dir / "summary.json", summary)
         return summary
-
-    def _run_summary(self, run: Any) -> tuple[dict[str, Any], Path]:
-        if isinstance(run, dict):
-            path = Path(run["run_dir"])
-        else:
-            path = Path(run)
-            if not path.exists():
-                path = Path(self.artifacts) / "evaluations" / path
-            if path.name == "summary.json":
-                path = path.parent
-        return read_json(path / "summary.json"), path
-
-    def diff(
-        self, before: Any, after: Any, *, include_scores: bool = False
-    ) -> list[dict[str, Any]]:
-        """Return changed items for successful runs of the same dataset and session."""
-        left, _ = self._run_summary(before)
-        right, _ = self._run_summary(after)
-        if left["state"] != "succeeded" or right["state"] != "succeeded":
-            raise ValueError("diff requires two successful evaluation runs")
-        if any(left[key] != right[key] for key in ("session_id", "dataset_hash", "mode")):
-            raise ValueError("diff requires the same session, dataset, and scoring mode")
-        from .evaluation import PROTOCOL_KEYS, _read_run
-
-        _, left_tasks, left_items = _read_run(self, before)
-        _, right_tasks, right_items = _read_run(self, after)
-
-        if any(left.get(key) != right.get(key) for key in PROTOCOL_KEYS):
-            raise ValueError("diff requires the same scoring protocol/settings")
-        if left.get("checker_custom") and not left.get("checker_id"):
-            raise ValueError("custom sampled checkers require explicit checker_id for comparison")
-        # Legacy diff pairs by position/content and intentionally ignores row IDs.
-        comparable_left = [
-            {key: value for key, value in task.items() if key != "id"} for task in left_tasks
-        ]
-        comparable_right = [
-            {key: value for key, value in task.items() if key != "id"} for task in right_tasks
-        ]
-        if comparable_left != comparable_right:
-            raise ValueError("diff requires identical ordered task content and metadata")
-        changes = []
-        for old, new in zip(left_items, right_items, strict=True):
-            same_prediction = (old["prediction"], old["correct"]) == (
-                new["prediction"],
-                new["correct"],
-            )
-            if same_prediction and (not include_scores or old.get("scores") == new.get("scores")):
-                continue
-            kind = "score_changed" if same_prediction else "changed"
-            if old["correct"] != new["correct"]:
-                kind = "improved" if new["correct"] else "regressed"
-            changes.append({"index": old["index"], "change": kind, "before": old, "after": new})
-        return changes
-
-
-class Scorer:
-    """A scoring view of an existing Lab; all state and budgets stay on that Lab."""
-
-    def __init__(self, lab: ScoringMixin):
-        self.lab = lab
-
-    def score(self, *args: Any, **kwargs: Any) -> dict[str, float]:
-        return self.lab.score(*args, **kwargs)
-
-    def evaluate(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return self.lab.evaluate(*args, **kwargs)
-
-    def diff(self, before: Any, after: Any, **kwargs: Any) -> list[dict[str, Any]]:
-        return self.lab.diff(before, after, **kwargs)
-
-    def compare_runs(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return self.lab.compare_runs(*args, **kwargs)
-
-    def evaluate_suite(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return self.lab.evaluate_suite(*args, **kwargs)
-
-    def compare_suites(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return self.lab.compare_suites(*args, **kwargs)
-
-    def create_screen(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return self.lab.create_screen(*args, **kwargs)
-
-    def verify_screen(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
-        return self.lab.verify_screen(*args, **kwargs)

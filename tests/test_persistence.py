@@ -16,7 +16,9 @@ def workspace(path, state=None, limit=20):
     if state is not None:
         model.load_state_dict(state)
     path.mkdir()
-    return Lab(model, SimpleNamespace(), path, model_id="tiny", pass_limit=limit)
+    # Evaluation tokenizes every prompt before reserving data, so the stub must encode.
+    tokenizer = SimpleNamespace(encode=lambda text, add_special_tokens=False: [0])
+    return Lab(model, tokenizer, path, model_id="tiny", pass_limit=limit)
 
 
 def test_bundle_replays_overlapping_slices_and_preserves_exact_undo(tmp_path):
@@ -227,6 +229,35 @@ def test_manifest_corruption_and_monotonic_component_revision(tmp_path):
     manifest_path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="manifest checksum"):
         workspace(tmp_path / "corrupt", base).load_edits(bundle)
+
+
+def test_resume_after_detached_attachments_keeps_revision_monotonic(tmp_path):
+    old = workspace(tmp_path / "old")
+    base = {k: v.clone() for k, v in old.model.state_dict().items()}
+    with old.attach(lambda prompt: prompt, mode="prefix"):
+        pass
+    bundle = old.save_edits("saved")
+    fresh = workspace(tmp_path / "new", base)
+    for _ in range(3):
+        with fresh.attach(lambda prompt: prompt, mode="prefix"):
+            pass
+    before = fresh.revision
+    fresh.load_edits(bundle)
+    assert fresh.revision > before
+    resumed = fresh.revision
+    with fresh.attach(lambda prompt: prompt, mode="prefix"):
+        assert fresh.revision == resumed + 1
+
+
+def test_parallel_fingerprint_matches_serial(tmp_path, monkeypatch):
+    from oumi_weights_lab import persistence
+
+    model = torch.nn.Sequential(*(torch.nn.Linear(4, 4) for _ in range(6)))
+    (tmp_path / "lab").mkdir()
+    lab = Lab(model, SimpleNamespace(), tmp_path / "lab", model_id="tiny")
+    parallel = persistence._fingerprint(lab)
+    monkeypatch.setattr(persistence.os, "cpu_count", lambda: 1)
+    assert persistence._fingerprint(lab) == parallel
 
 
 def test_real_peft_bundle_preserves_base_adapter_edits_and_logits(tmp_path):

@@ -6,7 +6,7 @@ import pytest
 
 
 def harness():
-    path = Path(__file__).resolve().parents[1] / "scripts/validate_runtime.py"
+    path = Path(__file__).with_name("validate_runtime.py")
     spec = importlib.util.spec_from_file_location("runtime_validation", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

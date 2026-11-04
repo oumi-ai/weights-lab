@@ -164,6 +164,29 @@ def test_timeout_interrupts_snippet_and_worker_accepts_next(worker_session):
     assert "9" in (path / "outputs" / f"{good}.log").read_text()
 
 
+@pytest.mark.parametrize("worker_session", [0.3], indirect=True)
+def test_deadline_while_reporting_an_error_does_not_end_worker(worker_session):
+    path = worker_session
+    # The snippet raises immediately, but rendering its error outlasts the deadline.
+    # The alarm must not fire inside the worker's own error handling.
+    slow_error = submit(
+        path,
+        "import time\n"
+        "class SlowError(Exception):\n"
+        "    def __str__(self):\n"
+        "        time.sleep(0.6)\n"
+        "        return 'slow to render'\n"
+        "raise SlowError()\n",
+    )
+    good = submit(path, "print('still serving')")
+    result = result_for(path, slow_error)
+    assert result["state"] == "failed"
+    assert "slow to render" in result["error"]
+    assert result_for(path, good)["state"] == "succeeded"
+    # The result is written just before the worker reports ready again.
+    wait_for(lambda: read_json(path / "status.json")["state"] == "ready")
+
+
 def test_model_load_failure_records_terminal_status(tmp_path):
     path = tmp_path / "session"
     create_session(path, {"model": "missing"})

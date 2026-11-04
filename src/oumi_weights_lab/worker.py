@@ -15,7 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .session import cancel_unfinished, read_json, session_lock, write_json
+from .session import TERMINAL_STATES, cancel_unfinished, read_json, session_lock, write_json
 
 
 class _SnippetTimeout(BaseException):
@@ -53,6 +53,7 @@ class Worker:
         self.loader = loader
         self.lab: Any = None
         self.namespace: dict[str, Any] = {}
+        self._shutdown_reason: str | None = None
 
     def _status(self, state: str, **extra: Any) -> None:
         status = {
@@ -63,7 +64,7 @@ class Worker:
             **extra,
         }
         with session_lock(self.path):
-            if state in {"stopped", "failed"}:
+            if state in TERMINAL_STATES:
                 cancel_unfinished(
                     self.path,
                     extra.get("error", extra.get("reason", "worker stopped before completion")),
@@ -99,9 +100,15 @@ class Worker:
             _capture(output),
         ):
             try:
-                signal.setitimer(signal.ITIMER_REAL, self.config["snippet_timeout"])
-                code = compile(running.read_text(encoding="utf-8"), str(running), "exec")
-                exec(code, self.namespace)
+                try:
+                    signal.setitimer(signal.ITIMER_REAL, self.config["snippet_timeout"])
+                    code = compile(running.read_text(encoding="utf-8"), str(running), "exec")
+                    exec(code, self.namespace)
+                finally:
+                    # Disarm before any handler below runs. An alarm that lands after
+                    # the snippet returns, or while its error is being reported, is
+                    # caught here as a timeout instead of ending the worker.
+                    signal.setitimer(signal.ITIMER_REAL, 0)
             except _SnippetTimeout:
                 result.update(state="timed_out", error="snippet time limit exceeded")
                 print(result["error"], flush=True)
@@ -111,8 +118,6 @@ class Worker:
             except BaseException as error:
                 result.update(state="failed", error=f"{type(error).__name__}: {error}")
                 traceback.print_exc()
-            finally:
-                signal.setitimer(signal.ITIMER_REAL, 0)
         result.update(
             duration_seconds=time.monotonic() - clock_started,
             forward_passes=getattr(self.lab, "forward_passes", 0) - before,
@@ -147,15 +152,21 @@ class Worker:
             signal.signal(signal.SIGINT, self._stop)
             signal.signal(signal.SIGALRM, self._timeout)
             finished = threading.Event()
+            guard = None
 
             def watch_stop() -> None:
                 while not finished.wait(self.config["poll_interval"]):
                     if (self.path / "STOP").exists():
                         os.kill(os.getpid(), signal.SIGTERM)
                         return
+                    if guard is not None and guard.poll() is not None:
+                        # Without its watchdog this worker has no idle or lifetime
+                        # deadline, and a remote cluster would never autodown.
+                        self._shutdown_reason = "watchdog_exited"
+                        os.kill(os.getpid(), signal.SIGTERM)
+                        return
 
             watcher = threading.Thread(target=watch_stop, daemon=True)
-            guard = None
             exit_code = 0
             final_error = None
             try:
@@ -178,7 +189,7 @@ class Worker:
                         ],
                         stdin=subprocess.DEVNULL,
                         stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
+                        # Inherit the worker's stderr (worker.log) so failures are visible.
                     )
                 watcher.start()
                 if self.loader is None:
@@ -220,8 +231,13 @@ class Worker:
                 extra = {}
                 shutdown = self.path / "shutdown.json"
                 if shutdown.exists():
-                    extra = read_json(shutdown)
-                    extra.pop("pid", None)
+                    try:
+                        extra = {"reason": read_json(shutdown)["reason"]}
+                    except (OSError, ValueError, KeyError, TypeError):
+                        extra = {"reason": "unknown"}
+                elif self._shutdown_reason is not None:
+                    extra = {"reason": self._shutdown_reason}
+                if extra:
                     self._status("stopping", **extra)
                     save = getattr(self.lab, "save_edits", None)
                     if callable(save):

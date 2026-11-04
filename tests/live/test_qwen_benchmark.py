@@ -18,8 +18,8 @@ def benchmark(monkeypatch):
     # run_arm intentionally changes PATH in its isolated child process. Restore
     # it after in-process unit tests exercise that startup path.
     monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1]))
-    return importlib.import_module("scripts.validate_qwen_benchmark")
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent))
+    return importlib.import_module("validate_qwen_benchmark")
 
 
 @pytest.fixture

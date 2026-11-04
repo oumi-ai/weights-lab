@@ -6,7 +6,7 @@ import pytest
 
 from oumi_weights_lab.budget import BudgetExceeded
 from oumi_weights_lab.lab import Lab
-from oumi_weights_lab.scoring import Scorer, ScoringMixin
+from oumi_weights_lab.scoring import ScoringMixin
 
 torch = pytest.importorskip("torch")
 
@@ -17,7 +17,7 @@ class BoundaryTokenizer:
 
     def encode(self, text, add_special_tokens=False):
         assert add_special_tokens is False
-        return {"p": [0, 1], " x": [2, 3], " y": [4], " z": [5], "p x": [5], "": []}[text]
+        return {"p": [0, 1], " x": [2, 3], " y": [4], " z": [5], "p x": [5], "": [], " ": []}[text]
 
     def decode(self, ids, skip_special_tokens=True):
         return " ".join(str(int(value)) for value in ids)
@@ -173,6 +173,7 @@ def test_evaluation_writes_per_item_and_provenance_and_never_overwrites(lab):
     saved = json.loads((lab.artifacts / "evaluations/baseline/items.jsonl").read_text())
     assert saved["prompt"] == "p"
     assert saved["prediction"] == "A"
+    assert saved["tie"] is False
     assert saved["scores"]["A"] > saved["scores"]["B"]
     assert saved == json.loads(
         (lab.artifacts / "evaluations/baseline/items/000000.json").read_text()
@@ -248,21 +249,39 @@ def test_yes_no_and_sampled_checker_modes(lab):
     assert summary["forward_passes"] == 2
 
 
-def test_sampled_seed_repeats_without_changing_callers_rng(lab):
+SAMPLED = {"mode": "sampled", "generation_config": {"max_new_tokens": 8, "do_sample": True}}
+
+
+def generated(lab, name):
+    return json.loads((lab.artifacts / f"evaluations/{name}/items.jsonl").read_text())["generated"]
+
+
+def test_sampled_seed_fixes_output_whatever_the_callers_rng(lab):
+    data = [{"prompt": "p", "answer": "irrelevant"}]
+    outputs = []
+    for caller_seed in (89, 90):
+        torch.manual_seed(caller_seed)
+        rng_before = torch.random.get_rng_state().clone()
+        lab.evaluate(data, name=f"caller-{caller_seed}", seed=73, **SAMPLED)
+        assert torch.equal(rng_before, torch.random.get_rng_state())
+        outputs.append(generated(lab, f"caller-{caller_seed}"))
+    assert outputs[0] == outputs[1]
+    lab.evaluate(data, name="other-seed", seed=74, **SAMPLED)
+    assert generated(lab, "other-seed") != outputs[0]
+
+
+def test_failed_generation_restores_callers_rng(lab):
+    generate = lab.model.generate
+
+    def fail_after_sampling(**kwargs):
+        generate(**kwargs)
+        raise RuntimeError("generation failed after sampling")
+
+    lab.model.generate = fail_after_sampling
     torch.manual_seed(89)
     rng_before = torch.random.get_rng_state().clone()
-    kwargs = {
-        "mode": "sampled",
-        "generation_config": {"max_new_tokens": 5, "do_sample": True},
-        "seed": 73,
-    }
-    data = [{"prompt": "p", "answer": "irrelevant"}]
-    first = lab.evaluate(data, name="sample-one", **kwargs)
-    second = lab.evaluate(data, name="sample-two", **kwargs)
-    assert first["accuracy"] == second["accuracy"]
-    first_item = json.loads((lab.artifacts / "evaluations/sample-one/items.jsonl").read_text())
-    second_item = json.loads((lab.artifacts / "evaluations/sample-two/items.jsonl").read_text())
-    assert first_item["generated"] == second_item["generated"]
+    with pytest.raises(RuntimeError, match="after sampling"):
+        lab.evaluate([{"prompt": "p", "answer": "irrelevant"}], seed=73, **SAMPLED)
     assert torch.equal(rng_before, torch.random.get_rng_state())
 
 
@@ -289,13 +308,12 @@ def test_diff_rejects_matching_dataset_from_different_sessions(lab, tmp_path):
         lab.diff(first, second)
 
 
-def test_scorer_wrapper_shares_the_labs_state(lab):
-    scorer = Scorer(lab)
-    assert scorer.score("p", [" x"])["A"] < 0
-    assert lab.forward_passes == 1
-    run = scorer.evaluate(tasks(), name="wrapped")
-    assert scorer.diff(run, run) == []
-    assert lab.forward_passes == 3
+def test_package_does_not_export_a_forwarding_scorer():
+    import oumi_weights_lab
+
+    assert "Scorer" not in oumi_weights_lab.__all__
+    with pytest.raises(AttributeError):
+        oumi_weights_lab.Scorer  # noqa: B018
 
 
 def test_prompt_attachments_affect_scores_without_changing_dataset_identity(lab):
@@ -306,3 +324,49 @@ def test_prompt_attachments_affect_scores_without_changing_dataset_identity(lab)
     assert baseline["dataset_hash"] == modified["dataset_hash"]
     assert modified["attachments"] == [{"name": "empty-prompt"}]
     assert lab.model.calls[-2][0] == [[0, 2, 3]]
+
+
+def test_exact_ties_are_flagged_and_count_as_incorrect(lab):
+    lab.model.table.zero_()  # Uniform logits, as after zeroing an output head.
+    data = [{"prompt": "p", "options": [" y", " z"], "answer": answer} for answer in "AB"]
+    assert lab.evaluate(data, name="degenerate")["correct"] == 0
+    lines = (lab.artifacts / "evaluations/degenerate/items.jsonl").read_text().splitlines()
+    items = [json.loads(line) for line in lines]
+    assert [(item["tie"], item["prediction"], item["correct"]) for item in items] == [
+        (True, None, False),
+        (True, None, False),
+    ]
+    with pytest.raises(ValueError, match="distinct"):
+        lab.evaluate([{"prompt": "p", "options": [" y", " y"], "answer": "A"}])
+
+
+@pytest.mark.parametrize(
+    "case,error",
+    [
+        ("generation_key", "generation_config"),
+        ("generation_value", "generation_config"),
+        ("empty_option", "no continuation tokens"),
+        ("empty_prompt", "BOS or EOS"),
+    ],
+)
+def test_input_errors_fail_before_reserving_held_out_data(lab, case, error):
+    rows = valid = [{"prompt": "p", "options": [" x", " y"], "answer": "A"}]
+    kwargs = fixed = {}
+    if case.startswith("generation"):
+        rows = valid = [{"prompt": "p", "answer": "2 3"}]
+        bad = {"max_new_tokns": 2} if case == "generation_key" else {"max_new_tokens": 0}
+        kwargs = {"mode": "sampled", "generation_config": bad}
+        fixed = {"mode": "sampled", "generation_config": {"max_new_tokens": 2}}
+    elif case == "empty_option":
+        rows = [{"prompt": "p", "options": [" x", " "], "answer": "A"}]
+    else:
+        rows = valid = [{"prompt": "", "options": [" x", " y"], "answer": "A"}]
+        lab.tokenizer.bos_token_id = lab.tokenizer.eos_token_id = None
+    with pytest.raises(ValueError, match=error):
+        lab.evaluate(rows, name="attempt", held_out=True, max_passes=10, **kwargs)
+    assert lab.forward_passes == 0
+    assert not (lab.artifacts / "evaluations/attempt").exists()
+    lab.tokenizer.bos_token_id = lab.tokenizer.eos_token_id = 0
+    assert (
+        lab.evaluate(valid, name="retry", held_out=True, max_passes=10, **fixed)["completed"] == 1
+    )

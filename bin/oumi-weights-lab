@@ -1,0 +1,40 @@
+#!/bin/sh
+# Claude Code puts an enabled plugin's bin/ on the Bash tool's PATH. This runs the
+# CLI from the plugin's own copy of the package. uv builds the locked environment
+# in the plugin directory on first use and reuses it until the plugin updates.
+set -eu
+
+self_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+root=$(dirname -- "$self_dir")
+
+if command -v uv >/dev/null 2>&1 && [ -f "$root/pyproject.toml" ] && [ -f "$root/uv.lock" ]; then
+    quiet=--quiet
+    if [ ! -d "$root/.venv" ]; then
+        quiet=  # Show setup progress, on stderr, the first time.
+        echo "oumi-weights-lab: creating the plugin's environment; the first run downloads PyTorch" >&2
+    fi
+    exec uv run ${quiet:+"$quiet"} --frozen --no-dev --extra adapters --project "$root" \
+        oumi-weights-lab "$@"
+fi
+
+# Without uv, defer to a CLI installed some other way, such as from git.
+fallback=
+old_ifs=$IFS
+IFS=:
+for dir in $PATH; do
+    [ -n "$dir" ] || continue
+    candidate="$dir/oumi-weights-lab"
+    [ -x "$candidate" ] && [ ! -d "$candidate" ] || continue
+    resolved=$(CDPATH='' cd -- "$dir" 2>/dev/null && pwd -P) || continue
+    [ "$resolved" = "$self_dir" ] && continue
+    fallback=$candidate
+    break
+done
+IFS=$old_ifs
+if [ -n "$fallback" ]; then
+    exec "$fallback" "$@"
+fi
+
+echo "oumi-weights-lab: install uv (https://docs.astral.sh/uv/) to run this plugin's CLI," >&2
+echo "or install the CLI: uv tool install git+https://github.com/oumi-ai/weights-lab" >&2
+exit 127

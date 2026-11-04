@@ -1,8 +1,12 @@
 import io
 import json
+import os
+import shlex
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,7 +32,7 @@ class Transport:
 
     def stop(self, session, *, timeout):
         self.calls.append(("stop", session, timeout))
-        return {"state": "stopped"}
+        return subprocess.CompletedProcess([], 0, '{"state":"stopped"}\n', "")
 
     def download(self, source, destination):
         self.calls.append(("download", source, destination))
@@ -157,8 +161,7 @@ def test_remote_backup_uses_remote_archive_path_and_downloads_without_overwrite(
     assert destination.read_bytes() == b"remote archive"
 
 
-@pytest.mark.parametrize("explicit", [False, True])
-def test_sky_start_forwards_checkpoint_pins_budget_and_infra(transports, capsys, explicit):
+def test_sky_start_forwards_checkpoint_pins_budget_and_infra(transports, capsys):
     arguments = [
         "start",
         "--cluster",
@@ -186,8 +189,6 @@ def test_sky_start_forwards_checkpoint_pins_budget_and_infra(transports, capsys,
         "--accelerators",
         "A100:1",
     ]
-    if explicit:
-        arguments += ["--launcher", "sky"]
     assert cli.main(arguments) == 0
     capsys.readouterr()
     assert transports[0]["SkyPilotLauncher"].calls == [
@@ -286,6 +287,8 @@ def test_invalid_deadline_does_not_construct_cloud_transport(transports, capsys,
 @pytest.mark.parametrize(
     "removed",
     [
+        ["--launcher", "sky"],
+        ["--launcher", "local"],
         ["--launcher", "ssh"],
         ["--launcher", "slurm"],
         ["--launcher", "modal"],
@@ -309,10 +312,12 @@ def test_removed_flags_rejected_before_provisioning(tmp_path, transports, remove
     assert not path.exists()
 
 
-@pytest.mark.parametrize("target", [["--launcher", "sky"], ["--infra", "slurm/lab/gpu"]])
-def test_sky_start_requires_cluster_before_resources(tmp_path, transports, capsys, target):
+def test_sky_infra_requires_cluster_before_resources(tmp_path, transports, capsys):
     path = tmp_path / "session"
-    assert cli.main(["start", "--session", str(path), "--model", "base", *target]) != 0
+    assert (
+        cli.main(["start", "--session", str(path), "--model", "base", "--infra", "slurm/lab/gpu"])
+        != 0
+    )
     assert "--cluster" in capsys.readouterr().err
     assert transports[1] == []
     assert not path.exists()
@@ -400,4 +405,165 @@ def test_remote_session_home_is_not_expanded_on_local_machine(transports, capsys
     capsys.readouterr()
     assert transports[0]["SkyPilotLauncher"].calls == [
         ("run", ["peek", "--session", "~/remote/session"], None)
+    ]
+
+
+@pytest.fixture
+def sky(monkeypatch):
+    """Drive the real SkyPilotLauncher: SSH runs in a local shell and Sky is faked.
+
+    A successful fake `sky launch -d` runs the task's session bootstrap without starting
+    a model worker; like the real detached launch, a failing job does not fail launch.
+    """
+    state = SimpleNamespace(calls=[], codes={}, ssh_error=None)
+    real = launchers.SkyPilotLauncher
+
+    def runner(args, **kwargs):
+        state.calls.append(list(args))
+        if args[0] == "ssh":
+            assert args[-2] == "lab"
+            if state.ssh_error is not None:
+                raise state.ssh_error
+            return subprocess.run(["sh", "-c", args[-1]], **kwargs)
+        assert args[0] == "sky"
+        code = state.codes.get(args[1], 0)
+        if args[1] == "launch" and code == 0:
+            task = json.loads(Path(args[-1]).read_text())
+            script = shlex.split(task["run"])[2]
+            stub = "import os\nos.dup2=lambda *args: None\nos.execv=lambda *args: None\n"
+            subprocess.run([sys.executable, "-c", stub + script], capture_output=True)
+        result = subprocess.CompletedProcess(
+            args, code, f"Sky {args[1]} progress\n", f"Sky {args[1]} warning\n"
+        )
+        if kwargs.get("check"):
+            result.check_returncode()
+        return result
+
+    def construct(cluster, python="python3"):
+        return real(cluster, python=sys.executable, runner=runner)
+
+    monkeypatch.setattr(launchers, "SkyPilotLauncher", construct)
+    return state
+
+
+def test_real_launcher_send_and_peek_relay_json_and_raw_snippet_output(tmp_path, sky, capsysbinary):
+    path = create_session(tmp_path / "session", {"model": "unused"})
+    code = "print('λ')\n"
+    assert cli.main(["send", "--cluster", "lab", "--session", str(path), "--code", code]) == 0
+    queued = json.loads(capsysbinary.readouterr().out)
+    assert queued["state"] == "queued"
+    assert (path / "inbox" / f"{queued['id']}.py").read_text(encoding="utf-8") == code
+    result = {"id": queued["id"], "state": "succeeded"}
+    write_json(path / "results" / f"{queued['id']}.json", result)
+    # A child process may write bytes that are not UTF-8; they must not hide the result.
+    (path / "outputs" / f"{queued['id']}.log").write_bytes(b"partial \xff\n")
+    peek = ["peek", "--cluster", "lab", "--session", str(path), "--id", queued["id"]]
+    assert cli.main(peek) == 0
+    output = capsysbinary.readouterr()
+    assert json.loads(output.out) == result
+    assert output.err == b"partial \xff\n"
+
+
+@pytest.mark.parametrize("down_code", [0, 3])
+@pytest.mark.parametrize("stop_failure", [None, "remote", "ssh"])
+def test_real_launcher_stop_teardown_always_tears_down_and_reports_it(
+    tmp_path, sky, capsys, stop_failure, down_code
+):
+    path = create_session(tmp_path / "session", {"model": "unused"})
+    if stop_failure == "remote":
+        path = tmp_path / "missing"
+    elif stop_failure == "ssh":
+        sky.ssh_error = FileNotFoundError(2, "No such file or directory", "ssh")
+    sky.codes["down"] = down_code
+    result = cli.main(["stop", "--cluster", "lab", "--session", str(path), "--teardown"])
+    output = capsys.readouterr()
+    assert ["sky", "down", "-y", "lab"] in sky.calls
+    # A stop failure's exit code wins; otherwise a failed teardown's code is surfaced.
+    assert result == (1 if stop_failure else down_code)
+    if stop_failure:
+        assert output.out == ""
+        assert "stop failed" in output.err
+    else:
+        assert json.loads(output.out)["state"] == "stopped"
+    if down_code:
+        assert "Sky down progress" in output.err
+        assert "teardown of cluster lab failed" in output.err
+    else:
+        assert "cluster lab was torn down" in output.err
+
+
+def test_real_launcher_backup_downloads_remote_archive(tmp_path, sky, capsys):
+    path = create_session(tmp_path / "session", {"model": "unused"})
+    write_json(path / "status.json", {"state": "stopped"})
+    remote = tmp_path / "remote.tar.gz"
+    local = tmp_path / "local.tar.gz"
+    arguments = ["backup", "--cluster", "lab", "--session", str(path)]
+    arguments += ["--output", str(local), "--remote-output", str(remote)]
+    assert cli.main(arguments) == 0
+    reported = json.loads(capsys.readouterr().out)
+    assert reported == {"session": str(path), "output": str(local), "remote_output": str(remote)}
+    assert local.read_bytes() == remote.read_bytes()
+    with tarfile.open(local) as archive:
+        assert "session/config.json" in archive.getnames()
+
+
+def test_sky_launch_failure_keeps_sky_output_off_stdout(tmp_path, sky, capsys):
+    sky.codes["launch"] = 1
+    arguments = ["start", "--cluster", "lab", "--session", str(tmp_path / "s"), "--model", "m"]
+    assert cli.main(arguments) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "Sky launch progress" in output.err and "Sky launch warning" in output.err
+
+
+def test_real_launcher_start_maps_relative_resume_like_session(tmp_path, sky, capsys):
+    path = tmp_path / "session"
+    arguments = ["start", "--cluster", "lab", "--session", str(path), "--model", "m"]
+    assert cli.main([*arguments, "--resume", "sessions/old/artifacts/candidate"]) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "starting"
+    config = json.loads((path / "config.json").read_text())
+    assert config["resume"] == "~/sky_workdir/sessions/old/artifacts/candidate"
+
+
+def test_start_over_an_existing_session_fails_instead_of_reporting_the_old_worker(
+    tmp_path, sky, capsys
+):
+    path = create_session(tmp_path / "session", {"model": "old-model"})
+    write_json(path / "status.json", {"state": "ready", "model": "old-model"})
+    arguments = ["start", "--cluster", "lab", "--session", str(path), "--model", "new-model"]
+    assert cli.main(arguments) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "another launch" in output.err
+    assert json.loads((path / "config.json").read_text())["model"] == "old-model"
+
+
+def test_remote_commands_in_a_shell_loop_leave_loop_input_alone(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    # Like real ssh, forward this process's stdin whether or not the remote reads it.
+    (bin_dir / "ssh").write_text(
+        '#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done\nshift 2\ncat | sh -c "$1"\n'
+    )
+    (bin_dir / "ssh").chmod(0o755)
+    paths = [create_session(tmp_path / f"session-{index}", {"model": "m"}) for index in (1, 2)]
+    listing = tmp_path / "sessions.txt"
+    listing.write_text("".join(f"{path}\n" for path in paths))
+    loop = (
+        'while read -r s; do "$PY" -m oumi_weights_lab peek --cluster lab '
+        '--remote-python "$PY" --session "$s"; done < "$LIST"'
+    )
+    environment = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "PY": sys.executable,
+        "LIST": str(listing),
+    }
+    result = subprocess.run(
+        ["sh", "-c", loop], env=environment, capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stderr
+    assert [json.loads(line)["state"] for line in result.stdout.splitlines()] == [
+        "starting",
+        "starting",
     ]

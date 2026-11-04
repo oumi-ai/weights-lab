@@ -1,12 +1,14 @@
 import multiprocessing
 import os
 import signal
+import subprocess
+import sys
 import time
 from types import SimpleNamespace
 
 import pytest
 
-from oumi_weights_lab.session import create_session, read_json, submit
+from oumi_weights_lab.session import create_session, read_json, submit, write_json
 from oumi_weights_lab.worker import Worker
 
 
@@ -129,6 +131,78 @@ def test_independent_watchdog_kills_uninterruptible_loader(tmp_path):
             os.kill(process.pid, 0)
     finally:
         finish(process)
+
+
+def test_deadline_still_stops_worker_when_reason_cannot_be_recorded(tmp_path):
+    path = tmp_path / "unrecorded"
+    process = launch(path, idle_timeout=0.2, shutdown_grace=1)
+    # A directory in its place makes the watchdog's shutdown.json write fail.
+    (path / "shutdown.json").mkdir()
+    try:
+        process.join(5)
+        assert process.exitcode == 0
+        status = read_json(path / "status.json")
+        assert status["state"] == "stopped"
+        assert status["reason"] == "unknown"
+    finally:
+        finish(process)
+
+
+def test_worker_stops_when_its_watchdog_dies(tmp_path):
+    path = tmp_path / "unguarded"
+    process = launch(path, idle_timeout=60, shutdown_grace=1)
+    try:
+        wait_for(lambda: read_json(path / "status.json").get("state") == "ready")
+        guard = wait_for(
+            lambda: subprocess.run(
+                ["pgrep", "-P", str(process.pid), "-f", "oumi_weights_lab.watchdog"],
+                capture_output=True,
+                text=True,
+            ).stdout.split()
+        )
+        os.kill(int(guard[0]), signal.SIGKILL)
+        process.join(5)
+        assert process.exitcode == 0
+        status = read_json(path / "status.json")
+        assert status["state"] == "stopped"
+        assert status["reason"] == "watchdog_exited"
+    finally:
+        finish(process)
+
+
+def watched_parent(path, terminated):
+    """Stand in for a worker: run the watchdog and record whether it signals us."""
+    signal.signal(signal.SIGTERM, lambda *_: (terminated.touch(), os._exit(0)))
+    guard = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "oumi_weights_lab.watchdog",
+            *("--session", str(path), "--pid", str(os.getpid())),
+            *("--started", str(time.monotonic())),
+        ]
+    )
+    try:
+        time.sleep(1.0)
+    finally:
+        guard.kill()
+        guard.wait()
+
+
+def test_snippet_claimed_before_running_status_is_not_idle(tmp_path):
+    path = tmp_path / "claimed"
+    create_session(path, {"model": "fake", "idle_timeout": 0.2, "shutdown_grace": 1})
+    # The worker moves a snippet to running/ before it writes "running" status.
+    write_json(path / "status.json", {"state": "ready", "model": "fake", "updated_at": 1.0})
+    (path / "running" / "00000000000000000001-claimed.py").write_text("pass")
+    terminated = tmp_path / "terminated"
+    process = multiprocessing.get_context("spawn").Process(
+        target=watched_parent, args=(path, terminated)
+    )
+    process.start()
+    process.join(5)
+    assert process.exitcode == 0
+    assert not terminated.exists()
 
 
 @pytest.mark.parametrize("key", ["idle_timeout", "max_lifetime", "shutdown_grace"])
