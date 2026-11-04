@@ -72,11 +72,28 @@ report = lab.compare_runs(before, after)
   `min_length`, `prefill_chunk_size`, watermarking, and `max_length` without
   `max_new_tokens`. A `batch_size` above 1 with them raises. Assisted generation
   is refused, because it cannot be charged per generated token.
+- `num_samples=k` (sampled mode with `do_sample=True`) draws k samples per row;
+  sample `j` of row `i` is seeded with `seed + i*k + j`. Each row scores the
+  fraction of its samples that are correct, and `accuracy` is the mean fraction.
+  `pass_at=[1, k]` adds unbiased pass@k per row and per run. With
+  `answer_key(generated, row)`, each sample votes for the value it returns (JSON
+  values only); the summary reports `vote_accuracy`, and a tie counts as
+  incorrect; a sample whose key is `None` abstains. With k>1, each item holds
+  its `samples` (each with `generated`, `correct`, `finish_reason`,
+  `generated_tokens`, `sample_seed`, and `key`), `correct_samples`, and the
+  fraction as `correct`; `prediction` is the vote, or `None` without an
+  `answer_key`. A checker that names a `row` parameter receives a copy of the
+  row. A custom `answer_key`, like a custom checker, needs `checker_id` before
+  runs can be compared.
 - Batching multiplies eager attention memory, so settle `batch_size` on dev rows
   before a held-out run: an out-of-memory failure still uses up the reservation.
 - `diff(before, after)` and `compare_runs(before, after)` pair rows by position and
   need the same rows in the same order. `compare_runs` also checks row IDs and adds
-  McNemar p-values, bootstrap intervals, and the largest movers. For sampled runs
+  McNemar p-values, bootstrap intervals, and the largest movers. With several
+  samples per row it reports a paired permutation test (`permutation_p`) on the
+  per-row fractions instead of McNemar, flipping whole documents; it is exact
+  for up to 16 changed documents and estimated from `bootstrap_samples` random
+  flips beyond that. For sampled runs
   it also compares truncation share and mean generated length.
 - `evaluate_suite` and `compare_suites` gate a candidate on per-dataset accuracy and
   NLL tolerances. `create_screen` and `verify_screen` pin a stratified dev subset.

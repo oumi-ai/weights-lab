@@ -37,15 +37,26 @@ PROTOCOL_KEYS = (
     "checker_custom",
     "checker_id",
     "scoring_config",
+    "num_samples",
+    "answer_key_custom",
 )
+# Values that runs saved before a protocol key existed implicitly used.
+PROTOCOL_DEFAULTS = {"num_samples": 1, "answer_key_custom": False}
 # Runs saved before scoring configs were recorded scored one sequence per forward.
 LEGACY_SCORING_CONFIG = "legacy-v0.1"
+
+
+def _needs_checker_id(summary: dict) -> bool:
+    """Custom graders or vote extractors are code, so comparisons need a name for them."""
+    custom = summary.get("checker_custom") or summary.get("answer_key_custom")
+    return bool(custom) and not summary.get("checker_id")
 
 
 def _protocol_difference(left: dict, right: dict) -> str | None:
     """Name the first protocol setting two run summaries disagree on, or None."""
     for key in PROTOCOL_KEYS:
-        a, b = left.get(key), right.get(key)
+        a = left.get(key, PROTOCOL_DEFAULTS.get(key))
+        b = right.get(key, PROTOCOL_DEFAULTS.get(key))
         if key == "scoring_config":
             a, b = a or LEGACY_SCORING_CONFIG, b or LEGACY_SCORING_CONFIG
         if a != b:
@@ -97,11 +108,77 @@ def mcnemar(fixed: int, broken: int) -> float:
     return min(1.0, math.exp(log_mass + math.log(relative) + math.log(2)))
 
 
+def pass_at_k(samples: int, correct: int, k: int) -> float:
+    """Unbiased pass@k: the chance that k of the samples, drawn without replacement, hit one."""
+    if not 1 <= k <= samples or not 0 <= correct <= samples:
+        raise ValueError("pass@k needs 1 <= k <= samples and 0 <= correct <= samples")
+    if samples - correct < k:
+        return 1.0
+    return 1.0 - math.comb(samples - correct, k) / math.comb(samples, k)
+
+
+def majority(keys: list[Any]) -> tuple[Any, bool]:
+    """The most common key, or (None, True) when two or more keys tie for the most votes."""
+    counts: list[list[Any]] = []  # [key, votes]; keys may be unhashable.
+    for key in keys:
+        for entry in counts:
+            if entry[0] == key:
+                entry[1] += 1
+                break
+        else:
+            counts.append([key, 1])
+    top = max(votes for _, votes in counts)
+    leaders = [key for key, votes in counts if votes == top]
+    return (leaders[0], False) if len(leaders) == 1 else (None, True)
+
+
+EXACT_PERMUTATION_LIMIT = 16  # Up to 2**16 sign patterns are enumerated exactly.
+
+
+def _sign_flip_p(differences: list[float], samples: int, seed: int) -> float:
+    """Two-sided paired permutation p-value over sign flips of each unit's change.
+
+    Units are whole document clusters, so related rows flip together. With at most
+    EXACT_PERMUTATION_LIMIT nonzero changes every sign pattern is counted exactly;
+    beyond that ``samples`` seeded random patterns estimate the p-value.
+    """
+    observed = abs(sum(differences)) - 1e-12
+    nonzero = [d for d in differences if d]
+    if not nonzero:
+        return 1.0
+    if len(nonzero) <= EXACT_PERMUTATION_LIMIT:
+        extreme = sum(
+            abs(sum(d if pattern >> i & 1 else -d for i, d in enumerate(nonzero))) >= observed
+            for pattern in range(2 ** len(nonzero))
+        )
+        return extreme / 2 ** len(nonzero)
+    rng = random.Random(seed)
+    extreme = sum(
+        abs(sum(d if rng.random() < 0.5 else -d for d in nonzero)) >= observed
+        for _ in range(samples)
+    )
+    return (1 + extreme) / (1 + samples)
+
+
 def _observation(item: dict, mode: str) -> dict:
     failed = bool(item.get("error")) or "prediction" not in item
     result = {"correct": bool(item.get("correct")) and not failed, "failed": failed}
     if mode == "sampled":
-        if "finish_reason" in item:
+        samples = item.get("samples")
+        if samples:
+            # Several samples: the row scores the fraction of them that were correct.
+            result.update(
+                correct=0.0 if failed else float(item.get("correct") or 0),
+                fractional=True,
+            )
+            if all("finish_reason" in sample for sample in samples):
+                result.update(
+                    truncated=sum(s["finish_reason"] == "max_tokens" for s in samples)
+                    / len(samples),
+                    generated_tokens=sum(s.get("generated_tokens", 0) for s in samples)
+                    / len(samples),
+                )
+        elif "finish_reason" in item:
             result.update(
                 truncated=item["finish_reason"] == "max_tokens",
                 generated_tokens=int(item.get("generated_tokens", 0)),
@@ -141,7 +218,7 @@ def _value(row: dict, metric: str) -> float:
     if metric == "accuracy":
         return float(row["correct"])
     if metric == "truncation_share":
-        return float(bool(row.get("truncated")))
+        return float(row.get("truncated") or 0)  # A share of samples, or a single sample's flag.
     if metric == "mean_generated_tokens":
         return float(row.get("generated_tokens", 0))
     return float(row[metric])
@@ -190,14 +267,21 @@ def _percentile(values: list[float], q: float) -> float:
 
 
 def _paired_report(
-    pairs: list[tuple[dict, dict]], clusters: list[str], samples: int, seed: int
+    pairs: list[tuple[dict, dict]],
+    clusters: list[str],
+    samples: int,
+    seed: int,
+    fractional: bool | None = None,
 ) -> dict:
     left, right = [p[0] for p in pairs], [p[1] for p in pairs]
     # Decide from both sides: a run whose rows all failed records no finish reasons.
     measured = _has_lengths(left + right)
     before, after = _metrics(left, measured), _metrics(right, measured)
-    fixed = sum(not a["correct"] and b["correct"] for a, b in pairs)
-    broken = sum(a["correct"] and not b["correct"] for a, b in pairs)
+    # With several samples per row, a row is fixed or broken when its fraction moves.
+    if fractional is None:  # compare_runs passes it from the runs' num_samples.
+        fractional = any(r.get("fractional") for r in left + right)
+    fixed = sum(float(b["correct"]) > float(a["correct"]) for a, b in pairs)
+    broken = sum(float(a["correct"]) > float(b["correct"]) for a, b in pairs)
     lengths = LENGTH_METRICS if measured else ()
     changes = {
         key: after[key] - before[key]
@@ -238,7 +322,12 @@ def _paired_report(
         "delta": changes,
         "fixed": fixed,
         "broken": broken,
-        "mcnemar_p": mcnemar(fixed, broken),
+        # McNemar needs pass/fail rows; fractions use a paired sign-flip permutation test.
+        "mcnemar_p": None if fractional else mcnemar(fixed, broken),
+        # Flip whole documents, as the bootstrap resamples them.
+        "permutation_p": _sign_flip_p([totals[key]["accuracy"] for key in keys], samples, seed)
+        if fractional
+        else None,
         "bootstrap": {
             "seed": seed,
             "samples": samples,
@@ -307,8 +396,10 @@ class EvaluationMixin:
         difference = _protocol_difference(left, right)
         if difference:
             raise ValueError(f"diff requires the same scoring protocol/settings; {difference}")
-        if left.get("checker_custom") and not left.get("checker_id"):
-            raise ValueError("custom sampled checkers require explicit checker_id for comparison")
+        if _needs_checker_id(left):
+            raise ValueError(
+                "a custom sampled checker or answer_key requires an explicit checker_id to compare"
+            )
         comparable_left = [
             {key: value for key, value in task.items() if key != "id"} for task in left_tasks
         ]
@@ -327,7 +418,8 @@ class EvaluationMixin:
                 continue
             kind = "score_changed" if same_prediction else "changed"
             if old["correct"] != new["correct"]:
-                kind = "improved" if new["correct"] else "regressed"
+                # With several samples, correctness is a fraction; label by its direction.
+                kind = "improved" if new["correct"] > old["correct"] else "regressed"
             changes.append({"index": old["index"], "change": kind, "before": old, "after": new})
         return changes
 
@@ -364,8 +456,10 @@ class EvaluationMixin:
                 "comparison requires the same session, mode, and scoring protocol/settings; "
                 + difference
             )
-        if a.get("checker_custom") and not a.get("checker_id"):
-            raise ValueError("custom sampled checkers require explicit checker_id for comparison")
+        if _needs_checker_id(a):
+            raise ValueError(
+                "a custom sampled checker or answer_key requires an explicit checker_id to compare"
+            )
         if tasks_a != tasks_b:
             raise ValueError("comparison requires identical ordered tasks, IDs, and metadata")
         ids = [_digest(task["id"]) for task in tasks_a if "id" in task]
@@ -394,14 +488,20 @@ class EvaluationMixin:
             _digest(_field(task, cluster_by)) if cluster_by else str(i)
             for i, task in enumerate(tasks_a)
         ]
-        report = _paired_report(pairs, clusters, bootstrap_samples, seed)
+        # Decide from the runs, so a group whose rows all failed reports the same tests.
+        fractional = a.get("num_samples", 1) > 1
+        report = _paired_report(pairs, clusters, bootstrap_samples, seed, fractional)
         groups: dict[str, list[int]] = defaultdict(list)
         if group_by:
             for i, task in enumerate(tasks_a):
                 groups[_label(_field(task, group_by))].append(i)
         grouped = {
             key: _paired_report(
-                [pairs[i] for i in indices], [clusters[i] for i in indices], bootstrap_samples, seed
+                [pairs[i] for i in indices],
+                [clusters[i] for i in indices],
+                bootstrap_samples,
+                seed,
+                fractional,
             )
             for key, indices in sorted(groups.items())
         }
@@ -544,8 +644,11 @@ class EvaluationMixin:
                 max_loss = Fraction(repr(acc_tol))
                 for key, surface in surfaces.items():
                     delta = surface["delta"]
-                    lost = surface["before"]["correct"] - surface["after"]["correct"]
-                    verdicts[key] = Fraction(lost, surface["after"]["n"]) <= max_loss and (
+                    # Sums of per-row sample fractions are floats; recover their exact value.
+                    lost = Fraction(
+                        surface["before"]["correct"] - surface["after"]["correct"]
+                    ).limit_denominator(10**9)
+                    verdicts[key] = lost / surface["after"]["n"] <= max_loss and (
                         delta["nll"] is None or delta["nll"] <= nll_tol
                     )
                     passed = passed and verdicts[key]

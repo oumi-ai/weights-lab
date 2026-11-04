@@ -10,6 +10,7 @@ desired leading whitespace in the answer itself. Scores are sums, not averages.
 
 from __future__ import annotations
 
+import copy
 import functools
 import json
 import threading
@@ -21,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from .budget import PassBudget, sequences_in_call
-from .evaluation import EvaluationMixin
+from .evaluation import EvaluationMixin, majority, pass_at_k
 from .evaluation_data import _choices, _digest, _reserve, _safe_name, _tasks
 from .session import write_json
 
@@ -68,6 +69,110 @@ def _pack(rows: list[list[Any]], batch_size: int) -> Iterator[list[Any]]:
         batch.extend(row)
     if batch:
         yield batch
+
+
+def _pass_at_values(pass_at: Any, num_samples: int) -> list[int]:
+    """Validated, sorted pass@k values; each k must be between 1 and num_samples."""
+    if pass_at is None:
+        return []
+    values = [pass_at] if isinstance(pass_at, int) and not isinstance(pass_at, bool) else pass_at
+    if (
+        not isinstance(values, (list, tuple))
+        or not values
+        or any(
+            isinstance(k, bool) or not isinstance(k, int) or not 1 <= k <= num_samples
+            for k in values
+        )
+    ):
+        raise ValueError("pass_at values must be integers between 1 and num_samples")
+    return sorted(set(values))
+
+
+def _checker_call(checker: Any) -> Any:
+    """A grader taking (generated, answer, row); the row goes only to checkers that name it.
+
+    A checker receives a copy of the row only when its signature has a parameter
+    named ``row``. ``**kwargs`` alone does not count, so two-argument checkers that
+    forward keyword arguments keep working; everything else is called as
+    checker(generated, answer).
+    """
+    if checker is None:
+        return None
+    import inspect
+
+    try:
+        parameters = inspect.signature(checker).parameters
+    except (TypeError, ValueError):  # Some builtins and C callables have no signature.
+        parameters = {}
+    row = parameters.get("row")
+    if row is None or row.kind in (row.VAR_POSITIONAL, row.VAR_KEYWORD):
+        return lambda generated, answer, task: checker(generated, answer)
+    if row.kind is row.POSITIONAL_ONLY:
+        return lambda generated, answer, task: checker(generated, answer, copy.deepcopy(task))
+    return lambda generated, answer, task: checker(generated, answer, row=copy.deepcopy(task))
+
+
+def _graded(
+    samples: list[dict[str, Any]],
+    task: dict[str, Any],
+    grade: Any,
+    answer_key: Any,
+    pass_ks: list[int],
+) -> dict[str, Any]:
+    """Item fields for one row's samples: correctness, and optional pass@k and vote."""
+    graded = []
+    for sample in samples:
+        generated = sample["generated"]
+        correct = (
+            grade(generated, task["answer"], task)
+            if grade is not None
+            else generated.strip() == str(task["answer"]).strip()
+        )
+        entry = {**sample, "correct": bool(correct)}
+        if answer_key is not None:
+            entry["key"] = answer_key(generated, copy.deepcopy(task))
+            try:
+                json.dumps(entry["key"], allow_nan=False)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f"answer_key must return JSON values; got {entry['key']!r}"
+                ) from error
+        graded.append(entry)
+    count = sum(entry["correct"] for entry in graded)
+    if len(graded) == 1:
+        (only,) = graded
+        fields = {
+            "generated": only["generated"],
+            "prediction": only["generated"],
+            "correct": only["correct"],
+            "finish_reason": only["finish_reason"],
+            "generated_tokens": only["generated_tokens"],
+            "sample_seed": only["sample_seed"],
+        }
+    else:
+        fields = {
+            "samples": graded,
+            "prediction": None,
+            "correct": count / len(graded),
+            "correct_samples": count,
+        }
+    if pass_ks:
+        fields["pass_at"] = {str(k): pass_at_k(len(graded), count, k) for k in pass_ks}
+    if answer_key is not None:
+        # A key of None means the extractor found no answer: that sample abstains.
+        keys = [entry["key"] for entry in graded if entry["key"] is not None]
+        vote, tie = majority(keys) if keys else (None, False)
+        fields.update(
+            vote=vote,
+            vote_tie=tie,
+            # A tie names no answer, so it is never correct.
+            vote_correct=vote is not None
+            and not tie
+            and any(entry["correct"] for entry in graded if entry["key"] == vote),
+        )
+        if len(graded) > 1:
+            fields["prediction"] = vote
+    return fields
 
 
 def _padding_sensitive(config: Any) -> list[str]:
@@ -491,17 +596,26 @@ class ScoringMixin(EvaluationMixin):
         generation_config: dict[str, Any],
         seed: int,
         batch_size: int,
-    ) -> Iterator[tuple[int, dict[str, Any]]]:
-        """Yield each row's generation in row order, generating up to batch_size rows at once.
+        num_samples: int = 1,
+    ) -> Iterator[tuple[int, list[dict[str, Any]]]]:
+        """Yield each row's samples in row order, generating up to batch_size sequences at once.
 
-        Row ``i`` is seeded with ``seed + i`` whatever batch it lands in.
+        Sample ``j`` of row ``i`` is seeded with ``seed + i * num_samples + j``
+        whatever batch it lands in.
         """
         prompts = [self._prompt_ids(self._scoring_prompt(task["prompt"])) for task in tasks]
-        for start in range(0, len(prompts), batch_size):
-            batch = prompts[start : start + batch_size]
-            seeds = [seed + index for index in range(start, start + len(batch))]
-            for offset, result in enumerate(self._sample_batch(batch, generation_config, seeds)):
-                yield start + offset, result
+        order = [(row, sample) for row in range(len(prompts)) for sample in range(num_samples)]
+        pending: dict[int, list[dict[str, Any]]] = {}
+        for start in range(0, len(order), batch_size):
+            chunk = order[start : start + batch_size]
+            seeds = [seed + row * num_samples + sample for row, sample in chunk]
+            results = self._sample_batch(
+                [prompts[row] for row, _ in chunk], generation_config, seeds
+            )
+            for (row, _), result in zip(chunk, results, strict=True):
+                pending.setdefault(row, []).append(result)
+                if len(pending[row]) == num_samples:
+                    yield row, pending.pop(row)
 
     def _sample_batch(
         self, prompts: list[list[int]], generation_config: dict[str, Any], seeds: list[int]
@@ -606,15 +720,25 @@ class ScoringMixin(EvaluationMixin):
         generation_config: dict[str, Any] | None = None,
         seed: int = 0,
         batch_size: int | None = None,
+        num_samples: int = 1,
+        pass_at: int | list[int] | None = None,
+        answer_key: Any = None,
     ) -> dict[str, Any]:
         """Save per-item results and a summary; failures are saved and then re-raised.
+
+        In sampled mode, ``num_samples`` draws that many seeded samples per row
+        (with ``do_sample=True``): each row scores the fraction of samples correct,
+        and accuracy is the mean fraction. ``pass_at`` adds unbiased pass@k.
+        ``answer_key(generated, row)`` extracts the value each sample votes for; a
+        tie for the most votes counts as incorrect.
 
         Modes are likelihood, yes_no, and sampled. Each runs up to ``batch_size``
         sequences per forward (default 8), dropping to 1 for models without position
         ids and for padding-sensitive generation settings. Runs pair only when their
         recorded scoring_config matches.
-        The sampled checker receives
-        (generated_text, expected_answer); exact stripped equality is the default.
+        The sampled checker receives (generated_text, expected_answer), plus a copy
+        of the row when it names a ``row`` parameter; exact stripped equality is
+        the default.
         A held-out dataset requires an explicit max_passes and can be used only
         once, even after edits or a failed evaluation. Dev datasets cannot later
         become held-out datasets, and held-out datasets cannot become dev data.
@@ -624,8 +748,18 @@ class ScoringMixin(EvaluationMixin):
         if held_out and max_passes is None:
             raise ValueError("held-out evaluation requires explicit max_passes")
         PassBudget(max_passes)
+        if isinstance(num_samples, bool) or not isinstance(num_samples, int) or num_samples < 1:
+            raise ValueError("num_samples must be a positive integer")
+        if mode != "sampled" and (
+            num_samples != 1 or pass_at is not None or answer_key is not None
+        ):
+            raise ValueError("num_samples, pass_at, and answer_key apply only to sampled mode")
+        if answer_key is not None and not callable(answer_key):
+            raise ValueError("answer_key must be callable")
+        pass_ks = _pass_at_values(pass_at, num_samples)
         if checker is not None and not callable(checker):
             raise ValueError("checker must be callable")
+        grade = _checker_call(checker)
         if checker_id is not None and (not isinstance(checker_id, str) or not checker_id):
             raise ValueError("checker_id must be a nonempty string")
         if isinstance(seed, bool) or not isinstance(seed, int):
@@ -650,6 +784,10 @@ class ScoringMixin(EvaluationMixin):
                     "forward, so sampled evaluation cannot charge it per generated token"
                 )
             unbatchable = _padding_sensitive(decoder)
+            if num_samples > 1 and not generation_config.get("do_sample"):
+                raise ValueError(
+                    "num_samples>1 needs do_sample=True; greedy samples would all be the same"
+                )
         if batch_size is None:
             batch_size = 1 if unbatchable else self._default_batch_size()
         _check_batch_size(batch_size)
@@ -697,6 +835,8 @@ class ScoringMixin(EvaluationMixin):
                 "held_out": held_out,
                 "mode": mode,
                 "checker_custom": checker is not None,
+                "num_samples": num_samples,
+                "answer_key_custom": answer_key is not None,
                 "checker_id": checker_id,
                 "seed": seed,
                 "generation_config": generation_config or {},
@@ -709,11 +849,14 @@ class ScoringMixin(EvaluationMixin):
                 "correct": 0,
                 "accuracy": None,
                 "forward_passes": 0,
+                # Metrics set only on success start as unknown, so a failed run says so.
                 **(
                     {"truncation_share": None, "mean_generated_tokens": None}
                     if mode == "sampled"
                     else {}
                 ),
+                **({"pass_at": None} if pass_ks else {}),
+                **({"vote_accuracy": None} if answer_key is not None else {}),
             }
             write_json(run_dir / "summary.json", summary)
             try:
@@ -725,33 +868,24 @@ class ScoringMixin(EvaluationMixin):
                     nullcontext() if mode == "sampled" else self._evaluation_mode(),
                 ):
                     rows = (
-                        self._sample_rows(tasks, generation_config, seed, batch_size)
+                        self._sample_rows(tasks, generation_config, seed, batch_size, num_samples)
                         if mode == "sampled"
                         else self._score_rows(tasks, batch_size)
                     )
-                    truncated = generated_tokens = 0
+                    truncated = generated_tokens = votes = 0
+                    pass_totals = dict.fromkeys(pass_ks, 0.0)
                     for index, task in enumerate(tasks):
                         item = {"index": index, **task}
                         row, result = next(rows)
                         if row != index:
                             raise AssertionError("rows were scored out of order")
                         if mode == "sampled":
-                            generated = result["generated"]
-                            correct = (
-                                checker(generated, task["answer"])
-                                if checker is not None
-                                else generated.strip() == str(task["answer"]).strip()
-                            )
-                            item.update(
-                                generated=generated,
-                                prediction=generated,
-                                correct=bool(correct),
-                                finish_reason=result["finish_reason"],
-                                generated_tokens=result["generated_tokens"],
-                                sample_seed=result["sample_seed"],
-                            )
-                            truncated += result["finish_reason"] == "max_tokens"
-                            generated_tokens += result["generated_tokens"]
+                            item.update(_graded(result, task, grade, answer_key, pass_ks))
+                            truncated += sum(s["finish_reason"] == "max_tokens" for s in result)
+                            generated_tokens += sum(s["generated_tokens"] for s in result)
+                            votes += bool(item.get("vote_correct"))
+                            for k in pass_ks:
+                                pass_totals[k] += item["pass_at"][str(k)]
                         else:
                             scores = result
                             best = max(scores.values())
@@ -769,13 +903,20 @@ class ScoringMixin(EvaluationMixin):
                         stream.flush()
                         write_json(run_dir / "items" / f"{index:06d}.json", item)
                         summary["completed"] += 1
-                        summary["correct"] += int(item["correct"])
+                        summary["correct"] += item["correct"]  # A fraction with several samples.
                 summary.update(state="succeeded", accuracy=summary["correct"] / len(tasks))
                 if mode == "sampled":
+                    drawn = len(tasks) * num_samples
                     summary.update(
-                        truncation_share=truncated / len(tasks),
-                        mean_generated_tokens=generated_tokens / len(tasks),
+                        truncation_share=truncated / drawn,
+                        mean_generated_tokens=generated_tokens / drawn,
                     )
+                    if pass_ks:
+                        summary["pass_at"] = {
+                            str(k): total / len(tasks) for k, total in pass_totals.items()
+                        }
+                    if answer_key is not None:
+                        summary["vote_accuracy"] = votes / len(tasks)
             except BaseException as error:
                 summary.update(state="failed", error=f"{type(error).__name__}: {error}")
                 raise
