@@ -17,9 +17,8 @@ class Lab(EditingMixin, ScoringMixin, InspectionMixin, AttachmentMixin, Persiste
 
     Forward passes count sequences run through the base language model, including
     generation steps. A batched call counts once per sequence; a call that fails
-    also counts. Snippets
-    retain control of gradient tracking and should use ``torch.no_grad()`` for
-    inference when they do not need gradients.
+    also counts. Snippets retain control of gradient tracking and should use
+    ``torch.no_grad()`` for inference when they do not need gradients.
     """
 
     def __init__(
@@ -64,8 +63,7 @@ class Lab(EditingMixin, ScoringMixin, InspectionMixin, AttachmentMixin, Persiste
 
     @property
     def forward_passes(self) -> int:
-        """Number of sequences run through the base model since loading, counting each
-        generation step."""
+        """Sequences run through the base model since loading, including generation steps."""
         return self._forward_passes
 
 
