@@ -101,6 +101,11 @@ def _observation(item: dict, mode: str) -> dict:
     failed = bool(item.get("error")) or "prediction" not in item
     result = {"correct": bool(item.get("correct")) and not failed, "failed": failed}
     if mode == "sampled":
+        if "finish_reason" in item:
+            result.update(
+                truncated=item["finish_reason"] == "max_tokens",
+                generated_tokens=int(item.get("generated_tokens", 0)),
+            )
         return result
     scores = item.get("scores")
     if failed or not scores:
@@ -131,7 +136,26 @@ def _observation(item: dict, mode: str) -> dict:
     }
 
 
-def _metrics(rows: list[dict]) -> dict:
+def _value(row: dict, metric: str) -> float:
+    """One row's contribution to a run-level metric."""
+    if metric == "accuracy":
+        return float(row["correct"])
+    if metric == "truncation_share":
+        return float(bool(row.get("truncated")))
+    if metric == "mean_generated_tokens":
+        return float(row.get("generated_tokens", 0))
+    return float(row[metric])
+
+
+LENGTH_METRICS = ("truncation_share", "mean_generated_tokens")
+
+
+def _has_lengths(rows: list[dict]) -> bool:
+    """Whether rows come from a sampled run that recorded why each generation stopped."""
+    return any("truncated" in r for r in rows)
+
+
+def _metrics(rows: list[dict], lengths: bool | None = None) -> dict:
     n = len(rows)
     out = {
         "n": n,
@@ -139,6 +163,10 @@ def _metrics(rows: list[dict]) -> dict:
         "failures": sum(r["failed"] for r in rows),
     }
     out["accuracy"] = out["correct"] / n
+    if _has_lengths(rows) if lengths is None else lengths:
+        # A failed row has no generation to measure, so lengths are unknown, not zero.
+        known = not out["failures"]
+        out.update({metric: _mean(rows, metric) if known else None for metric in LENGTH_METRICS})
     out.update(nll=None, brier=None, ece=None)
     if "nll" in rows[0]:
         out.update({key: sum(r[key] for r in rows) / n for key in ("nll", "brier")})
@@ -151,6 +179,10 @@ def _metrics(rows: list[dict]) -> dict:
     return out
 
 
+def _mean(rows: list[dict], metric: str) -> float:
+    return sum(_value(r, metric) for r in rows) / len(rows)
+
+
 def _percentile(values: list[float], q: float) -> float:
     at = (len(values) - 1) * q
     lower = int(at)
@@ -161,13 +193,20 @@ def _paired_report(
     pairs: list[tuple[dict, dict]], clusters: list[str], samples: int, seed: int
 ) -> dict:
     left, right = [p[0] for p in pairs], [p[1] for p in pairs]
-    before, after = _metrics(left), _metrics(right)
+    # Decide from both sides: a run whose rows all failed records no finish reasons.
+    measured = _has_lengths(left + right)
+    before, after = _metrics(left, measured), _metrics(right, measured)
     fixed = sum(not a["correct"] and b["correct"] for a, b in pairs)
     broken = sum(a["correct"] and not b["correct"] for a, b in pairs)
+    lengths = LENGTH_METRICS if measured else ()
     changes = {
-        key: after[key] - before[key] if before[key] is not None else None
-        for key in ("accuracy", "nll", "brier", "ece")
+        key: after[key] - before[key]
+        if before[key] is not None and after[key] is not None
+        else None
+        for key in ("accuracy", "nll", "brier", "ece", *lengths)
     }
+    # Intervals need a length for every row on both sides.
+    lengths = lengths if all(change is not None for change in map(changes.get, lengths)) else ()
     groups: dict[str, list[int]] = defaultdict(list)
     for i, cluster in enumerate(clusters):
         groups[cluster].append(i)
@@ -175,14 +214,11 @@ def _paired_report(
     draws: dict[str, list[float]] = {"accuracy": []}
     if "nll" in left[0]:
         draws["nll"] = []
+    draws.update({metric: [] for metric in lengths})
     # Resample whole documents; related rows always travel together.
     totals = {
         key: {
-            metric: sum(
-                float(right[i]["correct"] if metric == "accuracy" else right[i][metric])
-                - float(left[i]["correct"] if metric == "accuracy" else left[i][metric])
-                for i in groups[key]
-            )
+            metric: sum(_value(right[i], metric) - _value(left[i], metric) for i in groups[key])
             for metric in draws
         }
         for key in keys

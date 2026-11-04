@@ -20,7 +20,19 @@ from .session import read_json, session_lock, write_json
 
 MODES = ("likelihood", "yes_no", "sampled")
 RESULT_KEYS = frozenset(
-    {"index", "prediction", "scores", "correct", "tie", "generated", "error", "option_tokens"}
+    {
+        "index",
+        "prediction",
+        "scores",
+        "correct",
+        "tie",
+        "generated",
+        "error",
+        "option_tokens",
+        "finish_reason",
+        "generated_tokens",
+        "sample_seed",
+    }
 )
 
 

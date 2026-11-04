@@ -70,6 +70,51 @@ def _pack(rows: list[list[Any]], batch_size: int) -> Iterator[list[Any]]:
         yield batch
 
 
+def _padding_sensitive(config: Any) -> list[str]:
+    """Effective generation settings whose meaning batching or left padding would change.
+
+    Penalties that read the whole sequence would count the padding, and the pad
+    token is often EOS.
+    """
+
+    def value(key: str) -> Any:
+        return getattr(config, key, None)
+
+    keys = ["num_beams"] if (value("num_beams") or 1) > 1 else []
+    keys += [
+        key
+        for key in ("max_time", "prefill_chunk_size", "watermarking_config")
+        if value(key) is not None
+    ]
+    if (value("min_length") or 0) > 0:
+        keys.append("min_length")
+    if value("repetition_penalty") not in (None, 1.0):
+        keys.append("repetition_penalty")
+    if (value("no_repeat_ngram_size") or 0) > 0:
+        keys.append("no_repeat_ngram_size")
+    if value("max_length") is not None and value("max_new_tokens") is None:
+        keys.append("max_length")
+    return keys
+
+
+def _assisted(config: Any) -> list[str]:
+    """Assisted-generation settings, whose verification forwards cover several tokens each."""
+    keys = ("prompt_lookup_num_tokens", "assistant_early_exit", "use_mtp")
+    return [key for key in keys if getattr(config, key, None) not in (None, False)]
+
+
+def _sampler_name(config: Any) -> str:
+    """Which decoder generate() runs for this effective config."""
+    if (getattr(config, "num_beams", None) or 1) > 1:
+        return "hf-beam-v0.1"
+    if not getattr(config, "do_sample", False):
+        return "greedy-v1"
+    if getattr(config, "watermarking_config", None) is not None:
+        # The watermark biases generate()'s own distribution, after custom processors.
+        return "hf-sample-v0.1"
+    return "per-sequence-uniform-v1"
+
+
 def _summed(logits: Any, answer_ids: list[int]) -> float:
     """Sum the answer tokens' log probabilities from the logits that predict them."""
     import torch
@@ -154,12 +199,27 @@ class ScoringMixin(EvaluationMixin):
     def _count_forward(self, module: Any, args: tuple, kwargs: dict) -> None:
         """Forward pre-hook: charge one pass per sequence before the model runs.
 
-        Inside beam search, a prompt's beams count as one sequence.
+        Inside beam search, a prompt's beams count as one sequence. Inside
+        ``_metered``, the meter decides the cost instead, such as batched
+        generation charging only its unfinished rows.
         """
-        beams = getattr(self, "_beam_width", 1)
-        count = -(-sequences_in_call(args, kwargs) // beams)
+        meter = getattr(self, "_meter", None)
+        if meter is not None:
+            count = meter()
+        else:
+            count = -(-sequences_in_call(args, kwargs) // getattr(self, "_beam_width", 1))
         self._before_forward(count)
         self._forward_passes += count
+
+    @contextmanager
+    def _metered(self, cost: Any):
+        """While active, charge each base-model call ``cost()`` passes instead of its batch size."""
+        previous = getattr(self, "_meter", None)
+        self._meter = cost
+        try:
+            yield
+        finally:
+            self._meter = previous
 
     def _count_beams_once(self, model: Any) -> None:
         """Wrap ``model.generate`` so the counter divides beam-search batches by the beam width."""
@@ -299,10 +359,14 @@ class ScoringMixin(EvaluationMixin):
                 f"an active record or patch uses token positions that left padding shifts; {same}"
             )
 
-    def _scoring_config(self, mode: str, batch_size: int) -> dict[str, Any]:
+    def _scoring_config(self, mode: str, batch_size: int, decoder: Any = None) -> dict[str, Any]:
         """Describe how a run scores, so only runs scored the same way pair."""
         if mode == "sampled":
-            return {"sampler": "hf-generate-v0.1", "batch_size": 1}
+            return {
+                "sampler": _sampler_name(decoder),
+                "batch_size": batch_size,
+                "padding_side": "left" if batch_size > 1 else "none",
+            }
         from .inspection import _accepts
 
         model = getattr(self, "model", None)
@@ -421,12 +485,80 @@ class ScoringMixin(EvaluationMixin):
             cache[prompt] = text
         return text
 
-    def _sample(self, prompt: str, generation_config: dict[str, Any], seed: int) -> str:
-        import torch
+    def _sample_rows(
+        self,
+        tasks: list[dict[str, Any]],
+        generation_config: dict[str, Any],
+        seed: int,
+        batch_size: int,
+    ) -> Iterator[tuple[int, dict[str, Any]]]:
+        """Yield each row's generation in row order, generating up to batch_size rows at once.
 
-        ids = torch.tensor(
-            [self._prompt_ids(self._scoring_prompt(prompt))], device=self.model.device
+        Row ``i`` is seeded with ``seed + i`` whatever batch it lands in.
+        """
+        prompts = [self._prompt_ids(self._scoring_prompt(task["prompt"])) for task in tasks]
+        for start in range(0, len(prompts), batch_size):
+            batch = prompts[start : start + batch_size]
+            seeds = [seed + index for index in range(start, start + len(batch))]
+            for offset, result in enumerate(self._sample_batch(batch, generation_config, seeds)):
+                yield start + offset, result
+
+    def _sample_batch(
+        self, prompts: list[list[int]], generation_config: dict[str, Any], seeds: list[int]
+    ) -> list[dict[str, Any]]:
+        """Generate for left-padded prompts; record each row's text, finish reason, and length.
+
+        Each step charges one pass per unfinished row. Sampling draws each row from
+        its own seeded generator, so a row's text does not depend on its batch. Beam
+        search keeps generate()'s own sampling and runs one row at a time.
+        """
+        import torch
+        from transformers import LogitsProcessorList, StoppingCriteriaList
+
+        from .sampling import (
+            FinishTracker,
+            PerSequenceSampler,
+            effective_config,
+            neutral_sampling_settings,
+            warpers,
         )
+
+        length = max(len(ids) for ids in prompts)
+        # A negative hook position past a short prompt would select left padding.
+        if any(-index > min(map(len, prompts)) for index in self._hook_positions() if index < 0):
+            raise ValueError("token position is outside the module output")
+        pad = _pad_token(self.tokenizer)
+        device = self.model.device
+        ids = torch.tensor([[pad] * (length - len(row)) + row for row in prompts], device=device)
+        mask = torch.tensor(
+            [[0] * (length - len(row)) + [1] * len(row) for row in prompts], device=device
+        )
+        settings = dict(generation_config)
+        # What generate() will run, including the model's own generation defaults.
+        config, _ = effective_config(self.model, settings)
+        sampler = _sampler_name(config)
+        beams = sampler == "hf-beam-v0.1"
+        tracker = FinishTracker(
+            len(prompts),
+            length,
+            eos_token_id=config.eos_token_id,
+            stop_strings=config.stop_strings,
+            tokenizer=self.tokenizer,
+        )
+        # generate() needs the tokenizer to match stop strings.
+        extra: dict[str, Any] = (
+            {"tokenizer": self.tokenizer} if settings.get("stop_strings") else {}
+        )
+        if settings.get("pad_token_id") is None:
+            extra["pad_token_id"] = pad
+        if not beams:
+            extra["stopping_criteria"] = StoppingCriteriaList([tracker])
+        if sampler == "per-sequence-uniform-v1":
+            extra["logits_processor"] = LogitsProcessorList(
+                [PerSequenceSampler(seeds, warpers(config))]
+            )
+            # The sampler draws; generate() then takes its one-hot greedily.
+            settings.update(neutral_sampling_settings(), do_sample=False)
         devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
         # manual_seed also changes MPS state when the model runs on CPU.
         mps_state = torch.mps.get_rng_state() if torch.backends.mps.is_available() else None
@@ -434,23 +566,32 @@ class ScoringMixin(EvaluationMixin):
             with (
                 torch.random.fork_rng(devices=devices, device_type="cuda"),
                 self._evaluation_mode(),
+                nullcontext() if beams else self._metered(lambda: tracker.unfinished),
             ):
-                torch.manual_seed(seed)
-                # generate() needs the tokenizer to match stop strings.
-                extra = (
-                    {"tokenizer": self.tokenizer} if generation_config.get("stop_strings") else {}
-                )
+                torch.manual_seed(seeds[0])
                 generated = self.model.generate(
-                    input_ids=ids,
-                    attention_mask=torch.ones_like(ids),
-                    **generation_config,
-                    **extra,
+                    input_ids=ids, attention_mask=mask, **settings, **extra
                 )
         finally:
             if mps_state is not None:
                 torch.mps.set_rng_state(mps_state)
         sequences = generated.sequences if hasattr(generated, "sequences") else generated
-        return self.tokenizer.decode(sequences[0, ids.shape[1] :], skip_special_tokens=True)
+        steps = sequences.shape[1] - length
+        if beams:
+            # generate() returns only the winning beam; replay its steps to find why it ended.
+            for step in range(1, steps + 1):
+                tracker(sequences[:, : length + step], None)
+        return [
+            {
+                "generated": self.tokenizer.decode(
+                    sequences[row, length : length + count], skip_special_tokens=True
+                ),
+                "finish_reason": reason,
+                "generated_tokens": count,
+                "sample_seed": seeds[row],
+            }
+            for row, (count, reason) in enumerate(tracker.results(steps))
+        ]
 
     def evaluate(
         self,
@@ -468,9 +609,10 @@ class ScoringMixin(EvaluationMixin):
     ) -> dict[str, Any]:
         """Save per-item results and a summary; failures are saved and then re-raised.
 
-        Modes are likelihood, yes_no, and sampled. Likelihood modes score up to
-        ``batch_size`` sequences per forward (default 8); sampled mode runs one row
-        at a time. Runs pair only when their recorded scoring_config matches.
+        Modes are likelihood, yes_no, and sampled. Each runs up to ``batch_size``
+        sequences per forward (default 8), dropping to 1 for models without position
+        ids and for padding-sensitive generation settings. Runs pair only when their
+        recorded scoring_config matches.
         The sampled checker receives
         (generated_text, expected_answer); exact stripped equality is the default.
         A held-out dataset requires an explicit max_passes and can be used only
@@ -491,18 +633,32 @@ class ScoringMixin(EvaluationMixin):
         if generation_config is not None and not isinstance(generation_config, dict):
             raise ValueError("generation_config must be a dictionary")
         json.dumps(generation_config or {}, allow_nan=False)
-        if mode == "sampled":
-            if batch_size not in (None, 1):
-                raise ValueError("sampled mode scores one row at a time; use batch_size=1")
-            batch_size = 1
-        elif batch_size is None:
-            batch_size = self._default_batch_size()
-        _check_batch_size(batch_size)
-        self._check_batching(batch_size)
         tasks, identities = _tasks(data, mode)
+        unbatchable: list[str] = []
+        decoder = None
         if mode == "sampled":
+            from .sampling import effective_config
+
             generate = getattr(getattr(self, "model", None), "generate", None)
             generation_config = _generation_kwargs(generation_config, generate)
+            # Decide batching from what generate() will run, model defaults included.
+            decoder, _ = effective_config(getattr(self, "model", None), generation_config)
+            assisted = _assisted(decoder)
+            if assisted:
+                raise ValueError(
+                    f"assisted generation ({', '.join(assisted)}) verifies several tokens per "
+                    "forward, so sampled evaluation cannot charge it per generated token"
+                )
+            unbatchable = _padding_sensitive(decoder)
+        if batch_size is None:
+            batch_size = 1 if unbatchable else self._default_batch_size()
+        _check_batch_size(batch_size)
+        if batch_size > 1 and unbatchable:
+            raise ValueError(
+                f"batched generation would change what {', '.join(unbatchable)} means; "
+                "use batch_size=1"
+            )
+        self._check_batching(batch_size)
         name = _safe_name(name or f"run-{uuid.uuid4().hex[:12]}")
         with self._prompts_prepared_once():
             self._check_inputs(tasks, mode, generation_config or {})
@@ -544,7 +700,7 @@ class ScoringMixin(EvaluationMixin):
                 "checker_id": checker_id,
                 "seed": seed,
                 "generation_config": generation_config or {},
-                "scoring_config": self._scoring_config(mode, batch_size),
+                "scoring_config": self._scoring_config(mode, batch_size, decoder),
                 "tokenizer_policy": "separate_prompt_continuation_no_special_tokens_sum",
                 "max_passes": max_passes,
                 "started_at": started,
@@ -553,6 +709,11 @@ class ScoringMixin(EvaluationMixin):
                 "correct": 0,
                 "accuracy": None,
                 "forward_passes": 0,
+                **(
+                    {"truncation_share": None, "mean_generated_tokens": None}
+                    if mode == "sampled"
+                    else {}
+                ),
             }
             write_json(run_dir / "summary.json", summary)
             try:
@@ -563,25 +724,36 @@ class ScoringMixin(EvaluationMixin):
                     (run_dir / "items.jsonl").open("x", encoding="utf-8") as stream,
                     nullcontext() if mode == "sampled" else self._evaluation_mode(),
                 ):
-                    scored = None if mode == "sampled" else self._score_rows(tasks, batch_size)
+                    rows = (
+                        self._sample_rows(tasks, generation_config, seed, batch_size)
+                        if mode == "sampled"
+                        else self._score_rows(tasks, batch_size)
+                    )
+                    truncated = generated_tokens = 0
                     for index, task in enumerate(tasks):
                         item = {"index": index, **task}
+                        row, result = next(rows)
+                        if row != index:
+                            raise AssertionError("rows were scored out of order")
                         if mode == "sampled":
-                            generated = self._sample(
-                                task["prompt"], generation_config, seed + index
-                            )
+                            generated = result["generated"]
                             correct = (
                                 checker(generated, task["answer"])
                                 if checker is not None
                                 else generated.strip() == str(task["answer"]).strip()
                             )
                             item.update(
-                                generated=generated, prediction=generated, correct=bool(correct)
+                                generated=generated,
+                                prediction=generated,
+                                correct=bool(correct),
+                                finish_reason=result["finish_reason"],
+                                generated_tokens=result["generated_tokens"],
+                                sample_seed=result["sample_seed"],
                             )
+                            truncated += result["finish_reason"] == "max_tokens"
+                            generated_tokens += result["generated_tokens"]
                         else:
-                            row, scores = next(scored)
-                            if row != index:
-                                raise AssertionError("rows were scored out of order")
+                            scores = result
                             best = max(scores.values())
                             leaders = [label for label, value in scores.items() if value == best]
                             # An exact tie names no prediction, so it is never correct.
@@ -599,6 +771,11 @@ class ScoringMixin(EvaluationMixin):
                         summary["completed"] += 1
                         summary["correct"] += int(item["correct"])
                 summary.update(state="succeeded", accuracy=summary["correct"] / len(tasks))
+                if mode == "sampled":
+                    summary.update(
+                        truncation_share=truncated / len(tasks),
+                        mean_generated_tokens=generated_tokens / len(tasks),
+                    )
             except BaseException as error:
                 summary.update(state="failed", error=f"{type(error).__name__}: {error}")
                 raise

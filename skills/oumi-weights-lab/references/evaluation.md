@@ -24,7 +24,9 @@ ordered tasks, IDs, metadata, session, mode, seed, scoring policy, scoring
 config (including `batch_size`), and generation settings. Explicit IDs must be unique and complete. Custom sampled
 checkers require a matching explicit `checker_id` for comparison.
 
-Inspect accuracy **and** candidate-set NLL/Brier/ECE overall and per source.
+Inspect accuracy **and** candidate-set NLL/Brier/ECE overall and per source. For
+sampled runs, also inspect `truncation_share` and `mean_generated_tokens`: an edit
+that stops answers running to the token limit can matter as much as accuracy.
 Probabilities are softmax over supplied continuation log scores, not calibrated
 open-answer confidence. `fixed`, `broken`, and exact McNemar describe paired flips.
 Bootstrap intervals use source documents (`document_id`, `source_doc`, or
