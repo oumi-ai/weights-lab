@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from .inspection import _remove_forward_hook
+from .inspection import _TemporaryHook
 
 
 class Attachment:
@@ -86,8 +86,8 @@ class AttachmentMixin:
                     return result
                 return (updated, *output[1:])
 
-            def remove():
-                _remove_forward_hook(target, apply)
+            hook = _TemporaryHook(target, apply)
+            remove = hook.remove
         else:
 
             def remove():
@@ -98,7 +98,7 @@ class AttachmentMixin:
         # Worker timeouts raise BaseException anywhere; never leave a hidden hook.
         try:
             if mode == "logits":
-                target.register_forward_hook(apply, with_kwargs=True)
+                hook.register(with_kwargs=True)
             self._attachments.append(handle)
             self._attachment_revision += 1
         except BaseException:

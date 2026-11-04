@@ -70,3 +70,23 @@ def test_logit_attachment_rejects_model_computed_loss(tiny_lab, return_dict):
             lab.model(**inputs, labels=inputs["input_ids"], return_dict=return_dict)
         # Without labels the attached logits are available for an explicit loss.
         lab.model(**inputs, labels=None, return_dict=return_dict)
+
+
+def test_prefix_attachment_runs_once_per_prompt_in_an_evaluation(tiny_lab):
+    lab = tiny_lab
+    calls = []
+
+    def counted(prompt):
+        calls.append(prompt)
+        return "world " + prompt
+
+    rows = [
+        {"prompt": "hello", "options": [" yes", " no"], "answer": 0},
+        {"prompt": "world", "options": [" yes", " no"], "answer": 1},
+    ]
+    with lab.attach(counted, mode="prefix"):
+        lab.evaluate(rows, name="prefixed")
+        # The input check prepared each prompt; scoring reused it.
+        assert calls == ["hello", "world"]
+        lab.score("hello", [" yes", " no"])
+    assert calls == ["hello", "world", "hello"]

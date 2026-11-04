@@ -473,6 +473,5 @@ class SkyPilotLauncher:
         )
 
     def teardown(self):
-        return _checked(
-            self.runner, ["sky", "down", "-y", self.cluster], text=True, capture_output=True
-        )
+        """Destroy the cluster; like run() and stop(), output is returned as raw bytes."""
+        return _checked(self.runner, ["sky", "down", "-y", self.cluster], capture_output=True)

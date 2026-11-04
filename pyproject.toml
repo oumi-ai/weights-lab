@@ -50,7 +50,6 @@ include = [
     "plugin.json",
     "docs/api.md",
     "docs/remote.md",
-    "docs/skill-install.md",
     "CONTRIBUTING.md",
     "README.md",
     "LICENSE",

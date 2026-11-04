@@ -453,7 +453,7 @@ def test_identity_normalizes_unicode_and_surrounding_whitespace(lab):
     lab.evaluate([{**nfc[0], "prompt": "Café capital is"}], held_out=True, max_passes=2)
     renamed = unicodedata.normalize("NFD", "Café capital is")
     with pytest.raises(ValueError, match="reserved"):
-        lab.evaluate([{**nfd[0], "prompt": renamed, "options": [" c", " d"]}])
+        lab.evaluate([{**nfd[0], "prompt": renamed}])
 
 
 @pytest.mark.parametrize("held_mode", ["likelihood", "sampled"])
@@ -473,6 +473,18 @@ def test_prompt_cannot_cross_between_dev_and_held_out_in_any_mode(lab, held_mode
     lab.evaluate(data[first["mode"]], **first)
     with pytest.raises(ValueError, match="reserved"):
         lab.evaluate(data[second["mode"]], **second)
+
+
+@pytest.mark.parametrize("held_first", [True, False])
+def test_scored_rows_may_share_a_generic_prompt_across_roles(lab, held_first):
+    held = [{"prompt": "Answer:", "options": [" north", " south"], "answer": "A"}]
+    dev = [{"prompt": "Answer:", "options": [" red", " blue"], "answer": "A"}]
+    first, second = (held, dev) if held_first else (dev, held)
+    lab.evaluate(first, name="first", held_out=held_first, max_passes=4)
+    lab.evaluate(second, name="second", held_out=not held_first, max_passes=4)
+    # Generating from the bare prompt reveals the held-out question itself.
+    with pytest.raises(ValueError, match="reserved"):
+        lab.evaluate([{"prompt": "Answer:", "answer": " north"}], mode="sampled")
 
 
 def test_empty_prompt_rows_reserve_only_their_full_identity(lab):

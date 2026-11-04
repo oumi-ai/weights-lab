@@ -58,8 +58,9 @@ report = lab.compare_runs(before, after)
 
 Held-out data needs `held_out=True` and `max_passes`, runs once per session, and
 stays reserved even if the run fails. Dev and held-out data can never trade roles;
-overlap means an identical row or prompt after Unicode normalization and whitespace
-stripping. Probabilities are normalized over the supplied options only. These guards
+overlap means an identical row, or a shared prompt when either side is sampled, after
+Unicode normalization and whitespace stripping. Scored rows that share a generic prompt
+but offer different options may sit on opposite sides. Probabilities are normalized over the supplied options only. These guards
 keep an honest workflow disciplined; snippet code can still change budgets or
 registry files directly.
 

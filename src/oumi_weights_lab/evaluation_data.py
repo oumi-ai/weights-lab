@@ -131,14 +131,16 @@ def _dataset_identity(identities: list[dict[str, Any]]) -> str:
     )
 
 
-def _reservation_keys(identities: list[dict[str, Any]]) -> tuple[set[str], set[str]]:
-    """Row hashes, plus hashes of every nonempty prompt.
+def _reservation_keys(
+    identities: list[dict[str, Any]], mode: str
+) -> tuple[set[str], set[str], set[str]]:
+    """Return row hashes, every nonempty prompt's hash, and open prompts' hashes.
 
-    Prompt hashes stop a prompt crossing roles in another mode or with other
-    options. Empty prompts carry no question, so those rows reserve only their
-    full identity; minimal-pair datasets can then keep separate dev and
-    held-out splits. The gold answer changes no score, so each row with options
-    also reserves its prompt and options without the answer.
+    The gold answer changes no score, so a row with options also reserves its
+    prompt and options without the answer. In sampled mode the model answers the
+    prompt alone, so those prompts are open: an open prompt conflicts with the
+    same prompt in any row. Scored rows that merely share a generic prompt, such
+    as "Answer:", but offer different options can sit on opposite sides.
     """
     rows = {_digest(row) for row in identities}
     rows |= {
@@ -147,7 +149,7 @@ def _reservation_keys(identities: list[dict[str, Any]]) -> tuple[set[str], set[s
         if "options" in row
     }
     prompts = {_digest(row["prompt"]) for row in identities if row["prompt"]}
-    return rows, prompts
+    return rows, prompts, prompts if mode == "sampled" else set()
 
 
 def _load_registry(root: Path) -> dict[str, Any]:
@@ -156,18 +158,20 @@ def _load_registry(root: Path) -> dict[str, Any]:
 
 
 def _guard_dataset_roles(
-    registry: dict[str, Any], keys: tuple[set[str], set[str]], *, held_out: bool
+    registry: dict[str, Any], keys: tuple[set[str], set[str], set[str]], *, held_out: bool
 ) -> None:
-    """Refuse dev/held-out overlap by row or prompt; unverifiable records fail closed."""
-    rows, prompts = keys
+    """Refuse dev/held-out overlap by row or open prompt; unverifiable records fail closed."""
+    rows, prompts, open_prompts = keys
     for record in registry["datasets"].values():
-        prior_rows = record.get("item_identities")
-        prior_prompts = record.get("prompt_identities")
-        if not isinstance(prior_rows, list) or not isinstance(prior_prompts, list):
+        prior = [
+            record.get(field)
+            for field in ("item_identities", "prompt_identities", "open_prompt_identities")
+        ]
+        if not all(isinstance(value, list) for value in prior):
             raise ValueError("registry record lacks row or prompt identities; cannot verify roles")
-        if (record["role"] == "held_out" or held_out) and (
-            rows & set(prior_rows) or prompts & set(prior_prompts)
-        ):
+        prior_rows, prior_prompts, prior_open = (set(value) for value in prior)
+        overlap = rows & prior_rows or open_prompts & prior_prompts or prompts & prior_open
+        if (record["role"] == "held_out" or held_out) and overlap:
             raise ValueError("dataset overlaps reserved dev or held-out data")
 
 
@@ -177,6 +181,7 @@ def _reserve(
     session_path: Path,
     identities: list[dict[str, Any]],
     *,
+    mode: str,
     held_out: bool,
     run: str | None = None,
 ) -> Iterator[tuple[str, str]]:
@@ -188,14 +193,18 @@ def _reserve(
     root = Path(artifacts) / "evaluations"
     root.mkdir(parents=True, exist_ok=True)
     identity = _dataset_identity(identities)
-    rows, prompts = keys = _reservation_keys(identities)
+    rows, prompts, open_prompts = keys = _reservation_keys(identities, mode)
     with session_lock(Path(session_path)):
         registry = _load_registry(root)
         _guard_dataset_roles(registry, keys, held_out=held_out)
         yield registry["session_id"], identity
         role = "held_out" if held_out else "dev"
         record = registry["datasets"].setdefault(identity, {"role": role, "runs": []})
-        record.update(item_identities=sorted(rows), prompt_identities=sorted(prompts))
+        record.update(
+            item_identities=sorted(rows),
+            prompt_identities=sorted(prompts),
+            open_prompt_identities=sorted(open_prompts),
+        )
         if run is not None:
             record["runs"].append(run)
         write_json(root / "_registry.json", registry, durable=True)

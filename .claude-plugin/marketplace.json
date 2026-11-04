@@ -1,6 +1,6 @@
 {
-  "name": "oumi-weights-lab-local",
-  "description": "A local skill for persistent open-weights model experiments.",
+  "name": "oumi-weights-lab",
+  "description": "Persistent open-weights model experiments for coding agents.",
   "owner": {
     "name": "Oumi"
   },

@@ -186,9 +186,28 @@ class ScoringMixin(EvaluationMixin):
                 scores[label] = float(token_scores.sum().item())
         return scores
 
+    @contextmanager
+    def _prompts_prepared_once(self):
+        """Within one evaluation, apply prefix attachments once per distinct prompt.
+
+        The input check prepares every prompt before reserving data, and scoring
+        reuses that text, so a costly or stateful transform is not applied twice.
+        """
+        self._prepared_prompts: dict[str, str] | None = {}
+        try:
+            yield
+        finally:
+            self._prepared_prompts = None
+
     def _scoring_prompt(self, prompt: str) -> str:
+        cache = getattr(self, "_prepared_prompts", None)
+        if cache is not None and prompt in cache:
+            return cache[prompt]
         prepare = getattr(self, "_prepare_prompt", None)
-        return prepare(prompt) if prepare is not None else prompt
+        text = prepare(prompt) if prepare is not None else prompt
+        if cache is not None:
+            cache[prompt] = text
+        return text
 
     def _sample(self, prompt: str, generation_config: dict[str, Any], seed: int) -> str:
         import torch
@@ -261,94 +280,102 @@ class ScoringMixin(EvaluationMixin):
             generate = getattr(getattr(self, "model", None), "generate", None)
             generation_config = _generation_kwargs(generation_config, generate)
         name = _safe_name(name or f"run-{uuid.uuid4().hex[:12]}")
-        self._check_inputs(tasks, mode, generation_config or {})
-        dataset_hash = _digest(
-            [
-                {key: task[key] for key in ("prompt", "answer", "options") if key in task}
-                for task in tasks
-            ]
-        )
-        run_dir = Path(self.artifacts) / "evaluations" / name
-        with _reserve(
-            self.artifacts, self.session_path, identities, held_out=held_out, run=name
-        ) as (session_id, dataset_identity):
-            run_dir.mkdir(exist_ok=False)
-        started = time.time()
-        before = self.forward_passes
-        summary = {
-            "name": name,
-            "state": "running",
-            "run_dir": str(run_dir.resolve()),
-            "session_id": session_id,
-            "model_id": getattr(self, "model_id", ""),
-            "model_commit": getattr(self, "model_commit", None),
-            "model_revision": getattr(self, "revision", 0),
-            "active_edit_ids": list(getattr(self, "active_edit_ids", [])),
-            "edits": self.edits() if hasattr(self, "edits") else [],
-            "attachments": self.attachments() if hasattr(self, "attachments") else [],
-            "patches": self.patches() if hasattr(self, "patches") else [],
-            "dataset_hash": dataset_hash,
-            "dataset_identity": dataset_identity,
-            "held_out": held_out,
-            "mode": mode,
-            "checker_custom": checker is not None,
-            "checker_id": checker_id,
-            "seed": seed,
-            "generation_config": generation_config or {},
-            "tokenizer_policy": "separate_prompt_continuation_no_special_tokens_sum",
-            "max_passes": max_passes,
-            "started_at": started,
-            "total": len(tasks),
-            "completed": 0,
-            "correct": 0,
-            "accuracy": None,
-            "forward_passes": 0,
-        }
-        write_json(run_dir / "summary.json", summary)
-        try:
-            write_json(run_dir / "dataset.json", {"tasks": tasks})
-            (run_dir / "items").mkdir()
-            with (
-                self.limit_passes(max_passes),
-                (run_dir / "items.jsonl").open("x", encoding="utf-8") as stream,
-            ):
-                for index, task in enumerate(tasks):
-                    item = {"index": index, **task}
-                    if mode == "sampled":
-                        generated = self._sample(task["prompt"], generation_config, seed + index)
-                        correct = (
-                            checker(generated, task["answer"])
-                            if checker is not None
-                            else generated.strip() == str(task["answer"]).strip()
-                        )
-                        item.update(
-                            generated=generated, prediction=generated, correct=bool(correct)
-                        )
-                    else:
-                        scores = self.score(task["prompt"], task["options"])
-                        best = max(scores.values())
-                        leaders = [label for label, value in scores.items() if value == best]
-                        # An exact tie names no prediction, so it is never correct.
-                        prediction = leaders[0] if len(leaders) == 1 else None
-                        item.update(
-                            scores=scores,
-                            prediction=prediction,
-                            tie=prediction is None,
-                            correct=prediction == task["answer"],
-                        )
-                    stream.write(json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n")
-                    stream.flush()
-                    write_json(run_dir / "items" / f"{index:06d}.json", item)
-                    summary["completed"] += 1
-                    summary["correct"] += int(item["correct"])
-            summary.update(state="succeeded", accuracy=summary["correct"] / len(tasks))
-        except BaseException as error:
-            summary.update(state="failed", error=f"{type(error).__name__}: {error}")
-            raise
-        finally:
-            summary.update(
-                forward_passes=self.forward_passes - before,
-                duration_seconds=time.time() - started,
+        with self._prompts_prepared_once():
+            self._check_inputs(tasks, mode, generation_config or {})
+            dataset_hash = _digest(
+                [
+                    {key: task[key] for key in ("prompt", "answer", "options") if key in task}
+                    for task in tasks
+                ]
             )
+            run_dir = Path(self.artifacts) / "evaluations" / name
+            with _reserve(
+                self.artifacts,
+                self.session_path,
+                identities,
+                mode=mode,
+                held_out=held_out,
+                run=name,
+            ) as (session_id, dataset_identity):
+                run_dir.mkdir(exist_ok=False)
+            started = time.time()
+            before = self.forward_passes
+            summary = {
+                "name": name,
+                "state": "running",
+                "run_dir": str(run_dir.resolve()),
+                "session_id": session_id,
+                "model_id": getattr(self, "model_id", ""),
+                "model_commit": getattr(self, "model_commit", None),
+                "model_revision": getattr(self, "revision", 0),
+                "active_edit_ids": list(getattr(self, "active_edit_ids", [])),
+                "edits": self.edits() if hasattr(self, "edits") else [],
+                "attachments": self.attachments() if hasattr(self, "attachments") else [],
+                "patches": self.patches() if hasattr(self, "patches") else [],
+                "dataset_hash": dataset_hash,
+                "dataset_identity": dataset_identity,
+                "held_out": held_out,
+                "mode": mode,
+                "checker_custom": checker is not None,
+                "checker_id": checker_id,
+                "seed": seed,
+                "generation_config": generation_config or {},
+                "tokenizer_policy": "separate_prompt_continuation_no_special_tokens_sum",
+                "max_passes": max_passes,
+                "started_at": started,
+                "total": len(tasks),
+                "completed": 0,
+                "correct": 0,
+                "accuracy": None,
+                "forward_passes": 0,
+            }
             write_json(run_dir / "summary.json", summary)
-        return summary
+            try:
+                write_json(run_dir / "dataset.json", {"tasks": tasks})
+                (run_dir / "items").mkdir()
+                with (
+                    self.limit_passes(max_passes),
+                    (run_dir / "items.jsonl").open("x", encoding="utf-8") as stream,
+                ):
+                    for index, task in enumerate(tasks):
+                        item = {"index": index, **task}
+                        if mode == "sampled":
+                            generated = self._sample(
+                                task["prompt"], generation_config, seed + index
+                            )
+                            correct = (
+                                checker(generated, task["answer"])
+                                if checker is not None
+                                else generated.strip() == str(task["answer"]).strip()
+                            )
+                            item.update(
+                                generated=generated, prediction=generated, correct=bool(correct)
+                            )
+                        else:
+                            scores = self.score(task["prompt"], task["options"])
+                            best = max(scores.values())
+                            leaders = [label for label, value in scores.items() if value == best]
+                            # An exact tie names no prediction, so it is never correct.
+                            prediction = leaders[0] if len(leaders) == 1 else None
+                            item.update(
+                                scores=scores,
+                                prediction=prediction,
+                                tie=prediction is None,
+                                correct=prediction == task["answer"],
+                            )
+                        stream.write(json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n")
+                        stream.flush()
+                        write_json(run_dir / "items" / f"{index:06d}.json", item)
+                        summary["completed"] += 1
+                        summary["correct"] += int(item["correct"])
+                summary.update(state="succeeded", accuracy=summary["correct"] / len(tasks))
+            except BaseException as error:
+                summary.update(state="failed", error=f"{type(error).__name__}: {error}")
+                raise
+            finally:
+                summary.update(
+                    forward_passes=self.forward_passes - before,
+                    duration_seconds=time.time() - started,
+                )
+                write_json(run_dir / "summary.json", summary)
+            return summary

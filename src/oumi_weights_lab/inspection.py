@@ -45,16 +45,45 @@ def _positions(value, positions):
     return selected
 
 
-def _remove_forward_hook(module, hook):
-    """Remove ``hook`` by identity, including when an interrupt lost its handle."""
-    keys = [key for key, value in module._forward_hooks.items() if value is hook]
-    for key in keys:
+def _remove_by_identity(module, hook):
+    """Remove ``hook`` from torch's private hook dicts when its handle was never returned.
+
+    A torch without these dicts leaves the hook registered; it is inert once removed.
+    """
+    hooks = getattr(module, "_forward_hooks", {})
+    for key in [key for key, value in hooks.items() if value is hook]:
         for attribute in (
             "_forward_hooks",
             "_forward_hooks_with_kwargs",
             "_forward_hooks_always_called",
         ):
             getattr(module, attribute, {}).pop(key, None)
+
+
+class _TemporaryHook:
+    """A forward hook that does nothing once removed, even if it stays registered.
+
+    Worker timeouts raise BaseException anywhere, including inside
+    register_forward_hook after the hook is stored but before its handle returns.
+    """
+
+    def __init__(self, module, function):
+        self.module, self.function = module, function
+        self.active = True
+        self.handle = None
+
+    def __call__(self, *args):
+        return self.function(*args) if self.active else None
+
+    def register(self, **kwargs):
+        self.handle = self.module.register_forward_hook(self, **kwargs)
+
+    def remove(self):
+        self.active = False
+        if self.handle is None:
+            _remove_by_identity(self.module, self)
+        else:
+            self.handle.remove()
 
 
 def _accepts_position_ids(model):
@@ -89,7 +118,7 @@ class InspectionMixin:
             raise ValueError("choose a nonempty list of distinct module names")
         targets = [(name, self.model.get_submodule(name)) for name in names]
         captured = {name: [] for name in names}
-        registered = []
+        hooks = []
         try:
             for name, target in targets:
 
@@ -99,13 +128,13 @@ class InspectionMixin:
                         value[:, _positions(value, positions)].detach().cpu().clone()
                     )
 
-                # Record before registering so an interrupt cannot orphan the hook.
-                registered.append((target, capture))
-                target.register_forward_hook(capture)
+                # Track before registering so an interrupt cannot orphan the hook.
+                hooks.append(_TemporaryHook(target, capture))
+                hooks[-1].register()
             yield captured
         finally:
-            for target, hook in registered:
-                _remove_forward_hook(target, hook)
+            for hook in hooks:
+                hook.remove()
 
     @contextmanager
     def patch(self, module, values, positions=None):
@@ -141,13 +170,14 @@ class InspectionMixin:
             "positions": repr(positions),
             "kind": "callable" if callable(values) else "tensor",
         }
+        hook = _TemporaryHook(target, replace)
         # Worker timeouts raise BaseException anywhere, so register inside cleanup.
         try:
-            target.register_forward_hook(replace)
+            hook.register()
             self._patches.append(metadata)
             yield
         finally:
-            _remove_forward_hook(target, replace)
+            hook.remove()
             for index, item in enumerate(self._patches):
                 if item is metadata:
                     del self._patches[index]

@@ -582,7 +582,7 @@ class EvaluationMixin:
         rows = [tasks[i] for i in selected]
         root = Path(self.artifacts) / "screens" / name
         # A screen consumes dev access to its whole source, not just selected rows.
-        with _reserve(self.artifacts, self.session_path, identities, held_out=False) as (
+        with _reserve(self.artifacts, self.session_path, identities, mode=mode, held_out=False) as (
             _,
             identity,
         ):
@@ -649,7 +649,8 @@ class EvaluationMixin:
         if any(_digest(row) not in present for row in rows):
             raise ValueError("pinned screen item is missing from source")
         registry = _load_registry(Path(self.artifacts) / "evaluations")
-        _guard_dataset_roles(registry, _reservation_keys(identities), held_out=False)
+        keys = _reservation_keys(identities, manifest["mode"])
+        _guard_dataset_roles(registry, keys, held_out=False)
         return rows
 
 

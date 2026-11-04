@@ -644,3 +644,11 @@ def test_sky_task_with_non_bmp_values_loads_with_libyaml(tmp_path):
     run_session_bootstrap(shlex.split(task["run"])[2])
     config = read_json(path / "config.json")
     assert (config["model"], config["revision"]) == ("org/model-😀", "rev-😀")
+
+
+def test_launcher_commands_all_return_raw_bytes(tmp_path):
+    runner = Recorder(stdout=b"done")
+    launcher = SkyPilotLauncher("weights-test", runner=runner)
+    launcher.teardown()
+    # run(), stop(), and teardown() all return bytes; none request text decoding.
+    assert all("text" not in kwargs for args, kwargs in runner.calls if args[:2] == ["sky", "down"])

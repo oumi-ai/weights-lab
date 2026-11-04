@@ -5,7 +5,7 @@ import copy
 import pytest
 import torch
 
-from oumi_weights_lab import Lab
+from oumi_weights_lab import Lab, inspection
 from oumi_weights_lab.editing import EditBook
 
 
@@ -308,3 +308,59 @@ def test_attach_interrupted_while_registering_leaves_no_hook(tiny_lab, monkeypat
     assert tiny_lab.attachments() == []
     assert tiny_lab.revision >= revision
     assert tiny_lab.export("after-interrupted-attach").is_dir()
+
+
+@pytest.mark.parametrize("intervention", ["patch", "record", "attach"])
+def test_hooks_without_private_dicts_remove_by_handle_and_orphans_stay_inert(
+    tiny_lab, monkeypatch, intervention
+):
+    # Model a torch without the private hook dicts: identity removal finds nothing.
+    fallback = inspection._remove_by_identity
+    monkeypatch.setattr(
+        inspection, "_remove_by_identity", lambda module, hook: fallback(object(), hook)
+    )
+    calls = []
+    activation = inspection._activation
+
+    def counted_activation(output):
+        calls.append(intervention)
+        return activation(output)
+
+    def bias(*_):
+        calls.append(intervention)
+        return torch.full((6,), 10.0)
+
+    monkeypatch.setattr(inspection, "_activation", counted_activation)
+    module = (
+        tiny_lab.model
+        if intervention == "attach"
+        else tiny_lab.model.get_submodule("transformer.h.0")
+    )
+    inputs = tiny_lab.tokenizer("hello world", return_tensors="pt")
+    hook_count = len(module._forward_hooks)
+
+    def run():
+        if intervention == "patch":
+            context = tiny_lab.patch("transformer.h.0", lambda value: value * 0)
+        elif intervention == "record":
+            context = tiny_lab.record("transformer.h.0")
+        else:
+            context = tiny_lab.attach(bias)
+        with context:
+            tiny_lab.model(**inputs)
+
+    with torch.no_grad():
+        baseline = tiny_lab.model(**inputs).logits.clone()
+        run()
+        # A normal exit removes the hook through its public handle.
+        assert calls and len(module._forward_hooks) == hook_count
+        calls.clear()
+        interrupt_after_registration(monkeypatch, module)
+        with pytest.raises(Interrupted):
+            run()
+        # The orphan stays registered but neither captures nor changes outputs.
+        assert len(module._forward_hooks) == hook_count + 1
+        assert torch.equal(tiny_lab.model(**inputs).logits, baseline)
+    assert calls == []
+    assert tiny_lab.patches() == []
+    assert tiny_lab.attachments() == []

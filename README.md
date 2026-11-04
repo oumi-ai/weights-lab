@@ -8,19 +8,57 @@
 [![Documentation](https://img.shields.io/badge/docs-oumi--weights--lab-blue.svg)](https://github.com/oumi-ai/weights-lab/tree/main/docs)
 [![About Oumi](https://img.shields.io/badge/about-oumi.ai-blue.svg)](https://oumi.ai)
 
-A persistent Python worker that lets a coding agent load an open model once, edit
-its weights reversibly, measure the effect, and export the result. Every snippet's
-source, output, and forward-pass count is saved. Version 0.1 is experimental, and
-snippets run as trusted Python with your filesystem and network access.
+An agent skill and Python worker that let your coding agent experiment on an open
+language model: load it once, edit its weights reversibly, measure the effect, and
+export the result. Every snippet's source, output, and forward-pass count is saved.
+Version 0.1 is experimental, and snippets run as trusted Python with your filesystem
+and network access.
 
 Tested on CPU, Apple MPS, NVIDIA H200, and SkyPilot with Slurm.
 
-## Quick start
+## Install in your coding agent
 
-Requires Python 3.11+ on Linux or macOS, git, and [uv](https://docs.astral.sh/uv/).
+Requires Linux or macOS, git, and [uv](https://docs.astral.sh/uv/).
+
+### Claude Code
 
 ```sh
-uv tool install git+https://github.com/oumi-ai/weights-lab   # append @<tag> to pin
+claude plugin marketplace add oumi-ai/weights-lab
+claude plugin install oumi-weights-lab@oumi-weights-lab
+```
+
+The plugin includes the `oumi-weights-lab` CLI. Its first run downloads PyTorch, so
+allow a few minutes.
+
+### Codex
+
+```sh
+codex plugin marketplace add oumi-ai/weights-lab
+codex plugin add oumi-weights-lab@oumi-weights-lab
+uv tool install git+https://github.com/oumi-ai/weights-lab
+```
+
+### Cursor, GitHub Copilot CLI, OpenCode, and other skill-compatible agents
+
+Copy the whole skill folder, then install the CLI:
+
+```sh
+git clone https://github.com/oumi-ai/weights-lab
+mkdir -p ~/.agents/skills
+cp -R weights-lab/skills/oumi-weights-lab ~/.agents/skills/
+uv tool install git+https://github.com/oumi-ai/weights-lab
+```
+
+Then ask your agent, for example: "Use oumi-weights-lab to check whether zeroing
+layer 3's MLP in Qwen/Qwen3-0.6B changes its answers to the questions in caps.jsonl."
+
+To load LoRA adapters, install the CLI as
+`uv tool install 'oumi-weights-lab[adapters] @ git+https://github.com/oumi-ai/weights-lab'`.
+Append `@<tag>` to a `git+https://` URL to pin a release.
+
+## Use the CLI directly
+
+```sh
 oumi-weights-lab start --session sessions/first --model HuggingFaceTB/SmolLM2-135M --device cpu
 oumi-weights-lab send --session sessions/first --file edit.py --follow
 oumi-weights-lab stop --session sessions/first
@@ -41,8 +79,7 @@ checkpoint = lab.export("restored")  # saved under artifacts/
 ```
 
 Snippets share `lab`, `model`, `tokenizer`, `Path`, and `artifacts`, and their state
-persists. Stdout is JSON; `--follow` streams snippet output to stderr. For LoRA
-adapters, install `'oumi-weights-lab[adapters] @ git+https://github.com/oumi-ai/weights-lab'`.
+persists. Stdout is JSON; `--follow` streams snippet output to stderr.
 
 ## Examples and reference checks
 
@@ -63,6 +100,5 @@ From a source checkout, run the first two with `uv run python -m examples.NAME -
 ## Documentation
 
 - [Python API](docs/api.md)
-- [Agent skill and plugin install](docs/skill-install.md)
 - [Remote workers on SkyPilot and Slurm](docs/remote.md)
 - [Contributing](CONTRIBUTING.md)

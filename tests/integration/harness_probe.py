@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-PLUGIN = "oumi-weights-lab@oumi-weights-lab-local"
+PLUGIN = "oumi-weights-lab@oumi-weights-lab"
 RECIPE = "references/worked-example.md"
 
 
@@ -99,7 +99,7 @@ def install_and_discover(harness):
     if harness == "codex":
         run("codex", "plugin", "add", PLUGIN, "--json")
         listing = json.loads(
-            run("codex", "plugin", "list", "--marketplace", "oumi-weights-lab-local", "--json")
+            run("codex", "plugin", "list", "--marketplace", "oumi-weights-lab", "--json")
         )
         entries = [item for item in listing["installed"] if item.get("name") == "oumi-weights-lab"]
         assert len(entries) == 1 and entries[0]["enabled"] is True, listing
