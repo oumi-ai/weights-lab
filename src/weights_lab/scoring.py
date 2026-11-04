@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .budget import PassBudget
+from .evaluation import EvaluationMixin, _digest, _guard_dataset_roles
 from .session import read_json, session_lock, write_json
 
 
@@ -70,9 +71,9 @@ def _tasks(data: Any, mode: str) -> tuple[list[dict[str, Any]], list[dict[str, A
             raise ValueError("every task requires a string prompt")
         if "answer" not in row:
             raise ValueError("every task requires an answer")
-        task = {"prompt": row["prompt"], "answer": row["answer"]}
-        if "id" in row:
-            task["id"] = row["id"]
+        if set(row) & {"index", "prediction", "scores", "correct", "generated", "error"}:
+            raise ValueError("task metadata cannot use reserved evaluation result keys")
+        task = row.copy()
         if mode == "yes_no":
             task["options"] = _choices(row.get("options", {"yes": " yes", "no": " no"}))
             answer = row["answer"]
@@ -104,7 +105,7 @@ def _dataset_hash(tasks: list[dict[str, Any]]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-class ScoringMixin:
+class ScoringMixin(EvaluationMixin):
     """Evaluation helpers for a Lab whose forward hook calls _before_forward."""
 
     @property
@@ -225,6 +226,7 @@ class ScoringMixin:
         max_passes: int | None = None,
         mode: str = "likelihood",
         checker: Any = None,
+        checker_id: str | None = None,
         generation_config: dict[str, Any] | None = None,
         seed: int = 0,
     ) -> dict[str, Any]:
@@ -243,6 +245,8 @@ class ScoringMixin:
         PassBudget(max_passes)
         if checker is not None and not callable(checker):
             raise ValueError("checker must be callable")
+        if checker_id is not None and (not isinstance(checker_id, str) or not checker_id):
+            raise ValueError("checker_id must be a nonempty string")
         if isinstance(seed, bool) or not isinstance(seed, int):
             raise ValueError("seed must be an integer")
         if generation_config is not None and not isinstance(generation_config, dict):
@@ -256,7 +260,10 @@ class ScoringMixin:
             }
         tasks, identities = _tasks(data, mode)
         dataset_hash = _dataset_hash(
-            [{key: value for key, value in task.items() if key != "id"} for task in tasks]
+            [
+                {key: task[key] for key in ("prompt", "answer", "options") if key in task}
+                for task in tasks
+            ]
         )
         # The held-out guard is invariant to row order, labels, and supported
         # answer encodings. Ordered task identity remains separate for diff.
@@ -281,8 +288,10 @@ class ScoringMixin:
             role = "held_out" if held_out else "dev"
             if previous is not None and (previous["role"] == "held_out" or held_out):
                 raise ValueError("dataset is already reserved as dev or consumed as held-out")
+            _guard_dataset_roles(root, registry, identities, held_out=held_out)
             run_dir.mkdir(exist_ok=False)
             record = registry["datasets"].setdefault(dataset_identity, {"role": role, "runs": []})
+            record["item_identities"] = sorted({_digest(row) for row in identities})
             record["runs"].append(name)
             write_json(registry_path, registry)
         started = time.time()
@@ -303,6 +312,8 @@ class ScoringMixin:
             "dataset_identity": dataset_identity,
             "held_out": held_out,
             "mode": mode,
+            "checker_custom": checker is not None,
+            "checker_id": checker_id,
             "seed": seed,
             "generation_config": generation_config or {},
             "tokenizer_policy": "separate_prompt_continuation_no_special_tokens_sum",
@@ -372,25 +383,43 @@ class ScoringMixin:
                 path = path.parent
         return read_json(path / "summary.json"), path
 
-    def diff(self, before: Any, after: Any) -> list[dict[str, Any]]:
+    def diff(
+        self, before: Any, after: Any, *, include_scores: bool = False
+    ) -> list[dict[str, Any]]:
         """Return changed items for successful runs of the same dataset and session."""
-        left, left_dir = self._run_summary(before)
-        right, right_dir = self._run_summary(after)
+        left, _ = self._run_summary(before)
+        right, _ = self._run_summary(after)
         if left["state"] != "succeeded" or right["state"] != "succeeded":
             raise ValueError("diff requires two successful evaluation runs")
         if any(left[key] != right[key] for key in ("session_id", "dataset_hash", "mode")):
             raise ValueError("diff requires the same session, dataset, and scoring mode")
-        left_items = [
-            json.loads(line) for line in (left_dir / "items.jsonl").read_text().splitlines()
+        from .evaluation import PROTOCOL_KEYS, _read_run
+
+        _, left_tasks, left_items = _read_run(self, before)
+        _, right_tasks, right_items = _read_run(self, after)
+
+        if any(left.get(key) != right.get(key) for key in PROTOCOL_KEYS):
+            raise ValueError("diff requires the same scoring protocol/settings")
+        if left.get("checker_custom") and not left.get("checker_id"):
+            raise ValueError("custom sampled checkers require explicit checker_id for comparison")
+        # Legacy diff pairs by position/content and intentionally ignores row IDs.
+        comparable_left = [
+            {key: value for key, value in task.items() if key != "id"} for task in left_tasks
         ]
-        right_items = [
-            json.loads(line) for line in (right_dir / "items.jsonl").read_text().splitlines()
+        comparable_right = [
+            {key: value for key, value in task.items() if key != "id"} for task in right_tasks
         ]
+        if comparable_left != comparable_right:
+            raise ValueError("diff requires identical ordered task content and metadata")
         changes = []
         for old, new in zip(left_items, right_items, strict=True):
-            if (old["prediction"], old["correct"]) == (new["prediction"], new["correct"]):
+            same_prediction = (old["prediction"], old["correct"]) == (
+                new["prediction"],
+                new["correct"],
+            )
+            if same_prediction and (not include_scores or old.get("scores") == new.get("scores")):
                 continue
-            kind = "changed"
+            kind = "score_changed" if same_prediction else "changed"
             if old["correct"] != new["correct"]:
                 kind = "improved" if new["correct"] else "regressed"
             changes.append({"index": old["index"], "change": kind, "before": old, "after": new})
@@ -409,5 +438,20 @@ class Scorer:
     def evaluate(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         return self.lab.evaluate(*args, **kwargs)
 
-    def diff(self, before: Any, after: Any) -> list[dict[str, Any]]:
-        return self.lab.diff(before, after)
+    def diff(self, before: Any, after: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return self.lab.diff(before, after, **kwargs)
+
+    def compare_runs(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self.lab.compare_runs(*args, **kwargs)
+
+    def evaluate_suite(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self.lab.evaluate_suite(*args, **kwargs)
+
+    def compare_suites(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self.lab.compare_suites(*args, **kwargs)
+
+    def create_screen(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self.lab.create_screen(*args, **kwargs)
+
+    def verify_screen(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return self.lab.verify_screen(*args, **kwargs)
