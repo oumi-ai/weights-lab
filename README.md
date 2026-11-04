@@ -20,9 +20,9 @@ and network access.
 
 Tested on CPU, Apple MPS, NVIDIA H200, and SkyPilot with Slurm.
 
-![Two edited Qwen layers and paired MATH-500 results: sample accuracy rises from 7.85% to 51.25%, while samples reaching the token cap fall from 92.90% to 30.55%.](docs/assets/weight-space.svg)
+![Your coding agent edits a running model's weights: GPT-2's next word changes from Paris to banana, then undo restores Paris. The same model stays loaded throughout.](docs/assets/agent-workbench.svg)
 
-[Explore the visualization, recorded data, and protocol](docs/weight-space.md).
+A deliberately silly weight edit, with exact undo. [Try the example](examples/banana.py).
 
 ## Install in your coding agent
 
