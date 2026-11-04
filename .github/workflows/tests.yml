@@ -34,6 +34,9 @@ jobs:
         run: |
           uv venv --python python "$RUNNER_TEMP/ci-tools"
           uv pip install --python "$RUNNER_TEMP/ci-tools/bin/python" ruff pytest pyyaml
+      - name: Check the lockfile matches pyproject.toml
+        # The plugin's CLI runs `uv run --frozen`, which trusts uv.lock as-is.
+        run: uv lock --check
       - name: Lint and check repository contracts
         run: |
           "$RUNNER_TEMP/ci-tools/bin/ruff" check .

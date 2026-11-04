@@ -5,7 +5,11 @@ uv sync --python 3.12 --extra adapters
 uv run pytest -q
 uv run ruff check . && uv run ruff format --check .
 uv run python scripts/check_repo.py
+uv lock --check
 ```
+
+After changing dependencies in `pyproject.toml`, run `uv lock`. The Claude Code plugin
+installs exactly what `uv.lock` records, and CI fails when the lock is stale.
 
 Tests build tiny offline models. CI skips the model tests when only docs or plugin
 metadata change. `tests/live/validate_*.py` run live checks that can provision
