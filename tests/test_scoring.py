@@ -66,11 +66,7 @@ class ScoringLab(ScoringMixin):
         self.revision = 0
         self.active_edit_ids = []
         self._forward_passes = 0
-        self.model.register_forward_pre_hook(self._count)
-
-    def _count(self, model, inputs):
-        self._before_forward()
-        self._forward_passes += 1
+        self.model.register_forward_pre_hook(self._count_forward, with_kwargs=True)
 
     @property
     def forward_passes(self):
@@ -84,6 +80,45 @@ def lab(tmp_path):
 
 def tasks(answer="A"):
     return [{"prompt": "p", "options": [" x", " y"], "answer": answer}]
+
+
+def test_batched_call_costs_one_pass_per_sequence(lab):
+    ids = torch.zeros(3, 2, dtype=torch.long)
+    lab.model(input_ids=ids)
+    lab.model(ids)  # positional
+    assert lab.forward_passes == lab.budget.used == 6
+
+
+def test_batch_over_session_cap_is_refused_before_running(lab):
+    lab.budget.limit = 2
+    with pytest.raises(BudgetExceeded):
+        lab.model(input_ids=torch.zeros(3, 2, dtype=torch.long))
+    assert lab.model.calls == [] and lab.budget.used == lab.forward_passes == 0
+
+
+def test_local_cap_smaller_than_batch_refuses_and_charges_nothing(lab):
+    with lab.limit_passes(2) as local:
+        with pytest.raises(BudgetExceeded):
+            lab.model(input_ids=torch.zeros(3, 2, dtype=torch.long))
+        assert local.used == lab.budget.used == 0
+    assert lab.model.calls == []
+
+
+def test_failed_batched_call_charges_the_whole_batch(lab):
+    lab.model.fail = True
+    with pytest.raises(RuntimeError, match="intentional"):
+        lab.model(input_ids=torch.zeros(4, 2, dtype=torch.long))
+    assert lab.forward_passes == lab.budget.used == 4
+
+
+def test_generation_charges_each_step_per_sequence_and_stops_whole_steps(lab):
+    prompts = torch.zeros(2, 2, dtype=torch.long)
+    lab.model.generate(prompts, max_new_tokens=2)
+    assert lab.forward_passes == lab.budget.used == 4  # 2 steps x 2 sequences
+    lab.budget.limit = 7  # room for one more step, not two
+    with pytest.raises(BudgetExceeded):
+        lab.model.generate(prompts, max_new_tokens=2)
+    assert lab.forward_passes == lab.budget.used == 6
 
 
 def test_likelihood_scores_only_continuation_tokens_and_explicit_boundary(lab):

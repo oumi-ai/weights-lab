@@ -66,7 +66,8 @@ registry files directly.
 
 ## Pass budget
 
-Every base-model forward counts, including each generation step and calls that fail.
+Every base-model forward counts one pass per sequence in the batch, including each
+generation step and calls that fail.
 `start --pass-limit N` or `lab.budget.limit` caps the session, and
 `with lab.limit_passes(n):` adds a temporary cap. Calls over a cap raise
 `BudgetExceeded` before running.

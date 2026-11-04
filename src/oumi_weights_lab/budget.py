@@ -29,7 +29,8 @@ def sequences_in_call(args: tuple, kwargs: dict) -> int:
 class PassBudget:
     """Count accepted model forwards, optionally rejecting calls beyond a limit.
 
-    A batch costs one pass. Generation costs one pass for every base-model call.
+    A batch costs one pass per sequence. Generation costs one pass per sequence for
+    every base-model call.
     A rejected call consumes nothing; an accepted call that fails still counts.
     """
 

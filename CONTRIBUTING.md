@@ -26,8 +26,8 @@ then run `pytest -o addopts= -m integration tests/integration` with
 - Load models with eager attention, and remove temporary hooks on exit, including
   after failure.
 - Undo restores exact original-dtype snapshots in reverse order.
-- Count every base-model forward, including generation steps and failed calls, and
-  reject calls over a cap before they run.
+- Count one pass per sequence for every base-model forward, including each generation
+  step and failed calls, and reject calls over a cap before they run.
 - Dev data never becomes held-out data, and a failed held-out run keeps its
   reservation. Restore the caller's RNG state and train/eval modes.
 - CLI stdout is JSON only; snippet output and diagnostics go to stderr.

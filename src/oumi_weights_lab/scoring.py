@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .budget import PassBudget
+from .budget import PassBudget, sequences_in_call
 from .evaluation import EvaluationMixin
 from .evaluation_data import _choices, _digest, _reserve, _safe_name, _tasks
 from .session import write_json
@@ -92,14 +92,20 @@ class ScoringMixin(EvaluationMixin):
             self._evaluation_budgets: list[PassBudget] = []
             self._budget_guard = threading.RLock()
 
-    def _before_forward(self) -> None:
+    def _before_forward(self, count: int = 1) -> None:
         self._budget_state()
         with self._budget_guard:
             budgets = [self.budget, *self._evaluation_budgets]
             for budget in budgets:
-                budget.check()
+                budget.check(count)
             for budget in budgets:
-                budget.consume()
+                budget.consume(count)
+
+    def _count_forward(self, module: Any, args: tuple, kwargs: dict) -> None:
+        """Forward pre-hook: charge one pass per sequence before the model runs."""
+        count = sequences_in_call(args, kwargs)
+        self._before_forward(count)
+        self._forward_passes += count
 
     @contextmanager
     def limit_passes(self, max_passes: int | None):
