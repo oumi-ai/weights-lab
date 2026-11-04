@@ -3,7 +3,8 @@
 Use `lab.evaluate` on explicit dev rows, retaining IDs, source labels, and source
 **document** IDs in JSON metadata. Preserve candidate completions and tokenization
 policy across comparisons. Run names are immutable; failed runs save partial
-results and consume held-out reservations.
+results and consume held-out reservations. A run that reaches its pass cap
+stops between batches, so no batch is partly scored.
 
 ```python
 baseline = lab.evaluate(dev, name="baseline")
@@ -19,8 +20,8 @@ print(report["top_probability_movers"])
 prediction/correctness changes; use `include_scores=True` to see score movement
 with unchanged winners. It ignores row IDs but checks ordered content, metadata,
 settings, and complete results. `compare_runs` and suite pairing are strict: same
-ordered tasks, IDs, metadata, session, mode, seed, scoring policy, and
-generation settings. Explicit IDs must be unique and complete. Custom sampled
+ordered tasks, IDs, metadata, session, mode, seed, scoring policy, scoring
+config (including `batch_size`), and generation settings. Explicit IDs must be unique and complete. Custom sampled
 checkers require a matching explicit `checker_id` for comparison.
 
 Inspect accuracy **and** candidate-set NLL/Brier/ECE overall and per source.

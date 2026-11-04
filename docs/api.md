@@ -43,13 +43,23 @@ report = lab.compare_runs(before, after)
 
 - `score(prompt, options)` returns each option's summed log probability. Prompt and
   completion are tokenized separately without special tokens, so include a
-  completion's leading space. Scores are not length-normalized.
+  completion's leading space. Scores are not length-normalized. Options share
+  left-padded forwards of up to `batch_size` sequences (default 8);
+  `batch_size=1` scores each option alone, exactly as v0.1 did.
 - `evaluate(data, *, name=None, mode="likelihood", held_out=False, max_passes=None, ...)`
   accepts JSONL or rows and saves items and a summary under
   `artifacts/evaluations/NAME/`. Modes are `likelihood`, `yes_no`, and `sampled`.
   An answer is an option index, label, or completion text. An exact top-score tie
   counts as incorrect. Sampled mode decodes greedily by default and grades with
   `checker` or a stripped exact match.
+- Likelihood and yes/no runs score up to `batch_size` sequences per forward
+  (default 8), packing whole rows in order. The summary's `scoring_config`
+  records how a run was scored, and runs pair only when it matches; runs saved
+  before configs were recorded count as `legacy-v0.1`. While a logit attachment,
+  or a `record` or `patch` at nonnegative positions, is active, use
+  `batch_size=1` for the run and the runs you compare it with, because left
+  padding shifts what those hooks see. Sampled mode runs one row at a time.
+  Items record each option's token count as `option_tokens`.
 - `diff(before, after)` and `compare_runs(before, after)` pair rows by position and
   need the same rows in the same order. `compare_runs` also checks row IDs and adds
   McNemar p-values, bootstrap intervals, and the largest movers.

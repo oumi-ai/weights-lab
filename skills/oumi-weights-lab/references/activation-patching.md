@@ -21,6 +21,6 @@ torch.save(
 )
 ```
 
-`patch` is a context manager; its hook is removed on exit, including exceptions. It accepts a tensor or a callable that returns replacement activations; tensor values may broadcast to the selected shape. Module output must be `[batch, tokens, ...]` or a tuple starting with such a tensor. Negative positions count from the end; positions that resolve to the same token, such as `[2, -1]` on three tokens, raise `ValueError`. Check shapes explicitly so accidental broadcasting cannot masquerade as evidence.
+`patch` is a context manager; its hook is removed on exit, including exceptions. It accepts a tensor or a callable that returns replacement activations; tensor values may broadcast to the selected shape. Module output must be `[batch, tokens, ...]` or a tuple starting with such a tensor. Negative positions count from the end and stay correct in batched scoring; while a nonnegative position is active, `lab.score` and `lab.evaluate` need `batch_size=1`, because left padding shifts tokens; positions that resolve to the same token, such as `[2, -1]` on three tokens, raise `ValueError`. Check shapes explicitly so accidental broadcasting cannot masquerade as evidence.
 
 Patch a single-token boundary before trying full generation: generation changes token windows and position meanings. Repeat with a same-prompt patch and an unrelated donor control. The operation changes activations, not stored weights; name the intervention in notes, since it does not appear as a permanent EditBook edit.
