@@ -1,10 +1,29 @@
 """Forward-call accounting independent of model and tokenizer dependencies."""
 
 from threading import RLock
+from typing import Any
 
 
 class BudgetExceeded(RuntimeError):
     """A forward call was rejected before the model executed."""
+
+
+def _batch_size(value: Any) -> int | None:
+    shape = getattr(value, "shape", None)
+    return int(shape[0]) if shape is not None and len(shape) >= 2 else None
+
+
+def sequences_in_call(args: tuple, kwargs: dict) -> int:
+    """Batch size of a model call: one pass per sequence."""
+    for key in ("input_ids", "inputs_embeds"):
+        size = _batch_size(kwargs.get(key))
+        if size is not None:
+            return size
+    for value in args:
+        size = _batch_size(value)
+        if size is not None:
+            return size
+    return 1
 
 
 class PassBudget:
