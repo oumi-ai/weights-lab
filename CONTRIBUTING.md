@@ -21,9 +21,14 @@ The scripts under `scripts/` run separate runtime and remote validation. Read
 [the validation record](docs/validation.md) before running a harness that provisions
 infrastructure or downloads larger models.
 
-CI keeps package/link/manifest checks separate from model dependencies. The main
-suite uses tiny offline CPU models; a smaller job checks the declared dependency
-floor. Docker-based [Claude Code/Codex integration tests](docs/harness-integration.md)
+CI runs on pull requests, pushes to `main`, and manual dispatches; feature-branch
+pushes use their pull request run, and superseded runs are canceled. Package,
+link, manifest, lint, build, and pure Python checks also run for docs-only changes.
+Changes limited to documentation and plugin metadata skip model tests; all code,
+dependency, and workflow changes run both the latest dependencies and declared
+dependency floor. Model tests use tiny offline CPU models and one thread. UV's
+package cache is keyed by dependency profile; virtual environments are recreated.
+Docker-based [Claude Code/Codex integration tests](docs/harness-integration.md)
 are opt-in and excluded from ordinary pytest runs. They do not download models;
 actual agent invocation requires separately enabled API access.
 
