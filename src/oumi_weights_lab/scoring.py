@@ -79,7 +79,11 @@ def _generation_kwargs(
 
 
 class ScoringMixin(EvaluationMixin):
-    """Evaluation helpers for a Lab whose forward hook calls _before_forward."""
+    """Evaluation helpers and the pass-counting hook.
+
+    The host registers ``_count_forward`` as a forward pre-hook with kwargs and owns
+    ``_forward_passes``.
+    """
 
     @property
     def budget(self) -> PassBudget:

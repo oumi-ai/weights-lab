@@ -67,7 +67,8 @@ registry files directly.
 ## Pass budget
 
 Every base-model forward counts one pass per sequence in the batch, including each
-generation step and calls that fail.
+generation step and calls that fail. Beam search runs `num_beams` sequences per
+prompt, so each of its steps costs `num_beams` passes.
 `start --pass-limit N` or `lab.budget.limit` caps the session, and
 `with lab.limit_passes(n):` adds a temporary cap. Calls over a cap raise
 `BudgetExceeded` before running.

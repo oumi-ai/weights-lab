@@ -121,6 +121,15 @@ def test_generation_charges_each_step_per_sequence_and_stops_whole_steps(lab):
     assert lab.forward_passes == lab.budget.used == 6
 
 
+def test_beam_search_costs_one_pass_per_beam_per_step(tiny_lab):
+    inputs = tiny_lab.tokenizer("hello world", return_tensors="pt")
+    with torch.no_grad():
+        tiny_lab.model.generate(
+            **inputs, num_beams=2, do_sample=False, min_new_tokens=3, max_new_tokens=3
+        )
+    assert tiny_lab.forward_passes == tiny_lab.budget.used == 6  # 3 steps x 2 beams
+
+
 def test_likelihood_scores_only_continuation_tokens_and_explicit_boundary(lab):
     scores = lab.score("p", [" x", " y"])
     expected_x = 2 * (4 - math.log(math.exp(4) + 5))
