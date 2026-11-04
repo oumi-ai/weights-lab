@@ -97,11 +97,63 @@ def mcnemar(fixed: int, broken: int) -> float:
     return min(1.0, math.exp(log_mass + math.log(relative) + math.log(2)))
 
 
+def pass_at_k(samples: int, correct: int, k: int) -> float:
+    """Unbiased pass@k: the chance that k of the samples, drawn without replacement, hit one."""
+    if not 1 <= k <= samples or not 0 <= correct <= samples:
+        raise ValueError("pass@k needs 1 <= k <= samples and 0 <= correct <= samples")
+    if samples - correct < k:
+        return 1.0
+    return 1.0 - math.comb(samples - correct, k) / math.comb(samples, k)
+
+
+def majority(keys: list[Any]) -> tuple[Any, bool]:
+    """The most common key, or (None, True) when two or more keys tie for the most votes."""
+    counts: list[list[Any]] = []  # [key, votes]; keys may be unhashable.
+    for key in keys:
+        for entry in counts:
+            if entry[0] == key:
+                entry[1] += 1
+                break
+        else:
+            counts.append([key, 1])
+    top = max(votes for _, votes in counts)
+    leaders = [key for key, votes in counts if votes == top]
+    return (leaders[0], False) if len(leaders) == 1 else (None, True)
+
+
+def _sign_flip_p(differences: list[float], samples: int, seed: int) -> float:
+    """Two-sided paired permutation p-value: randomly flip the sign of each row's change."""
+    observed = abs(sum(differences))
+    nonzero = [d for d in differences if d]
+    if not nonzero:
+        return 1.0
+    rng = random.Random(seed)
+    extreme = sum(
+        abs(sum(d if rng.random() < 0.5 else -d for d in nonzero)) >= observed - 1e-12
+        for _ in range(samples)
+    )
+    return (1 + extreme) / (1 + samples)
+
+
 def _observation(item: dict, mode: str) -> dict:
     failed = bool(item.get("error")) or "prediction" not in item
     result = {"correct": bool(item.get("correct")) and not failed, "failed": failed}
     if mode == "sampled":
-        if "finish_reason" in item:
+        samples = item.get("samples")
+        if samples:
+            # Several samples: the row scores the fraction of them that were correct.
+            result.update(
+                correct=0.0 if failed else float(item.get("correct") or 0),
+                fractional=True,
+            )
+            if all("finish_reason" in sample for sample in samples):
+                result.update(
+                    truncated=sum(s["finish_reason"] == "max_tokens" for s in samples)
+                    / len(samples),
+                    generated_tokens=sum(s.get("generated_tokens", 0) for s in samples)
+                    / len(samples),
+                )
+        elif "finish_reason" in item:
             result.update(
                 truncated=item["finish_reason"] == "max_tokens",
                 generated_tokens=int(item.get("generated_tokens", 0)),
@@ -141,7 +193,7 @@ def _value(row: dict, metric: str) -> float:
     if metric == "accuracy":
         return float(row["correct"])
     if metric == "truncation_share":
-        return float(bool(row.get("truncated")))
+        return float(row.get("truncated") or 0)  # A share of samples, or a single sample's flag.
     if metric == "mean_generated_tokens":
         return float(row.get("generated_tokens", 0))
     return float(row[metric])
@@ -196,8 +248,10 @@ def _paired_report(
     # Decide from both sides: a run whose rows all failed records no finish reasons.
     measured = _has_lengths(left + right)
     before, after = _metrics(left, measured), _metrics(right, measured)
-    fixed = sum(not a["correct"] and b["correct"] for a, b in pairs)
-    broken = sum(a["correct"] and not b["correct"] for a, b in pairs)
+    # With several samples per row, a row is fixed or broken when its fraction moves.
+    fractional = any(r.get("fractional") for r in left + right)
+    fixed = sum(float(b["correct"]) > float(a["correct"]) for a, b in pairs)
+    broken = sum(float(a["correct"]) > float(b["correct"]) for a, b in pairs)
     lengths = LENGTH_METRICS if measured else ()
     changes = {
         key: after[key] - before[key]
@@ -238,7 +292,19 @@ def _paired_report(
         "delta": changes,
         "fixed": fixed,
         "broken": broken,
-        "mcnemar_p": mcnemar(fixed, broken),
+        # McNemar needs pass/fail rows; fractions use a paired sign-flip permutation test.
+        "mcnemar_p": None if fractional else mcnemar(fixed, broken),
+        **(
+            {
+                "permutation_p": _sign_flip_p(
+                    [_value(b, "accuracy") - _value(a, "accuracy") for a, b in pairs],
+                    samples,
+                    seed,
+                )
+            }
+            if fractional
+            else {}
+        ),
         "bootstrap": {
             "seed": seed,
             "samples": samples,
@@ -544,8 +610,11 @@ class EvaluationMixin:
                 max_loss = Fraction(repr(acc_tol))
                 for key, surface in surfaces.items():
                     delta = surface["delta"]
-                    lost = surface["before"]["correct"] - surface["after"]["correct"]
-                    verdicts[key] = Fraction(lost, surface["after"]["n"]) <= max_loss and (
+                    # Sums of per-row sample fractions are floats; recover their exact value.
+                    lost = Fraction(
+                        surface["before"]["correct"] - surface["after"]["correct"]
+                    ).limit_denominator(10**9)
+                    verdicts[key] = lost / surface["after"]["n"] <= max_loss and (
                         delta["nll"] is None or delta["nll"] <= nll_tol
                     )
                     passed = passed and verdicts[key]

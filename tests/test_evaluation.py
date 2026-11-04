@@ -659,3 +659,64 @@ def test_runs_without_finish_reasons_report_no_length_metrics():
 
     rows = [_observation({"prediction": "x", "correct": True}, "sampled")]
     assert "truncation_share" not in _metrics(rows)
+
+
+def test_pass_at_k_uses_the_unbiased_estimator():
+    from oumi_weights_lab.evaluation import pass_at_k
+
+    assert pass_at_k(5, 2, 1) == pytest.approx(0.4)
+    assert pass_at_k(5, 2, 2) == pytest.approx(0.7)  # 1 - C(3,2)/C(5,2)
+    assert pass_at_k(5, 2, 4) == 1.0  # Fewer wrong samples than k: some pick is right.
+    assert pass_at_k(5, 0, 3) == 0.0
+    with pytest.raises(ValueError, match="pass@k"):
+        pass_at_k(3, 1, 4)
+
+
+def test_majority_vote_ties_name_no_winner():
+    from oumi_weights_lab.evaluation import majority
+
+    assert majority(["a", "b", "a"]) == ("a", False)
+    assert majority(["a", "b"]) == (None, True)
+    assert majority([["x"], ["x"], ["y"]]) == (["x"], False)  # Unhashable keys still vote.
+
+
+def _fractional(correct, samples=4):
+    return {
+        "prediction": "x",
+        "correct": correct / samples,
+        "correct_samples": correct,
+        "samples": [{"correct": index < correct} for index in range(samples)],
+    }
+
+
+def test_fractional_rows_compare_with_a_seeded_permutation_test():
+    from oumi_weights_lab.evaluation import _observation, _paired_report
+
+    before = [_fractional(1), _fractional(2), _fractional(4), _fractional(0)]
+    after = [_fractional(3), _fractional(2), _fractional(1), _fractional(2)]
+    pairs = [
+        (_observation(a, "sampled"), _observation(b, "sampled"))
+        for a, b in zip(before, after, strict=True)
+    ]
+    report = _paired_report(pairs, ["a", "b", "c", "d"], 500, 7)
+    assert report["before"]["accuracy"] == pytest.approx(7 / 16)
+    assert report["after"]["accuracy"] == pytest.approx(8 / 16)
+    assert report["fixed"] == 2 and report["broken"] == 1
+    assert report["mcnemar_p"] is None
+    assert 0 < report["permutation_p"] <= 1
+    again = _paired_report(pairs, ["a", "b", "c", "d"], 500, 7)
+    assert again["permutation_p"] == report["permutation_p"]
+
+
+def test_binary_rows_keep_mcnemar():
+    from oumi_weights_lab.evaluation import _observation, _paired_report
+
+    pairs = [
+        (
+            _observation({"prediction": "x", "correct": a}, "sampled"),
+            _observation({"prediction": "x", "correct": b}, "sampled"),
+        )
+        for a, b in ((False, True), (True, True), (False, False))
+    ]
+    report = _paired_report(pairs, ["a", "b", "c"], 100, 0)
+    assert report["mcnemar_p"] == 1.0 and "permutation_p" not in report
