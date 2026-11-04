@@ -1,5 +1,7 @@
 <p align="center">
-  <img src="https://github.com/oumi-ai/oumi/raw/main/docs/_static/logo/header_readme.svg" alt="Oumi" width="300">
+  <a href="https://oumi.ai">
+    <img src="https://github.com/oumi-ai/oumi/raw/main/docs/_static/logo/header_readme.svg" alt="Oumi" width="300">
+  </a>
 </p>
 
 # Oumi Weights Lab
