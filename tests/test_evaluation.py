@@ -54,16 +54,19 @@ class OfflineLab(ScoringMixin):
         for index, task in enumerate(tasks):
             yield index, self.score(task["prompt"], task["options"])
 
-    def _sample_rows(self, tasks, generation_config, seed, batch_size):
+    def _sample_rows(self, tasks, generation_config, seed, batch_size, num_samples=1):
         for index, _ in enumerate(tasks):
             yield (
                 index,
-                {
-                    "generated": "A",
-                    "finish_reason": "eos",
-                    "generated_tokens": 1,
-                    "sample_seed": seed + index,
-                },
+                [
+                    {
+                        "generated": "A",
+                        "finish_reason": "eos",
+                        "generated_tokens": 1,
+                        "sample_seed": seed + index * num_samples + sample,
+                    }
+                    for sample in range(num_samples)
+                ],
             )
 
 

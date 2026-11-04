@@ -37,15 +37,26 @@ PROTOCOL_KEYS = (
     "checker_custom",
     "checker_id",
     "scoring_config",
+    "num_samples",
+    "answer_key_custom",
 )
+# Values that runs saved before a protocol key existed implicitly used.
+PROTOCOL_DEFAULTS = {"num_samples": 1, "answer_key_custom": False}
 # Runs saved before scoring configs were recorded scored one sequence per forward.
 LEGACY_SCORING_CONFIG = "legacy-v0.1"
+
+
+def _needs_checker_id(summary: dict) -> bool:
+    """Custom graders or vote extractors are code, so comparisons need a name for them."""
+    custom = summary.get("checker_custom") or summary.get("answer_key_custom")
+    return bool(custom) and not summary.get("checker_id")
 
 
 def _protocol_difference(left: dict, right: dict) -> str | None:
     """Name the first protocol setting two run summaries disagree on, or None."""
     for key in PROTOCOL_KEYS:
-        a, b = left.get(key), right.get(key)
+        a = left.get(key, PROTOCOL_DEFAULTS.get(key))
+        b = right.get(key, PROTOCOL_DEFAULTS.get(key))
         if key == "scoring_config":
             a, b = a or LEGACY_SCORING_CONFIG, b or LEGACY_SCORING_CONFIG
         if a != b:
@@ -373,8 +384,10 @@ class EvaluationMixin:
         difference = _protocol_difference(left, right)
         if difference:
             raise ValueError(f"diff requires the same scoring protocol/settings; {difference}")
-        if left.get("checker_custom") and not left.get("checker_id"):
-            raise ValueError("custom sampled checkers require explicit checker_id for comparison")
+        if _needs_checker_id(left):
+            raise ValueError(
+                "a custom sampled checker or answer_key requires an explicit checker_id to compare"
+            )
         comparable_left = [
             {key: value for key, value in task.items() if key != "id"} for task in left_tasks
         ]
@@ -430,8 +443,10 @@ class EvaluationMixin:
                 "comparison requires the same session, mode, and scoring protocol/settings; "
                 + difference
             )
-        if a.get("checker_custom") and not a.get("checker_id"):
-            raise ValueError("custom sampled checkers require explicit checker_id for comparison")
+        if _needs_checker_id(a):
+            raise ValueError(
+                "a custom sampled checker or answer_key requires an explicit checker_id to compare"
+            )
         if tasks_a != tasks_b:
             raise ValueError("comparison requires identical ordered tasks, IDs, and metadata")
         ids = [_digest(task["id"]) for task in tasks_a if "id" in task]

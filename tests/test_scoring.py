@@ -190,6 +190,8 @@ BATCH_ROWS = [
     {"prompt": "world hello world", "options": {"A": " no yes no", "B": " yes", "C": " world"}},
 ]
 
+BATCH_ROWS_WITH_ANSWERS = [{**row, "answer": "A"} for row in BATCH_ROWS]
+
 
 def _scores(lab, rows, batch_size):
     with lab._evaluation_mode():
@@ -538,6 +540,149 @@ def test_comparing_with_a_failed_sampled_run_reports_lengths_as_unknown(tiny_lab
     report = tiny_lab.compare_runs("complete", "capped")["aggregate"]
     assert report["before"]["truncation_share"] == complete["truncation_share"]
     assert report["after"]["truncation_share"] is None
+
+
+SAMPLING = {**STOP_AT_YES, "do_sample": True}
+
+
+def has_yes(generated, answer):
+    return "yes" in generated.split()
+
+
+def first_word(generated, row):
+    return generated.split()[:1]
+
+
+def _several(lab, name, samples, **kwargs):
+    options = {"checker": has_yes, "checker_id": "has-yes", "generation_config": SAMPLING}
+    summary = lab.evaluate(
+        SAMPLE_ROWS, name=name, mode="sampled", num_samples=samples, **{**options, **kwargs}
+    )
+    return summary, _items(summary)
+
+
+def test_several_samples_score_each_row_by_the_fraction_correct(tiny_lab):
+    summary, items = _several(tiny_lab, "k4", 4, pass_at=[1, 4])
+    for item in items:
+        assert len(item["samples"]) == 4
+        correct = sum(sample["correct"] for sample in item["samples"])
+        assert item["correct_samples"] == correct and item["correct"] == correct / 4
+        assert item["pass_at"]["1"] == pytest.approx(item["correct"])
+    assert 0 < summary["accuracy"] < 1
+    assert summary["accuracy"] == pytest.approx(sum(item["correct"] for item in items) / 6)
+    assert summary["pass_at"]["4"] == pytest.approx(sum(item["pass_at"]["4"] for item in items) / 6)
+    tokens = [sample["generated_tokens"] for item in items for sample in item["samples"]]
+    assert summary["forward_passes"] == sum(tokens)
+    assert summary["mean_generated_tokens"] == pytest.approx(sum(tokens) / 24)
+    assert [sample["sample_seed"] for sample in items[1]["samples"]] == [4, 5, 6, 7]
+    assert summary["num_samples"] == 4
+
+
+def test_several_samples_do_not_depend_on_batch_size(tiny_lab):
+    _, single = _several(tiny_lab, "one", 3, batch_size=1)
+    _, batched = _several(tiny_lab, "five", 3, batch_size=5)
+    texts = [
+        [[s["generated"] for s in item["samples"]] for item in run] for run in (single, batched)
+    ]
+    assert texts[0] == texts[1]
+
+
+def test_majority_vote_uses_the_answer_key(tiny_lab):
+    from oumi_weights_lab.evaluation import majority
+
+    summary, items = _several(tiny_lab, "votes", 3, answer_key=first_word)
+    for item in items:
+        vote, tie = majority([sample["key"] for sample in item["samples"]])
+        assert (item["vote"], item["vote_tie"]) == (vote, tie)
+        assert item["prediction"] == vote
+        assert item["vote_correct"] is (
+            not tie
+            and any(sample["correct"] for sample in item["samples"] if sample["key"] == vote)
+        )
+    assert summary["vote_accuracy"] == pytest.approx(
+        sum(item["vote_correct"] for item in items) / 6
+    )
+
+
+def test_several_samples_need_sampling_and_valid_pass_at_before_reserving(tiny_lab):
+    with pytest.raises(ValueError, match="do_sample"):
+        tiny_lab.evaluate(
+            SAMPLE_ROWS,
+            mode="sampled",
+            num_samples=2,
+            generation_config=STOP_AT_YES,
+            held_out=True,
+            max_passes=500,
+        )
+    with pytest.raises(ValueError, match="pass_at"):
+        tiny_lab.evaluate(
+            SAMPLE_ROWS,
+            mode="sampled",
+            num_samples=2,
+            pass_at=3,
+            generation_config=SAMPLING,
+            held_out=True,
+            max_passes=500,
+        )
+    with pytest.raises(ValueError, match="num_samples"):
+        tiny_lab.evaluate(BATCH_ROWS_WITH_ANSWERS, num_samples=2)
+    tiny_lab.evaluate(
+        SAMPLE_ROWS, mode="sampled", generation_config=SAMPLING, held_out=True, max_passes=500
+    )
+
+
+def test_custom_answer_key_needs_a_checker_id_to_compare(tiny_lab):
+    options = {"checker": has_yes, "answer_key": first_word, "checker_id": None}
+    _several(tiny_lab, "a", 2, **options)
+    _several(tiny_lab, "b", 2, **options)
+    with pytest.raises(ValueError, match="checker_id"):
+        tiny_lab.compare_runs("a", "b")
+
+
+def test_runs_with_different_sample_counts_refuse_to_pair(tiny_lab):
+    _several(tiny_lab, "two", 2)
+    _several(tiny_lab, "three", 3)
+    with pytest.raises(ValueError, match="num_samples"):
+        tiny_lab.compare_runs("two", "three")
+    report = tiny_lab.compare_runs("two", "two")["aggregate"]
+    assert report["mcnemar_p"] is None and report["permutation_p"] == 1.0
+
+
+def test_suite_gates_read_fractional_scores(tiny_lab):
+    datasets = {"rows": {"data": SAMPLE_ROWS, "mode": "sampled", "num_samples": 2}}
+    options = {"checker": has_yes, "checker_id": "has-yes", "generation_config": SAMPLING}
+    before = tiny_lab.evaluate_suite(datasets, name="before", **options)
+    after = tiny_lab.evaluate_suite(datasets, name="after", **options)
+    assert tiny_lab.compare_suites(before, after)["pass"] is True
+
+
+@pytest.mark.parametrize("style", ["row", "kwargs", "strict"])
+def test_checker_receives_a_copy_of_the_row_only_when_it_asks(tiny_lab, style):
+    seen = []
+
+    def with_row(generated, answer, row):
+        seen.append(row["prompt"])
+        row["prompt"] = "changed"
+        return True
+
+    def with_kwargs(generated, answer, **kwargs):
+        seen.append(kwargs["row"]["prompt"])
+        return True
+
+    def strict(generated, answer, strict=True):
+        seen.append(strict)
+        return True
+
+    checker = {"row": with_row, "kwargs": with_kwargs, "strict": strict}[style]
+    summary = tiny_lab.evaluate(
+        SAMPLE_ROWS[:2],
+        mode="sampled",
+        generation_config=STOP_AT_YES,
+        checker=checker,
+        checker_id=style,
+    )
+    assert seen == ([True, True] if style == "strict" else ["hello", "hello world"])
+    assert [item["prompt"] for item in _items(summary)] == ["hello", "hello world"]
 
 
 def test_likelihood_scores_only_continuation_tokens_and_explicit_boundary(lab):
