@@ -17,6 +17,7 @@ def fake_loader(config, path):
         tokenizer=SimpleNamespace(name="fake-tokenizer"),
         artifact_dir=path / "artifacts",
         forward_passes=0,
+        device_memory={"cuda:0": 1.5, "cuda:1": 1.25},
     )
 
 
@@ -93,6 +94,14 @@ def result_for(path, snippet_id):
     result_path = path / "results" / f"{snippet_id}.json"
     wait_for(result_path.exists)
     return read_json(result_path)
+
+
+def test_status_reports_parameter_memory_per_device_once_loaded(worker_session):
+    status = read_json(worker_session / "status.json")
+    assert status["devices"] == {"cuda:0": 1.5, "cuda:1": 1.25}
+    snippet = submit(worker_session, "print('hi')")
+    result_for(worker_session, snippet)
+    assert read_json(worker_session / "status.json")["devices"] == status["devices"]
 
 
 def test_worker_keeps_namespace_and_captures_both_output_streams(worker_session):

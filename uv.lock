@@ -1351,6 +1351,9 @@ adapters = [
 datasets = [
     { name = "datasets" },
 ]
+multi-gpu = [
+    { name = "accelerate" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1362,13 +1365,14 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "accelerate", marker = "extra == 'multi-gpu'", specifier = ">=1.0" },
     { name = "datasets", marker = "extra == 'datasets'", specifier = ">=4" },
     { name = "peft", marker = "extra == 'adapters'", specifier = ">=0.13" },
     { name = "safetensors", specifier = ">=0.4.3" },
     { name = "torch", specifier = ">=2.4" },
     { name = "transformers", specifier = ">=4.56,<6" },
 ]
-provides-extras = ["adapters", "datasets"]
+provides-extras = ["adapters", "datasets", "multi-gpu"]
 
 [package.metadata.requires-dev]
 dev = [
