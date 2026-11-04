@@ -482,8 +482,8 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument(
         "--max-memory",
         type=_max_memory,
-        help="memory to use on each GPU with --device-map, such as 0=70GiB,1=70GiB "
-        "(default: 90%% of each GPU's free memory)",
+        help="with --device-map, use only these GPUs, up to this much memory on each, "
+        "such as 0=70GiB,1=70GiB (default: 90%% of every GPU's free memory)",
     )
     start.add_argument("--snippet-timeout", type=_positive, default=session.DEFAULT_SNIPPET_TIMEOUT)
     start.add_argument(

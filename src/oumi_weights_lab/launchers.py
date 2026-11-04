@@ -106,6 +106,19 @@ def _configuration(model, config):
     return validate_lifecycle(configuration)
 
 
+def _check_gpu_indices(accelerators, max_memory):
+    """Refuse --max-memory GPUs the cluster will not have, before provisioning it."""
+    request = re.fullmatch(r"[A-Za-z0-9_.-]+(?::([0-9]+))?", str(accelerators or ""))
+    if not max_memory or request is None:
+        return
+    count = int(request.group(1) or 1)
+    highest = max(int(index) for index in max_memory)
+    if highest >= count:
+        raise ValueError(
+            f"--max-memory names GPU {highest}, but {accelerators} has GPUs 0 to {count - 1}"
+        )
+
+
 def _source_checkout(source):
     """Return the checkout to ship to the worker, or None when running an installed copy."""
     if source is not None:
@@ -364,6 +377,7 @@ class SkyPilotLauncher:
         configuration = _configuration(
             model, {"idle_timeout": 900, "max_lifetime": 14400, **config}
         )
+        _check_gpu_indices(accelerators, configuration.get("max_memory"))
         launch_id = uuid.uuid4().hex
         configuration["launch_id"] = launch_id
         session = self._path(session)

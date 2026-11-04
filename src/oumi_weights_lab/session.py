@@ -23,6 +23,7 @@ DTYPES = ("auto", "float32", "float16", "bfloat16")
 # How --device-map spreads a model over GPUs, as Transformers names the strategies.
 DEVICE_MAPS = ("balanced", "sequential")
 _MEMORY_SIZE = re.compile(r"[0-9]+(?:\.[0-9]+)?(?:[KMG]iB|[KMG]B)")
+_GPU_INDEX = re.compile(r"[0-9]+")
 _MAX_MEMORY_FORMAT = "--max-memory takes GPU=SIZE pairs, such as 0=70GiB,1=70GiB"
 # Worker status states: starting, loading, ready, running, stopping, stopped, failed.
 TERMINAL_STATES = frozenset({"stopped", "failed"})
@@ -101,9 +102,9 @@ def parse_max_memory(text: str) -> dict[str, str]:
     limits: dict[str, str] = {}
     for entry in text.split(","):
         index, separator, size = (part.strip() for part in entry.partition("="))
-        if not separator or not index.isdigit() or index in limits:
+        if not separator or not _GPU_INDEX.fullmatch(index) or str(int(index)) in limits:
             raise ValueError(_MAX_MEMORY_FORMAT)
-        limits[index] = size
+        limits[str(int(index))] = size
     _check_max_memory(limits)
     return limits
 
@@ -112,7 +113,7 @@ def _check_max_memory(limits: Any) -> None:
     if (
         not isinstance(limits, dict)
         or not limits
-        or not all(isinstance(index, str) and index.isdigit() for index in limits)
+        or not all(isinstance(index, str) and _GPU_INDEX.fullmatch(index) for index in limits)
         or not all(
             isinstance(size, str) and _MEMORY_SIZE.fullmatch(size) for size in limits.values()
         )

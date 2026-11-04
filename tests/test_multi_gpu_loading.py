@@ -14,7 +14,7 @@ from oumi_weights_lab.launchers import SkyPilotLauncher
 GIB = 2**30
 
 
-def _llama_config():
+def _llama_config(**options):
     transformers = pytest.importorskip("transformers")
     return transformers.LlamaConfig(
         vocab_size=64,
@@ -26,7 +26,22 @@ def _llama_config():
         max_position_embeddings=32,
         eos_token_id=1,
         bos_token_id=1,
+        **options,
     )
+
+
+def _placed(placement, name):
+    """The device a dispatch puts ``name`` on: its longest mapped ancestor's."""
+    keys = [key for key in placement if key == "" or name == key or name.startswith(key + ".")]
+    return placement[max(keys, key=len)]
+
+
+@pytest.fixture
+def gpus(monkeypatch):
+    """Two 80 GiB GPUs with everything free."""
+    torch = pytest.importorskip("torch")
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda index: (80 * GIB, 80 * GIB))
 
 
 def _skeleton():
@@ -44,7 +59,9 @@ def _size(skeleton):
 
 def test_max_memory_reads_gpu_size_pairs():
     assert session.parse_max_memory("0=70GiB, 1=69.5GB") == {"0": "70GiB", "1": "69.5GB"}
-    for text in ["0:70GiB", "x=1GiB", "0=70", "0=1GiB,0=2GiB", "", "-1=1GiB"]:
+    assert session.parse_max_memory("01=1GiB") == {"1": "1GiB"}
+    bad = ["0:70GiB", "x=1GiB", "0=70", "0=1GiB,0=2GiB", "", "-1=1GiB", "\u00b2=1GiB"]
+    for text in [*bad, "01=1GiB,1=2GiB"]:
         with pytest.raises(ValueError, match="GPU=SIZE"):
             session.parse_max_memory(text)
 
@@ -152,6 +169,8 @@ def test_loader_passes_its_exact_gpu_map_and_checks_where_weights_landed(fake_gp
         load_lab(config, tmp_path / "session")
     placement = loader.call_args.kwargs["device_map"]
     assert set(placement.values()) == {0, 1}
+    modules = dict(_skeleton().named_modules())
+    assert all(name in modules for name in placement)
     model.to.assert_not_called()
 
 
@@ -178,3 +197,85 @@ def test_device_map_needs_cuda(tmp_path, monkeypatch):
 def test_device_memory_sums_parameters_per_device(tiny_lab):
     size = sum(value.numel() * value.element_size() for value in tiny_lab.model.parameters())
     assert tiny_lab.device_memory == {"cpu": round(size / GIB, 2)}
+
+
+def test_tied_embeddings_and_their_output_head_share_a_gpu(gpus):
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from oumi_weights_lab.lab import _gpu_device_map
+
+    config = _llama_config(tie_word_embeddings=True)
+    placement = _gpu_device_map(
+        transformers.AutoModelForCausalLM, config, torch.float32, "balanced", None
+    )
+    assert set(placement.values()) == {0, 1}
+    assert _placed(placement, "lm_head") == _placed(placement, "model.embed_tokens")
+
+
+@pytest.mark.parametrize(
+    ("declared", "requested", "sized"),
+    [("bfloat16", "auto", "bfloat16"), ("bfloat16", "float32", "float32"), (None, "auto", None)],
+)
+def test_placement_sizes_weights_in_the_dtype_that_will_load(
+    declared, requested, sized, gpus, monkeypatch
+):
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from oumi_weights_lab import lab as lab_module
+
+    seen = []
+    monkeypatch.setattr(
+        lab_module,
+        "_plan_device_map",
+        lambda skeleton, strategy, memory, dtype: (
+            seen.append((next(skeleton.parameters()).dtype, dtype)) or {"": 0}
+        ),
+    )
+    config = _llama_config(dtype=declared) if declared else _llama_config()
+    target = "auto" if requested == "auto" else getattr(torch, requested)
+    lab_module._gpu_device_map(transformers.AutoModelForCausalLM, config, target, "balanced", None)
+    # An unstated checkpoint dtype is sized as float32, the most memory it could need.
+    assert seen == [(getattr(torch, sized or "float32"), None)]
+    assert config.dtype == (getattr(torch, declared) if declared else config.dtype)
+
+
+def test_a_text_configs_dtype_sizes_a_multimodal_model(gpus, monkeypatch):
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from oumi_weights_lab import lab as lab_module
+
+    config_class = getattr(transformers, "Qwen3VLConfig", None)
+    if config_class is None:
+        pytest.skip("installed Transformers does not provide Qwen3VLConfig")
+    config = config_class()
+    config.text_config.dtype = torch.bfloat16
+    seen = []
+    monkeypatch.setattr(
+        lab_module,
+        "_plan_device_map",
+        lambda skeleton, *args: seen.append(next(skeleton.parameters()).dtype) or {"": 0},
+    )
+    factory = transformers.AutoModelForImageTextToText
+    lab_module._gpu_device_map(factory, config, "auto", "balanced", None)
+    assert seen == [torch.bfloat16]
+
+
+def test_max_memory_above_a_gpus_free_memory_is_refused(gpus):
+    from oumi_weights_lab.lab import _gpu_memory
+
+    with pytest.raises(ValueError, match="GPU 1 has 80.0 GiB free"):
+        _gpu_memory({"0": "10GiB", "1": "81GiB"})
+
+
+def test_max_memory_names_only_gpus_the_cluster_requests():
+    runner = Mock(side_effect=AssertionError("invalid config reached an external command"))
+    launcher = SkyPilotLauncher("weights-test", runner=runner)
+    with pytest.raises(ValueError, match="H100:2 has GPUs 0 to 1"):
+        launcher.start(
+            "m",
+            "/remote/session",
+            accelerators="H100:2",
+            device_map="balanced",
+            max_memory={"0": "70GiB", "2": "70GiB"},
+        )
+    runner.assert_not_called()

@@ -199,7 +199,13 @@ def _gpu_memory(max_memory: dict[str, str] | None) -> dict[int, int]:
     for index, size in sorted(max_memory.items(), key=lambda item: int(item[0])):
         if int(index) >= count:
             raise ValueError(f"GPU {index} is not available; {count} GPUs are visible")
-        limits[int(index)] = convert_file_size_to_int(size)
+        limit, free = convert_file_size_to_int(size), torch.cuda.mem_get_info(int(index))[0]
+        if limit > free:
+            raise ValueError(
+                f"--max-memory asks for {limit / 2**30:.1f} GiB on GPU {index}, but GPU "
+                f"{index} has {free / 2**30:.1f} GiB free"
+            )
+        limits[int(index)] = limit
     return limits
 
 
@@ -218,7 +224,12 @@ def _checkpoint_dtype(torch: Any, model_config: Any) -> Any:
 def _gpu_device_map(
     model_class: Any, model_config: Any, dtype: Any, strategy: str, max_memory: Any
 ) -> dict[str, int]:
-    """Plan a GPU-only device map on an empty copy of the model, before any weights load."""
+    """Plan a GPU-only device map on an empty copy of the model, before any weights load.
+
+    The copy is built in the dtype that will load, so it is sized as the real weights.
+    """
+    import copy
+
     import torch
 
     try:
@@ -227,11 +238,18 @@ def _gpu_device_map(
         raise ImportError(
             "--device-map needs accelerate; install oumi-weights-lab[multi-gpu]"
         ) from error
-    with init_empty_weights():
-        skeleton = model_class.from_config(model_config, attn_implementation="eager")
     if dtype == "auto":
-        dtype = _checkpoint_dtype(torch, model_config)
-    return _plan_device_map(skeleton, strategy, _gpu_memory(max_memory), dtype)
+        # An unstated checkpoint dtype is sized as float32, the most it could need.
+        dtype = _checkpoint_dtype(torch, model_config) or torch.float32
+    with init_empty_weights():
+        # from_config rewrites the dtypes of the config it is given.
+        skeleton = model_class.from_config(
+            copy.deepcopy(model_config), dtype=dtype, attn_implementation="eager"
+        )
+    # Building on the meta device unties tied weights; tie them again so the plan
+    # keeps an output head on the same GPU as the embedding it shares.
+    skeleton.tie_weights()
+    return _plan_device_map(skeleton, strategy, _gpu_memory(max_memory), None)
 
 
 def _plan_device_map(
@@ -259,7 +277,8 @@ def _plan_device_map(
     if offloaded:
         needed = compute_module_sizes(skeleton, dtype=dtype)[""]
         gpus = f"{len(gpu_memory)} GPU{'' if len(gpu_memory) == 1 else 's'}"
-        sized = f" as {dtype}" if dtype is not None else ""
+        weights = dtype or next(skeleton.parameters()).dtype
+        sized = f" in {str(weights).removeprefix('torch.')}"
         raise ValueError(
             f"The model needs about {needed / 2**30:.1f} GiB for its weights{sized}, but its "
             f"layers do not fit: the {gpus} offer {sum(gpu_memory.values()) / 2**30:.1f} GiB, "

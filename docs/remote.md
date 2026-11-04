@@ -20,7 +20,8 @@ sky down my-lab
   commit it was installed from, which needs git on the worker. `--source PATH` ships a
   different checkout.
 - `--device-map balanced` (or `sequential`) spreads one model over every GPU in
-  `--accelerators`, such as `H100:4`; `--max-memory 0=70GiB,1=70GiB` caps each GPU.
+  `--accelerators`, such as `H100:4`; `--max-memory 0=70GiB,1=70GiB` uses only the
+  GPUs it names, up to that much on each.
   A model that would need CPU or disk offload is refused before any weights load.
 - Use a new `--session` path for each `start`. Relative session and `--resume` paths
   resolve under `~/sky_workdir/`.
