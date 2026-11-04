@@ -186,12 +186,16 @@ def test_worker_without_watchdog_still_exits_when_its_stop_is_swallowed(tmp_path
     process = launch(path, idle_timeout=60, shutdown_grace=0.5, snippet_timeout=60)
     try:
         wait_for(lambda: read_json(path / "status.json").get("state") == "ready")
-        submit(
+        # The worker reports "running" before the snippet starts, and a stop that lands
+        # in between cancels the snippet cleanly. So the snippet ignores SIGTERM first,
+        # then says so, and the watchdog dies only after that.
+        task = submit(
             path,
-            "import time\nwhile True:\n    try:\n        time.sleep(0.05)\n"
-            "    except BaseException:\n        pass\n",
+            "import signal\nimport time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "print('ignoring stops', flush=True)\nwhile True:\n    time.sleep(0.05)\n",
         )
-        wait_for(lambda: read_json(path / "status.json").get("state") == "running")
+        output = path / "outputs" / f"{task}.log"
+        wait_for(lambda: output.exists() and "ignoring stops" in output.read_text())
         kill_watchdog(process)
         # The worker stands in for its dead watchdog and forces its own exit.
         process.join(5)
