@@ -336,10 +336,12 @@ class EditingMixin:
 
         PEFT exports merge the adapter into the current weights, preserving base
         weight edits as well as adapters. LoRA layers merge one at a time into a CPU
-        copy and are then restored exactly. Other adapters (DoRA, other PEFT
-        methods, tied embeddings under an adapter) merge a clone of the whole model,
-        which needs a second model's memory and is refused for a model split across
-        devices. Failed merges leave the live model and the destination unchanged.
+        copy and are then restored exactly, so the GPUs never hold a second copy; CPU
+        memory holds every merged layer until the checkpoint is written. Other
+        adapters (DoRA, quantized layers, other PEFT methods, tied embeddings under
+        an adapter) merge a clone of the whole model, which needs a second model's
+        memory and is refused for a model split across devices. Failed merges
+        leave the live model and the destination unchanged.
         """
         attachments = getattr(self, "attachments", None)
         if callable(attachments) and attachments():
@@ -362,7 +364,11 @@ class EditingMixin:
 
             blocker = layerwise_blocker(model)
             layerwise = blocker is None
-            devices = set((getattr(self, "device_map", None) or {}).values())
+            # Transformers maps GPU indices, accelerate also accepts names.
+            devices = {
+                f"cuda:{device}" if isinstance(device, int) else str(device)
+                for device in (getattr(self, "device_map", None) or {}).values()
+            }
             if not layerwise and len(devices) > 1:
                 raise ValueError(
                     f"Cannot export this adapter from a model split across devices ({blocker}): "

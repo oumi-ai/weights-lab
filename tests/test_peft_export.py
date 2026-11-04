@@ -16,6 +16,7 @@ transformers = pytest.importorskip("transformers")
 from safetensors.torch import load_file  # noqa: E402
 
 from oumi_weights_lab import Lab  # noqa: E402
+from oumi_weights_lab.merging import layerwise_blocker  # noqa: E402
 
 
 def _gpt2():
@@ -45,6 +46,10 @@ def _llama(tie=False):
     )
 
 
+def _bf16_llama():
+    return _llama().to(torch.bfloat16)
+
+
 ADAPTERS = {
     "gpt2-conv1d": (_gpt2, {"target_modules": ["c_attn", "c_fc"], "fan_in_fan_out": True}),
     "llama-attention": (_llama, {"target_modules": ["q_proj", "v_proj", "down_proj"]}),
@@ -52,11 +57,14 @@ ADAPTERS = {
         _llama,
         {"target_modules": ["embed_tokens", "o_proj"], "modules_to_save": ["lm_head"]},
     ),
+    # bf16 adapters on CPU: older PEFT swaps their storage while computing the delta.
+    "llama-bf16": (_bf16_llama, {"target_modules": ["q_proj", "o_proj"]}, False),
 }
 
 
-def _adapted(build, options):
-    model = peft.get_peft_model(build(), peft.LoraConfig(r=2, lora_alpha=4, **options))
+def _adapted(build, options, autocast=True):
+    config = peft.LoraConfig(r=2, lora_alpha=4, **options)
+    model = peft.get_peft_model(build(), config, autocast_adapter_dtype=autocast)
     torch.manual_seed(1)
     with torch.no_grad():
         for name, parameter in model.named_parameters():
@@ -106,24 +114,30 @@ def _snapshot(model):
         for name, module in model.named_modules()
         if hasattr(module, "merged_adapters")
     }
-    return parameters, merged
+    return parameters, merged, dict(model.named_parameters(remove_duplicate=False))
 
 
 def _assert_unchanged(model, snapshot):
-    parameters, merged = _snapshot(model)
+    parameters, merged, _ = _snapshot(model)
     assert merged == snapshot[1]
     assert parameters.keys() == snapshot[0].keys()
     for name, (pointer, value) in parameters.items():
         assert pointer == snapshot[0][name][0], name
         assert torch.equal(value, snapshot[0][name][1]), name
+    assert dict(model.named_parameters(remove_duplicate=False)).keys() == snapshot[2].keys()
+    for name, value in model.named_parameters(remove_duplicate=False):
+        assert value is snapshot[2][name], name
 
 
 def test_layer_by_layer_export_matches_the_deep_copy_merge(adapter_lab, tmp_path, monkeypatch):
     lab = adapter_lab
     expected = _tensors(_oracle(lab, tmp_path / "oracle"))
     before = _snapshot(lab.model)
-    # The live model is never copied and unloaded whole.
+    # The live model is never copied and unloaded whole, even when split across GPUs.
     monkeypatch.setattr(type(lab.model.base_model), "merge_and_unload", None)
+    monkeypatch.setattr(
+        lab.model.get_base_model(), "hf_device_map", {"model": 0, "lm_head": 1}, raising=False
+    )
     path = lab.export(tmp_path / "export")
     monkeypatch.undo()
     exported = _tensors(path)
@@ -160,6 +174,7 @@ def test_tied_embeddings_under_an_adapter_take_the_copy_path(tmp_path, tiny_toke
         tiny_tokenizer,
         tmp_path / "lab",
     )
+    assert "tied embeddings" in layerwise_blocker(lab.model)
     expected = _tensors(_oracle(lab, tmp_path / "oracle"))
     exported = _tensors(lab.export(tmp_path / "export"))
     assert exported.keys() == expected.keys()
@@ -172,11 +187,64 @@ def test_dora_keeps_the_copy_path_on_one_device_and_is_refused_when_split(tmp_pa
         tiny_tokenizer,
         tmp_path / "lab",
     )
+    assert "DoRA" in layerwise_blocker(lab.model)
     expected = _tensors(_oracle(lab, tmp_path / "oracle"))
     exported = _tensors(lab.export(tmp_path / "export"))
+    assert exported.keys() == expected.keys()
     assert all(torch.equal(exported[name], value) for name, value in expected.items())
     # Copying a model split across GPUs would need a second copy's memory on each.
     lab.model.get_base_model().hf_device_map = {"model": 0, "lm_head": 1}
     with pytest.raises(ValueError, match="split across devices"):
         lab.export(tmp_path / "split")
     assert not (tmp_path / "split").exists()
+
+
+def _plain_lab(tmp_path, tokenizer):
+    return Lab(_adapted(_llama, {"target_modules": ["q_proj"]}), tokenizer, tmp_path / "lab")
+
+
+def test_layers_that_quantize_or_save_themselves_take_the_copy_path(tmp_path, tiny_tokenizer):
+    # Quantized LoRA layers (bitsandbytes, HQQ, torchao) subclass PEFT's and merge by
+    # replacing their weights, which a layer-by-layer restore cannot undo.
+    lab = _plain_lab(tmp_path / "subclass", tiny_tokenizer)
+    layer = next(m for m in lab.model.modules() if isinstance(m, peft.tuners.lora.LoraLayer))
+    layer.__class__ = type("QuantizedLinear", (type(layer),), {})
+    assert "QuantizedLinear" in layerwise_blocker(lab.model)
+
+    lab = _plain_lab(tmp_path / "packed", tiny_tokenizer)
+
+    class Packed(torch.nn.Parameter):
+        pass
+
+    head = lab.model.get_base_model().lm_head
+    head.weight = Packed(head.weight.detach().clone(), requires_grad=False)
+    assert "lm_head.weight" in layerwise_blocker(lab.model)
+
+    lab = _plain_lab(tmp_path / "saves", tiny_tokenizer)
+    norm = lab.model.get_base_model().model.norm
+    norm.__class__ = type("SelfSaving", (type(norm),), {"_save_to_state_dict": lambda *a: None})
+    assert "SelfSaving" in layerwise_blocker(lab.model)
+
+
+def test_inactive_dora_adapters_do_not_block_an_active_lora(tmp_path, tiny_tokenizer):
+    lab = _plain_lab(tmp_path, tiny_tokenizer)
+    lab.model.add_adapter("dora", peft.LoraConfig(r=2, target_modules=["q_proj"], use_dora=True))
+    assert layerwise_blocker(lab.model) is None
+
+
+def test_a_merge_that_replaces_weights_is_refused_and_undone(tmp_path, tiny_tokenizer, monkeypatch):
+    lab = _plain_lab(tmp_path, tiny_tokenizer)
+    layer = next(m for m in lab.model.modules() if isinstance(m, peft.tuners.lora.LoraLayer))
+    merge = type(layer).merge
+
+    def replacing(self, *args, **kwargs):
+        merge(self, *args, **kwargs)
+        base = self.get_base_layer()
+        base.weight = torch.nn.Parameter(base.weight.detach().clone(), requires_grad=False)
+
+    monkeypatch.setattr(type(layer), "merge", replacing)
+    before = _snapshot(lab.model)
+    with pytest.raises(RuntimeError, match="replacing its weights"):
+        lab.export(tmp_path / "export")
+    assert not (tmp_path / "export").exists()
+    _assert_unchanged(lab.model, before)
