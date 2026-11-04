@@ -95,3 +95,55 @@ def test_a_missing_datasets_extra_names_the_install(tiny_lab, monkeypatch):
     monkeypatch.setitem(sys.modules, "datasets", None)
     with pytest.raises(ImportError, match=r"\[datasets\]"):
         tiny_lab.hf_rows("org/qa", split="test", to_row=to_row)
+
+
+COMMIT = "a" * 40
+
+
+def test_a_full_commit_hash_needs_no_hub_lookup(tiny_lab, hub):
+    rows = tiny_lab.hf_rows("org/qa", split="test", to_row=to_row, revision=COMMIT)
+    assert hub["info"] == []
+    assert hub["load"] == [("org/qa", None, "test", COMMIT)]
+    assert rows[0]["metadata"]["hf"]["revision"] == COMMIT
+
+
+def test_offline_lookups_ask_for_a_commit(tiny_lab, hub, monkeypatch):
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    with pytest.raises(ValueError, match="commit"):
+        tiny_lab.hf_rows("org/qa", split="test", to_row=to_row, revision="main")
+    assert hub["info"] == []
+    rows = tiny_lab.hf_rows("org/qa", split="test", to_row=to_row, revision=COMMIT)
+    assert len(rows) == 3
+
+
+def test_local_directories_are_recorded_by_their_resolved_path(
+    tiny_lab, hub, tmp_path, monkeypatch
+):
+    (tmp_path / "qa").mkdir()
+    monkeypatch.chdir(tmp_path)
+    rows = tiny_lab.hf_rows("qa", split="train", to_row=to_row)
+    resolved = str((tmp_path / "qa").resolve())
+    assert hub["load"][0][0] == resolved
+    assert rows[0]["metadata"]["hf"]["path"] == resolved
+    assert rows[0]["id"].startswith(resolved)
+
+
+def test_a_file_path_is_not_a_local_dataset(tiny_lab, hub, tmp_path, monkeypatch):
+    (tmp_path / "notes").write_text("not a dataset")
+    monkeypatch.chdir(tmp_path)
+    tiny_lab.hf_rows("notes", split="train", to_row=to_row)
+    assert hub["info"] == [("notes", None)]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"split": None}, "split"),
+        ({"split": ""}, "split"),
+        ({"to_row": lambda example: {**to_row(example), "metadata": {"hf": "mine"}}}, "hf"),
+    ],
+)
+def test_split_and_reserved_provenance_are_checked(tiny_lab, hub, kwargs, message):
+    options = {"split": "test", "to_row": to_row, **kwargs}
+    with pytest.raises(ValueError, match=message):
+        tiny_lab.hf_rows("org/qa", **options)
