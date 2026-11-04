@@ -20,6 +20,10 @@ and network access.
 
 Tested on CPU, Apple MPS, NVIDIA H200, and SkyPilot with Slurm.
 
+![Two edited Qwen layers and paired MATH-500 results: sample accuracy rises from 7.85% to 51.25%, while samples reaching the token cap fall from 92.90% to 30.55%.](docs/assets/weight-space.svg)
+
+[Explore the visualization, recorded data, and protocol](docs/weight-space.md).
+
 ## Install in your coding agent
 
 Requires Linux or macOS, git, and [uv](https://docs.astral.sh/uv/).
