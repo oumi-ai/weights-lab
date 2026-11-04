@@ -27,6 +27,8 @@ def hub(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "datasets", SimpleNamespace(load_dataset=load_dataset))
     monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(HfApi=HfApi))
+    # The stand-in Hub is reachable; CI's offline flag must not leak into these tests.
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     return calls
 
 
