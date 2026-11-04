@@ -114,11 +114,21 @@ class AttachmentMixin:
                     raise ValueError("prefix components must return text")
         return prompt
 
-    def generate(self, prompt: str, **generation_kwargs) -> str:
-        """Generate with active prompt transformations and return only new text."""
+    def generate(self, prompt: str, *, chat_template: Any = None, **generation_kwargs) -> str:
+        """Generate with active prompt transformations and return only new text.
+
+        With ``chat_template``, the transformed prompt is rendered as a user turn
+        and tokenized without adding special tokens, since the template has them.
+        """
         import torch
 
-        inputs = self.tokenizer(self._prepare_prompt(prompt), return_tensors="pt").to(self.device)
+        text = self._prepare_prompt(prompt)
+        chat = self._chat_settings(chat_template)
+        if chat is not None:
+            text = self._render_chat(text, chat)
+        inputs = self.tokenizer(text, return_tensors="pt", add_special_tokens=chat is None).to(
+            self.device
+        )
         with torch.no_grad():
             tokens = self.model.generate(**inputs, **generation_kwargs)
         return self.tokenizer.decode(
