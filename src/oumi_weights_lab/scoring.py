@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import functools
+import hashlib
 import json
 import threading
 import time
@@ -45,6 +46,18 @@ _SAMPLING_RANGES = {
 
 
 DEFAULT_BATCH_SIZE = 8
+# apply_chat_template arguments the lab sets itself.
+_OWNED_CHAT_ARGUMENTS = {
+    "conversation",
+    "tokenize",
+    "add_generation_prompt",
+    "continue_final_message",
+    "return_dict",
+    "return_tensors",
+    "return_assistant_tokens_mask",
+}
+# Rendered once per chat setting to fingerprint what the template produces.
+_CHAT_PROBE = "Weights Lab prompt format probe."
 
 
 def _check_batch_size(batch_size: Any) -> None:
@@ -418,17 +431,21 @@ class ScoringMixin(EvaluationMixin):
         *,
         max_passes: int | None = None,
         batch_size: int | None = None,
+        chat_template: Any = None,
     ) -> dict[str, float]:
         """Return summed continuation log probabilities using the module's token-boundary policy.
 
         Options are scored in left-padded batches of up to ``batch_size`` sequences
         (default 8, or 1 for a model that cannot take position ids); ``batch_size=1``
-        scores each option alone, exactly as v0.1 did.
+        scores each option alone, exactly as v0.1 did. ``chat_template=True`` (or
+        ``{"system": ..., "kwargs": {...}}``) renders the prompt as a user turn with
+        the tokenizer's chat template first; options follow the assistant header.
         """
         batch_size = self._default_batch_size() if batch_size is None else batch_size
         _check_batch_size(batch_size)
         self._check_batching(batch_size)
-        with self.limit_passes(max_passes), self._evaluation_mode():
+        chat = self._chat_settings(chat_template)
+        with self.limit_passes(max_passes), self._evaluation_mode(), self._chat_prompts(chat):
             for _, scores in self._score_rows(
                 [{"prompt": prompt, "options": _choices(options)}], batch_size
             ):
@@ -581,14 +598,86 @@ class ScoringMixin(EvaluationMixin):
             self._prepared_prompts = None
 
     def _scoring_prompt(self, prompt: str) -> str:
+        """The text a prompt is scored as: prefix attachments first, then any chat template."""
+        chat = getattr(self, "_chat", None)
+        # A nested call with other template settings must not reuse this rendering.
+        key = (prompt, None if chat is None else chat["format"]["rendered_sha256"])
         cache = getattr(self, "_prepared_prompts", None)
-        if cache is not None and prompt in cache:
-            return cache[prompt]
+        if cache is not None and key in cache:
+            return cache[key]
         prepare = getattr(self, "_prepare_prompt", None)
         text = prepare(prompt) if prepare is not None else prompt
+        if chat is not None:
+            text = self._render_chat(text, chat)
         if cache is not None:
-            cache[prompt] = text
+            cache[key] = text
         return text
+
+    def _chat_settings(self, chat_template: Any) -> dict[str, Any] | None:
+        """Validate a chat_template argument: None or False, True, or {system, kwargs}."""
+        if chat_template is None or chat_template is False:
+            return None
+        if chat_template is True:
+            settings: dict[str, Any] = {}
+        elif isinstance(chat_template, dict):
+            settings = dict(chat_template)
+        else:
+            raise ValueError("chat_template must be True, False, None, or {system, kwargs}")
+        if set(settings) - {"system", "kwargs"}:
+            raise ValueError("chat_template settings take only 'system' and 'kwargs'")
+        system, kwargs = settings.get("system"), settings.get("kwargs", {})
+        if system is not None and not isinstance(system, str):
+            raise ValueError("chat_template system must be text")
+        if not isinstance(kwargs, dict):
+            raise ValueError("chat_template kwargs must be a dictionary")
+        try:
+            json.dumps(kwargs, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise ValueError("chat_template kwargs must be JSON values") from error
+        owned = sorted(set(kwargs) & _OWNED_CHAT_ARGUMENTS)
+        if owned:
+            raise ValueError(f"chat_template kwargs cannot set {owned}; the lab controls them")
+        if not getattr(self.tokenizer, "chat_template", None) and "chat_template" not in kwargs:
+            raise ValueError("this tokenizer has no chat template; pass chat_template=None")
+        # The template actually used: tokenizers may hold several named ones.
+        template = self.tokenizer.get_chat_template(
+            kwargs.get("chat_template"), kwargs.get("tools")
+        )
+        chat = {"system": system, "kwargs": kwargs}
+        # Render a fixed probe now, so template errors (such as a template that rejects a
+        # system message) surface before any reservation, and so templates that insert
+        # changing text, such as today's date, record a different fingerprint.
+        probe = self._render_chat(_CHAT_PROBE, chat)
+        chat["format"] = {
+            "chat_template_sha256": hashlib.sha256(template.encode()).hexdigest(),
+            "system": system,
+            "kwargs": kwargs,
+            "rendered_sha256": hashlib.sha256(probe.encode()).hexdigest(),
+        }
+        return chat
+
+    def _render_chat(self, text: str, chat: dict[str, Any]) -> str:
+        """Render text as the user turn, ready for the assistant's reply."""
+        system = chat["system"]
+        messages = [] if system is None else [{"role": "system", "content": system}]
+        messages.append({"role": "user", "content": text})
+        return self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, **chat["kwargs"]
+        )
+
+    def _prompt_format(self, chat: dict[str, Any] | None) -> dict[str, Any] | None:
+        """What a run's summary records about how prompts were rendered."""
+        return None if chat is None else chat["format"]
+
+    @contextmanager
+    def _chat_prompts(self, chat: dict[str, Any] | None):
+        """While active, render every scored or sampled prompt with the chat template."""
+        previous = getattr(self, "_chat", None)
+        self._chat = chat
+        try:
+            yield
+        finally:
+            self._chat = previous
 
     def _sample_rows(
         self,
@@ -723,8 +812,13 @@ class ScoringMixin(EvaluationMixin):
         num_samples: int = 1,
         pass_at: int | list[int] | None = None,
         answer_key: Any = None,
+        chat_template: Any = None,
     ) -> dict[str, Any]:
         """Save per-item results and a summary; failures are saved and then re-raised.
+
+        ``chat_template`` renders each prompt as a user turn, as in ``score``; the
+        summary's ``prompt_format`` records it, and runs pair only when it matches.
+        Held-out and dev identities still use the raw prompts.
 
         In sampled mode, ``num_samples`` draws that many seeded samples per row
         (with ``do_sample=True``): each row scores the fraction of samples correct,
@@ -760,6 +854,7 @@ class ScoringMixin(EvaluationMixin):
         if checker is not None and not callable(checker):
             raise ValueError("checker must be callable")
         grade = _checker_call(checker)
+        chat = self._chat_settings(chat_template)
         if checker_id is not None and (not isinstance(checker_id, str) or not checker_id):
             raise ValueError("checker_id must be a nonempty string")
         if isinstance(seed, bool) or not isinstance(seed, int):
@@ -798,7 +893,7 @@ class ScoringMixin(EvaluationMixin):
             )
         self._check_batching(batch_size)
         name = _safe_name(name or f"run-{uuid.uuid4().hex[:12]}")
-        with self._prompts_prepared_once():
+        with self._prompts_prepared_once(), self._chat_prompts(chat):
             self._check_inputs(tasks, mode, generation_config or {})
             dataset_hash = _digest(
                 [
@@ -837,6 +932,7 @@ class ScoringMixin(EvaluationMixin):
                 "checker_custom": checker is not None,
                 "num_samples": num_samples,
                 "answer_key_custom": answer_key is not None,
+                "prompt_format": self._prompt_format(chat),
                 "checker_id": checker_id,
                 "seed": seed,
                 "generation_config": generation_config or {},

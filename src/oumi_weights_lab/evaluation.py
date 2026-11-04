@@ -39,6 +39,7 @@ PROTOCOL_KEYS = (
     "scoring_config",
     "num_samples",
     "answer_key_custom",
+    "prompt_format",
 )
 # Values that runs saved before a protocol key existed implicitly used.
 PROTOCOL_DEFAULTS = {"num_samples": 1, "answer_key_custom": False}
