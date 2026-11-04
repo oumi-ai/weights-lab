@@ -5,6 +5,9 @@ sampler applies those warpers itself, draws each row from that row's own CPU
 generator, and returns a one-hot that greedy decoding then selects. A row's
 tokens therefore depend only on its seed and its own logits, never on which
 other rows share its batch.
+
+This module imports torch and transformers at the top for its base classes, so
+import it only inside functions; the CLI must stay importable without torch.
 """
 
 from __future__ import annotations
@@ -51,10 +54,14 @@ def effective_config(model: Any, settings: dict[str, Any]) -> tuple[Any, dict[st
 
 
 def neutral_sampling_settings() -> dict[str, Any]:
-    """Sampling fields at values that apply no warper, for the greedy pass that takes the draw."""
+    """Settings for the greedy pass that takes the sampler's draw: no warpers, plain greedy.
+
+    penalty_alpha is ignored when sampling, but in a greedy pass it would switch
+    generate() to contrastive search.
+    """
     defaults = getattr(GenerationConfig, "_get_default_generation_params", None)
     values = defaults() if defaults is not None else vars(GenerationConfig())
-    return {field: values.get(field) for field in SAMPLING_FIELDS}
+    return {**{field: values.get(field) for field in SAMPLING_FIELDS}, "penalty_alpha": None}
 
 
 def warpers(config: Any) -> list[LogitsProcessor]:

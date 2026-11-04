@@ -463,6 +463,83 @@ def test_padding_sensitive_settings_refuse_batching_before_reserving(tiny_lab, s
     assert result["scoring_config"]["batch_size"] == 1
 
 
+def test_model_config_beam_search_takes_the_beam_path(tiny_lab):
+    tiny_lab.model.generation_config.num_beams = 2
+    with pytest.raises(ValueError, match="num_beams"):
+        tiny_lab.evaluate(
+            SAMPLE_ROWS,
+            mode="sampled",
+            batch_size=2,
+            generation_config=STOP_AT_YES,
+            held_out=True,
+            max_passes=200,
+        )
+    result = tiny_lab.evaluate(
+        SAMPLE_ROWS, mode="sampled", generation_config=STOP_AT_YES, held_out=True, max_passes=200
+    )
+    assert result["scoring_config"] == {
+        "sampler": "hf-beam-v0.1",
+        "batch_size": 1,
+        "padding_side": "none",
+    }
+
+
+@pytest.mark.parametrize(
+    "setting", [{"repetition_penalty": 3.0}, {"no_repeat_ngram_size": 1}], ids=["penalty", "ngram"]
+)
+def test_history_reading_penalties_refuse_batching(tiny_lab, setting):
+    config = {**STOP_AT_YES, **setting}
+    with pytest.raises(ValueError, match=next(iter(setting))):
+        _sampled(tiny_lab, "batched", 2, config)
+    summary, _ = _sampled(tiny_lab, "default", None, config)
+    assert summary["scoring_config"]["batch_size"] == 1
+
+
+def test_a_models_own_repetition_penalty_also_keeps_generation_unbatched(tiny_lab):
+    tiny_lab.model.generation_config.repetition_penalty = 1.05
+    summary, _ = _sampled(tiny_lab, "default", None)
+    assert summary["scoring_config"]["batch_size"] == 1
+
+
+def test_assisted_generation_is_refused_before_reserving(tiny_lab):
+    config = {**STOP_AT_YES, "prompt_lookup_num_tokens": 2}
+    with pytest.raises(ValueError, match="assisted"):
+        tiny_lab.evaluate(
+            SAMPLE_ROWS, mode="sampled", generation_config=config, held_out=True, max_passes=200
+        )
+    tiny_lab.evaluate(
+        SAMPLE_ROWS, mode="sampled", generation_config=STOP_AT_YES, held_out=True, max_passes=200
+    )
+
+
+def test_penalty_alpha_with_sampling_stays_plain_sampling(tiny_lab):
+    config = {**STOP_AT_YES, "do_sample": True}
+    _, plain = _sampled(tiny_lab, "plain", 3, config)
+    _, alpha = _sampled(tiny_lab, "alpha", 3, {**config, "penalty_alpha": 0.6})
+    assert _outputs(alpha) == _outputs(plain)
+
+
+def test_watermarked_sampling_keeps_generates_own_sampler(tiny_lab):
+    config = {**STOP_AT_YES, "do_sample": True, "watermarking_config": {"bias": 2.0}}
+    summary, items = _sampled(tiny_lab, "marked", None, config)
+    assert summary["scoring_config"]["sampler"] == "hf-sample-v0.1"
+    assert summary["scoring_config"]["batch_size"] == 1
+    assert summary["forward_passes"] == sum(item["generated_tokens"] for item in items)
+
+
+def test_comparing_with_a_failed_sampled_run_reports_lengths_as_unknown(tiny_lab):
+    complete, _ = _sampled(tiny_lab, "complete", 4)
+    with pytest.raises(BudgetExceeded):
+        _sampled(tiny_lab, "capped", 4, max_passes=20)
+    for before, after in (("complete", "capped"), ("capped", "complete")):
+        report = tiny_lab.compare_runs(before, after)["aggregate"]
+        assert report["delta"]["truncation_share"] is None
+        assert report["delta"]["mean_generated_tokens"] is None
+    report = tiny_lab.compare_runs("complete", "capped")["aggregate"]
+    assert report["before"]["truncation_share"] == complete["truncation_share"]
+    assert report["after"]["truncation_share"] is None
+
+
 def test_likelihood_scores_only_continuation_tokens_and_explicit_boundary(lab):
     scores = lab.score("p", [" x", " y"], batch_size=1)
     expected_x = 2 * (4 - math.log(math.exp(4) + 5))

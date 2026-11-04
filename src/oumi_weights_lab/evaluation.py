@@ -147,7 +147,15 @@ def _value(row: dict, metric: str) -> float:
     return float(row[metric])
 
 
-def _metrics(rows: list[dict]) -> dict:
+LENGTH_METRICS = ("truncation_share", "mean_generated_tokens")
+
+
+def _has_lengths(rows: list[dict]) -> bool:
+    """Whether rows come from a sampled run that recorded why each generation stopped."""
+    return any("truncated" in r for r in rows)
+
+
+def _metrics(rows: list[dict], lengths: bool | None = None) -> dict:
     n = len(rows)
     out = {
         "n": n,
@@ -155,10 +163,10 @@ def _metrics(rows: list[dict]) -> dict:
         "failures": sum(r["failed"] for r in rows),
     }
     out["accuracy"] = out["correct"] / n
-    # Failed rows have no generation: they count as untruncated with no tokens.
-    if any("truncated" in r for r in rows):
-        out["truncation_share"] = sum(_value(r, "truncation_share") for r in rows) / n
-        out["mean_generated_tokens"] = sum(_value(r, "mean_generated_tokens") for r in rows) / n
+    if _has_lengths(rows) if lengths is None else lengths:
+        # A failed row has no generation to measure, so lengths are unknown, not zero.
+        known = not out["failures"]
+        out.update({metric: _mean(rows, metric) if known else None for metric in LENGTH_METRICS})
     out.update(nll=None, brier=None, ece=None)
     if "nll" in rows[0]:
         out.update({key: sum(r[key] for r in rows) / n for key in ("nll", "brier")})
@@ -171,6 +179,10 @@ def _metrics(rows: list[dict]) -> dict:
     return out
 
 
+def _mean(rows: list[dict], metric: str) -> float:
+    return sum(_value(r, metric) for r in rows) / len(rows)
+
+
 def _percentile(values: list[float], q: float) -> float:
     at = (len(values) - 1) * q
     lower = int(at)
@@ -181,14 +193,20 @@ def _paired_report(
     pairs: list[tuple[dict, dict]], clusters: list[str], samples: int, seed: int
 ) -> dict:
     left, right = [p[0] for p in pairs], [p[1] for p in pairs]
-    before, after = _metrics(left), _metrics(right)
+    # Decide from both sides: a run whose rows all failed records no finish reasons.
+    measured = _has_lengths(left + right)
+    before, after = _metrics(left, measured), _metrics(right, measured)
     fixed = sum(not a["correct"] and b["correct"] for a, b in pairs)
     broken = sum(a["correct"] and not b["correct"] for a, b in pairs)
-    lengths = ("truncation_share", "mean_generated_tokens") if "truncation_share" in before else ()
+    lengths = LENGTH_METRICS if measured else ()
     changes = {
-        key: after[key] - before[key] if before[key] is not None else None
+        key: after[key] - before[key]
+        if before[key] is not None and after[key] is not None
+        else None
         for key in ("accuracy", "nll", "brier", "ece", *lengths)
     }
+    # Intervals need a length for every row on both sides.
+    lengths = lengths if all(change is not None for change in map(changes.get, lengths)) else ()
     groups: dict[str, list[int]] = defaultdict(list)
     for i, cluster in enumerate(clusters):
         groups[cluster].append(i)

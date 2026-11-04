@@ -59,17 +59,21 @@ report = lab.compare_runs(before, after)
   before configs were recorded count as `legacy-v0.1`. While a logit attachment,
   or a `record` or `patch` at nonnegative positions, is active, use
   `batch_size=1` for the run and the runs you compare it with, because left
-  padding shifts what those hooks see.
+  padding shifts what those hooks see. Items record each option's token count as
+  `option_tokens`.
 - Sampled mode also generates up to `batch_size` rows at once. Row `i` draws from
-  its own generator seeded with `seed + i`, so seeded samples do not depend on the
-  batch size. Items record `finish_reason` (`eos`, `stop_string`, or `max_tokens`),
+  its own generator seeded with `seed + i`, whatever batch it lands in; runs at
+  different batch sizes still do not pair, because padding can shift logits
+  slightly. Items record `finish_reason` (`eos`, `stop_string`, or `max_tokens`),
   `generated_tokens`, and `sample_seed`; summaries report `truncation_share` and
-  `mean_generated_tokens`. Beam search, `max_time`, `min_length`,
-  `prefill_chunk_size`, watermarking, and `max_length` without `max_new_tokens`
-  run one row at a time, and a `batch_size` above 1 with them raises.
-  Items record each option's token count as `option_tokens`. Batching multiplies
-  eager attention memory, so settle `batch_size` on dev rows before a held-out
-  run: an out-of-memory failure still uses up the reservation.
+  `mean_generated_tokens`. Settings that read the padding or the whole batch run
+  one row at a time, including when the model's own generation config sets them:
+  beam search, `repetition_penalty`, `no_repeat_ngram_size`, `max_time`,
+  `min_length`, `prefill_chunk_size`, watermarking, and `max_length` without
+  `max_new_tokens`. A `batch_size` above 1 with them raises. Assisted generation
+  is refused, because it cannot be charged per generated token.
+- Batching multiplies eager attention memory, so settle `batch_size` on dev rows
+  before a held-out run: an out-of-memory failure still uses up the reservation.
 - `diff(before, after)` and `compare_runs(before, after)` pair rows by position and
   need the same rows in the same order. `compare_runs` also checks row IDs and adds
   McNemar p-values, bootstrap intervals, and the largest movers. For sampled runs

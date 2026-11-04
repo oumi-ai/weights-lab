@@ -70,17 +70,49 @@ def _pack(rows: list[list[Any]], batch_size: int) -> Iterator[list[Any]]:
         yield batch
 
 
-def _padding_sensitive(config: dict[str, Any]) -> list[str]:
-    """Generation settings whose meaning changes when rows are batched or left-padded."""
-    keys = ["num_beams"] if (config.get("num_beams") or 1) > 1 else []
+def _padding_sensitive(config: Any) -> list[str]:
+    """Effective generation settings whose meaning batching or left padding would change.
+
+    Penalties that read the whole sequence would count the padding, and the pad
+    token is often EOS.
+    """
+
+    def value(key: str) -> Any:
+        return getattr(config, key, None)
+
+    keys = ["num_beams"] if (value("num_beams") or 1) > 1 else []
     keys += [
         key
-        for key in ("max_time", "prefill_chunk_size", "min_length", "watermarking_config")
-        if config.get(key) is not None
+        for key in ("max_time", "prefill_chunk_size", "watermarking_config")
+        if value(key) is not None
     ]
-    if config.get("max_length") is not None and config.get("max_new_tokens") is None:
+    if (value("min_length") or 0) > 0:
+        keys.append("min_length")
+    if value("repetition_penalty") not in (None, 1.0):
+        keys.append("repetition_penalty")
+    if (value("no_repeat_ngram_size") or 0) > 0:
+        keys.append("no_repeat_ngram_size")
+    if value("max_length") is not None and value("max_new_tokens") is None:
         keys.append("max_length")
     return keys
+
+
+def _assisted(config: Any) -> list[str]:
+    """Assisted-generation settings, whose verification forwards cover several tokens each."""
+    keys = ("prompt_lookup_num_tokens", "assistant_early_exit", "use_mtp")
+    return [key for key in keys if getattr(config, key, None) not in (None, False)]
+
+
+def _sampler_name(config: Any) -> str:
+    """Which decoder generate() runs for this effective config."""
+    if (getattr(config, "num_beams", None) or 1) > 1:
+        return "hf-beam-v0.1"
+    if not getattr(config, "do_sample", False):
+        return "greedy-v1"
+    if getattr(config, "watermarking_config", None) is not None:
+        # The watermark biases generate()'s own distribution, after custom processors.
+        return "hf-sample-v0.1"
+    return "per-sequence-uniform-v1"
 
 
 def _summed(logits: Any, answer_ids: list[int]) -> float:
@@ -327,20 +359,11 @@ class ScoringMixin(EvaluationMixin):
                 f"an active record or patch uses token positions that left padding shifts; {same}"
             )
 
-    def _scoring_config(
-        self, mode: str, batch_size: int, generation_config: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
+    def _scoring_config(self, mode: str, batch_size: int, decoder: Any = None) -> dict[str, Any]:
         """Describe how a run scores, so only runs scored the same way pair."""
         if mode == "sampled":
-            config = generation_config or {}
-            if (config.get("num_beams") or 1) > 1:
-                sampler = "hf-beam-v0.1"
-            elif config.get("do_sample"):
-                sampler = "per-sequence-uniform-v1"
-            else:
-                sampler = "greedy-v1"
             return {
-                "sampler": sampler,
+                "sampler": _sampler_name(decoder),
                 "batch_size": batch_size,
                 "padding_side": "left" if batch_size > 1 else "none",
             }
@@ -511,13 +534,15 @@ class ScoringMixin(EvaluationMixin):
             [[0] * (length - len(row)) + [1] * len(row) for row in prompts], device=device
         )
         settings = dict(generation_config)
-        beams = (settings.get("num_beams") or 1) > 1
-        model_config = getattr(self.model, "generation_config", None)
+        # What generate() will run, including the model's own generation defaults.
+        config, _ = effective_config(self.model, settings)
+        sampler = _sampler_name(config)
+        beams = sampler == "hf-beam-v0.1"
         tracker = FinishTracker(
             len(prompts),
             length,
-            eos_token_id=settings.get("eos_token_id", getattr(model_config, "eos_token_id", None)),
-            stop_strings=settings.get("stop_strings"),
+            eos_token_id=config.eos_token_id,
+            stop_strings=config.stop_strings,
             tokenizer=self.tokenizer,
         )
         # generate() needs the tokenizer to match stop strings.
@@ -528,13 +553,12 @@ class ScoringMixin(EvaluationMixin):
             extra["pad_token_id"] = pad
         if not beams:
             extra["stopping_criteria"] = StoppingCriteriaList([tracker])
-            if settings.get("do_sample"):
-                config, _ = effective_config(self.model, settings)
-                extra["logits_processor"] = LogitsProcessorList(
-                    [PerSequenceSampler(seeds, warpers(config))]
-                )
-                # The sampler draws; generate() then takes its one-hot greedily.
-                settings.update(neutral_sampling_settings(), do_sample=False)
+        if sampler == "per-sequence-uniform-v1":
+            extra["logits_processor"] = LogitsProcessorList(
+                [PerSequenceSampler(seeds, warpers(config))]
+            )
+            # The sampler draws; generate() then takes its one-hot greedily.
+            settings.update(neutral_sampling_settings(), do_sample=False)
         devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
         # manual_seed also changes MPS state when the model runs on CPU.
         mps_state = torch.mps.get_rng_state() if torch.backends.mps.is_available() else None
@@ -585,9 +609,10 @@ class ScoringMixin(EvaluationMixin):
     ) -> dict[str, Any]:
         """Save per-item results and a summary; failures are saved and then re-raised.
 
-        Modes are likelihood, yes_no, and sampled. Likelihood modes score up to
-        ``batch_size`` sequences per forward (default 8); sampled mode runs one row
-        at a time. Runs pair only when their recorded scoring_config matches.
+        Modes are likelihood, yes_no, and sampled. Each runs up to ``batch_size``
+        sequences per forward (default 8), dropping to 1 for models without position
+        ids and for padding-sensitive generation settings. Runs pair only when their
+        recorded scoring_config matches.
         The sampled checker receives
         (generated_text, expected_answer); exact stripped equality is the default.
         A held-out dataset requires an explicit max_passes and can be used only
@@ -610,10 +635,21 @@ class ScoringMixin(EvaluationMixin):
         json.dumps(generation_config or {}, allow_nan=False)
         tasks, identities = _tasks(data, mode)
         unbatchable: list[str] = []
+        decoder = None
         if mode == "sampled":
+            from .sampling import effective_config
+
             generate = getattr(getattr(self, "model", None), "generate", None)
             generation_config = _generation_kwargs(generation_config, generate)
-            unbatchable = _padding_sensitive(generation_config)
+            # Decide batching from what generate() will run, model defaults included.
+            decoder, _ = effective_config(getattr(self, "model", None), generation_config)
+            assisted = _assisted(decoder)
+            if assisted:
+                raise ValueError(
+                    f"assisted generation ({', '.join(assisted)}) verifies several tokens per "
+                    "forward, so sampled evaluation cannot charge it per generated token"
+                )
+            unbatchable = _padding_sensitive(decoder)
         if batch_size is None:
             batch_size = 1 if unbatchable else self._default_batch_size()
         _check_batch_size(batch_size)
@@ -664,7 +700,7 @@ class ScoringMixin(EvaluationMixin):
                 "checker_id": checker_id,
                 "seed": seed,
                 "generation_config": generation_config or {},
-                "scoring_config": self._scoring_config(mode, batch_size, generation_config),
+                "scoring_config": self._scoring_config(mode, batch_size, decoder),
                 "tokenizer_policy": "separate_prompt_continuation_no_special_tokens_sum",
                 "max_passes": max_passes,
                 "started_at": started,
