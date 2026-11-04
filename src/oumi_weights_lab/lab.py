@@ -261,6 +261,7 @@ def _plan_device_map(
     to CPU or disk. ``dtype`` None sizes weights as the skeleton holds them.
     """
     from accelerate.utils import compute_module_sizes, get_balanced_memory, infer_auto_device_map
+    from accelerate.utils.modeling import get_max_layer_size
 
     no_split = getattr(skeleton, "_get_no_split_modules", None)
     options = {
@@ -275,15 +276,27 @@ def _plan_device_map(
     placement = infer_auto_device_map(skeleton, max_memory=limits, **options)
     offloaded = [name for name, device in placement.items() if device in ("cpu", "disk")]
     if offloaded:
-        needed = compute_module_sizes(skeleton, dtype=dtype)[""]
+        sizes = compute_module_sizes(skeleton, dtype=dtype)
+        needed, offered = sizes[""], sum(gpu_memory.values())
         gpus = f"{len(gpu_memory)} GPU{'' if len(gpu_memory) == 1 else 's'}"
         weights = dtype or next(skeleton.parameters()).dtype
         sized = f" in {str(weights).removeprefix('torch.')}"
+        reserve = ""
+        if needed <= offered:
+            # accelerate, like Transformers, keeps the first GPU's room for the largest layer.
+            layer, _ = get_max_layer_size(
+                list(skeleton.named_children()), sizes, options["no_split_module_classes"]
+            )
+            reserve = (
+                f" The weights would fit in total, but GPU {min(gpu_memory)} keeps "
+                f"{layer / 2**30:.1f} GiB free for the largest layer, as Transformers does."
+            )
         raise ValueError(
             f"The model needs about {needed / 2**30:.1f} GiB for its weights{sized}, but its "
-            f"layers do not fit: the {gpus} offer {sum(gpu_memory.values()) / 2**30:.1f} GiB, "
-            f"and {', '.join(offloaded[:3])} would be offloaded. CPU and disk offload are not "
-            "supported; use more or larger GPUs, a smaller --dtype, or a larger --max-memory."
+            f"layers do not fit: the {gpus} offer {offered / 2**30:.1f} GiB, "
+            f"and {', '.join(offloaded[:3])} would be offloaded.{reserve} CPU and disk "
+            "offload are not supported; use more or larger GPUs, a smaller --dtype, or a "
+            "larger --max-memory."
         )
     return placement
 

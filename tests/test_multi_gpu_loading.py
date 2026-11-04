@@ -120,6 +120,19 @@ def test_placement_that_would_offload_is_refused_with_the_memory_numbers():
         _plan_device_map(skeleton, "sequential", {0: half, 1: half // 2}, None)
 
 
+def test_a_model_near_the_limit_is_told_about_the_largest_layer_reserve():
+    from oumi_weights_lab.lab import _plan_device_map
+
+    skeleton = _skeleton()
+    size = _size(skeleton)
+    # Enough in total, but GPU 0 keeps room for the largest layer, so the end spills.
+    with pytest.raises(ValueError, match="would fit in total.*largest layer"):
+        _plan_device_map(skeleton, "sequential", {0: int(size * 0.6), 1: int(size * 0.6)}, None)
+    with pytest.raises(ValueError) as refused:
+        _plan_device_map(skeleton, "sequential", {0: size // 2, 1: size // 4}, None)
+    assert "would fit in total" not in str(refused.value)
+
+
 def test_gpu_memory_defaults_to_most_of_each_gpus_free_memory(monkeypatch):
     torch = pytest.importorskip("torch")
     from oumi_weights_lab.lab import _gpu_memory
