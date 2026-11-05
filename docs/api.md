@@ -120,6 +120,21 @@ report = lab.compare_runs(before, after)
   for up to 16 changed documents and estimated from `bootstrap_samples` random
   flips beyond that. For sampled runs
   it also compares truncation share and mean generated length.
+- Runs pair only when their protocol matches: session, mode, seed, generation and
+  scoring config, tokenizer policy, checker, number of samples, answer key, prompt
+  format, and held-out status. `cross_session=True` on `diff` and `compare_runs`
+  skips only the session check, so runs from another session (an export reloaded in
+  a new session, an adapter against its merged export, one GPU against a split model)
+  can pair by run directory path or summary. It must be a bool, and `compare_suites`
+  passes it through to `compare_runs`. Without it, a pair
+  that differs only by session is refused with a hint to pass it. Each new summary
+  has a `setup` block: `devices`, `dtypes`, `torch`, `transformers`, `peft`,
+  `adapter`, `attention`, `device_map`, `model_id`, and `model_commit`. With the
+  opt-in, `compare_runs` adds `cross_session` with `before_session`,
+  `after_session`, `before_setup`, `after_setup`, `setup_differences` (field names
+  that differ, or `["setup"]` when a run has none), and a caveat. `diff` returns
+  the same list of changes. Run the unchanged base model in both sessions as a
+  control, because near-tie predictions can flip between setups.
 - `evaluate_suite` and `compare_suites` gate a candidate on per-dataset accuracy and
   NLL tolerances. `create_screen` and `verify_screen` pin a stratified dev subset.
 - `hf_rows(path, *, split, to_row, name=None, revision=None, limit=None)` loads a
