@@ -119,10 +119,17 @@ class AttachmentMixin:
 
         With ``chat_template``, the transformed prompt is rendered as a user turn
         and tokenized without adding special tokens, since the template has them.
+        Generation stops at the tokenizer's EOS as well as the model's, unless
+        ``eos_token_id`` or ``generation_config`` is passed.
         """
         import torch
 
+        from .sampling import stop_token_ids
+
         chat = self._chat_settings(chat_template)  # Validate before any prefix transform.
+        stops = stop_token_ids(self.model, self.tokenizer, generation_kwargs)
+        if stops is not None:
+            generation_kwargs = {**generation_kwargs, "eos_token_id": stops}
         text = self._prepare_prompt(prompt)
         if chat is not None:
             text = self._render_chat(text, chat)

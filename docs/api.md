@@ -91,6 +91,12 @@ report = lab.compare_runs(before, after)
   `min_length`, `prefill_chunk_size`, watermarking, and `max_length` without
   `max_new_tokens`. A `batch_size` above 1 with them raises. Assisted generation
   is refused, because it cannot be charged per generated token.
+- Sampled mode and `generate` stop at the tokenizer's EOS token as well as the
+  model's, as vLLM does. A checkpoint without a `generation_config.json` can omit
+  the token its chat turns end with: Qwen3.5 stops on `<|endoftext|>` but ends
+  turns with `<|im_end|>`. Pass `eos_token_id` to choose the stop tokens yourself.
+  When the tokenizer's EOS is added, `scoring_config` records `stop_token_ids`, so
+  those runs do not pair with runs from v0.2.0, which ran past the end of the turn.
 - `num_samples=k` (sampled mode with `do_sample=True`) draws k samples per row;
   sample `j` of row `i` is seeded with `seed + i*k + j`. Each row scores the
   fraction of its samples that are correct, and `accuracy` is the mean fraction.
