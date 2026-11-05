@@ -72,8 +72,12 @@ Quantized weights are read-only in this release:
   `quantization` with `method`, `blocksize` or `threshold`, `double_quant`,
   `packed_shape`, and `packed_dtype`. Other entries are unchanged.
 - `measure` and `compare` use the dequantized float32 values, report the logical shape,
-  and add the same `quantization` block. A quantized model compares against a float
-  model of the same architecture, in either direction.
+  and add the same `quantization` block. Layers that are `Conv1D` in the float
+  model, such as GPT-2's, are stored `[out, in]` once quantized, so `parts`, `measure`,
+  and `compare` show the transposed shape, and comparing them with the float model raises
+  a shape mismatch. Other layers compare against a float model of the same architecture,
+  in either direction.
+- `swap` accepts a quantized weight as its source and copies its dequantized float values.
 - `edit`, `zero`, `swap`, and `project_out` on a quantized weight raise `ValueError`
   naming it, and change nothing. Float parameters, including the bias of a quantized
   layer, edit and undo exactly. On a GPTQ or AWQ checkpoint, an edit of a non-float
@@ -85,7 +89,7 @@ Quantized weights are read-only in this release:
   GPT-2's fused layers quantized as `[out, in]`, so a head's `index` selects rows of
   `c_attn` and columns of `c_proj` there, the transpose of the float model; the weights
   `head_weights` returns have the same shapes either way.
-- `export` raises `ValueError`: export from a float session. `save_edits` and
+- `export` raises `ValueError` for any model with bitsandbytes layers: export from a float session. `save_edits` and
   `start --resume` work for edits to float parameters; resume with the same `--quantize`.
 
 `--allow-hub-kernels` lets kernel code downloaded from the Hugging Face Hub run, as

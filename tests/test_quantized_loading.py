@@ -311,12 +311,13 @@ def test_gpt2_head_parts_follow_the_quantized_orientation(bnb, checkpoint, load)
 
 @pytest.mark.parametrize("method", ["nf4", "fp4"])
 def test_cpu_repack_is_disabled(bnb, checkpoint, load, monkeypatch, method):
-    import bitsandbytes.functional as functional
+    import bitsandbytes.nn.modules as modules
 
+    # Layers read this flag when they are built, so patch it before loading.
+    monkeypatch.setattr(modules, "has_avx512bf16", lambda: True)
     lab = load(checkpoint("llama"), quantize=method)
     layers = [m for m in lab.model.modules() if isinstance(m, bnb.nn.Linear4bit)]
     assert layers and not any(m.support_avx512bf16_for_cpu for m in layers)
-    monkeypatch.setattr(functional, "has_avx512bf16", lambda: True, raising=False)
     before = packed_state(lab)
     ids = lab.tokenizer("hello world yes", return_tensors="pt")["input_ids"]
     with torch.no_grad():
@@ -631,3 +632,44 @@ def test_transformers_still_loads_models_with_the_guard_on(checkpoint, load):
         assert torch.isfinite(lab.model(input_ids=ids).logits).all()
     assert sys.modules.get("kernels", 0) is None
     assert Lab is not None
+
+
+@pytest.mark.parametrize("method", ["nf4", "int8"])
+def test_swap_reads_a_quantized_source_as_float(bnb, checkpoint, load, method):
+    path = checkpoint("llama")
+    floating, source = load(path), load(path, quantize=method)
+    before = floating.model.get_parameter(Q_PROJ).detach().clone()
+    expected = dequantized(source, Q_PROJ)
+    floating.swap(Q_PROJ, source.model)
+    swapped = floating.model.get_parameter(Q_PROJ)
+    assert torch.equal(swapped, expected) and swapped.abs().max() < 1
+    floating.undo()
+    assert torch.equal(floating.model.get_parameter(Q_PROJ), before)
+    floating.swap(Q_PROJ, source.model, index=(slice(0, 8),))
+    assert torch.equal(floating.model.get_parameter(Q_PROJ)[:8], expected[:8])
+    floating.undo()
+    assert torch.equal(floating.model.get_parameter(Q_PROJ), before)
+
+
+def test_export_refuses_a_bare_lab_around_a_quantized_model(bnb, checkpoint, load, tmp_path):
+    lab = load(checkpoint("llama"), quantize="nf4")
+    bare = Lab(lab.model, lab.tokenizer, tmp_path / "bare")
+    assert bare.quantization is None
+    with pytest.raises(ValueError, match="quantized"):
+        bare.export(tmp_path / "out")
+
+
+def test_int8_logical_dtype_is_the_compute_dtype(bnb, checkpoint, load):
+    lab = load(checkpoint("llama"), quantize="int8")
+    lab.quantization["compute_dtype"] = "bfloat16"
+    assert next(p for p in lab.parts() if p["name"] == Q_PROJ)["dtype"] == "torch.bfloat16"
+    assert lab.measure(Q_PROJ)["dtype"] == "torch.bfloat16"
+
+
+def test_allow_hub_kernels_clears_an_earlier_block(monkeypatch):
+    from oumi_weights_lab.lab import block_hub_kernels
+
+    monkeypatch.setitem(sys.modules, "kernels", None)
+    block_hub_kernels(True)
+    assert "kernels" not in sys.modules
+    block_hub_kernels(True)  # Nothing to clear is fine.

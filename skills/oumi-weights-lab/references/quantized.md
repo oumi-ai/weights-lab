@@ -30,7 +30,7 @@ print([p for p in lab.parts("*layers.0.self_attn.q_proj*")])
 
 ## What works
 
-- `lab.parts` and `lab.measure` report the logical shape and dtype, and add a `quantization` block with the packed layout. `measure` and `lab.compare` use the dequantized values, so a quantized model compares against its float original.
+- `lab.parts` and `lab.measure` report the logical shape and dtype, and add a `quantization` block with the packed layout. `measure` and `lab.compare` use the dequantized values, so a quantized model compares against its float original. Layers that are `Conv1D` in the float model, such as GPT-2's, are stored `[out, in]` once quantized, so those show the transposed shape and comparing them with the float model raises a shape mismatch.
 - `lab.evaluate`, `lab.score`, generation, `lab.record`, `lab.patch`, `lab.heads`, and `lab.head_weights` work. `lab.gradient` skips quantized weights and returns the float ones; asking for a quantized weight by name is refused. Activation gradients with `modules=` work through quantized layers.
 - Edits to the float parameters (embeddings, norms, biases, `lm_head`) work and undo exactly.
 - `lab.edit`, `lab.zero`, `lab.swap`, and `lab.project_out` on a quantized weight raise `ValueError` and change nothing. `lab.export` is refused too; export from a float session.

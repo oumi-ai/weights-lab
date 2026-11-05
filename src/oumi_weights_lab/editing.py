@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .quantized import lookup, other_method, refuse_edit
+from .quantized import has_quantized_layers, lookup, other_method, refuse_edit
 
 _CHUNK = 262_144
 # Exports write shards of at most this size, which bounds the CPU memory each shard
@@ -82,9 +82,9 @@ def _parameter(model: Any, name: str) -> Any:
         raise ValueError(f"Unknown parameter {name!r}") from error
 
 
-def _logical(model: Any, name: str) -> Any:
+def _logical(model: Any, name: str, dtype: Any = None) -> Any:
     """A parameter, or a quantized weight dequantized to float32 on the CPU."""
-    packed = lookup(model, name)
+    packed = lookup(model, name, dtype)
     return _parameter(model, name) if packed is None else packed.dequantize()
 
 
@@ -149,8 +149,9 @@ class EditBook:
     rejected. Revisions increase after both successful edits and undo operations.
     """
 
-    def __init__(self, model: Any) -> None:
+    def __init__(self, model: Any, quantization: dict[str, Any] | None = None) -> None:
         self.model = model
+        self._quantization = quantization
         self.revision = 0
         self._history: list[dict[str, Any]] = []
         self._active: list[dict[str, Any]] = []
@@ -158,6 +159,15 @@ class EditBook:
     @property
     def active_edit_ids(self) -> list[str]:
         return [record["id"] for record in self._active]
+
+    def _packed(self, name: str, model: Any = None) -> Any:
+        """The quantized weight ``name``, whose int8 dtype is the Lab's compute dtype."""
+        import torch
+
+        dtype = None
+        if self._quantization and model in (None, self.model):
+            dtype = getattr(torch, self._quantization["compute_dtype"], None)
+        return lookup(self.model if model is None else model, name, dtype)
 
     def parts(self, pattern: str = "*") -> list[dict[str, Any]]:
         """List parameters; a quantized weight reports its logical shape, dtype and size.
@@ -176,7 +186,7 @@ class EditBook:
                 "numel": value.numel(),
                 "requires_grad": value.requires_grad,
             }
-            packed = lookup(self.model, name)
+            packed = self._packed(name)
             if packed is not None:
                 entry.update(
                     shape=list(packed.shape),
@@ -190,7 +200,7 @@ class EditBook:
     def measure(self, name: str) -> dict[str, Any]:
         """Statistics of one parameter; a quantized weight is measured after dequantizing."""
         parameter = _parameter(self.model, name)
-        packed = lookup(self.model, name)
+        packed = self._packed(name)
         if packed is None:
             return {
                 "name": name,
@@ -210,7 +220,8 @@ class EditBook:
         results = []
         for part in self.parts(pattern):
             name = part["name"]
-            parameter = _logical(self.model, name)
+            packed = self._packed(name)
+            parameter = _parameter(self.model, name) if packed is None else packed.dequantize()
             reference = other[name] if isinstance(other, Mapping) else _logical(other, name)
             if parameter.shape != reference.shape:
                 raise ValueError(
@@ -379,11 +390,12 @@ class EditBook:
         refuse_edit(self.model, name)
         source_name = source_name or name
         if not isinstance(source, torch.Tensor):
-            source = (
-                source[source_name]
-                if isinstance(source, Mapping)
-                else _parameter(source, source_name)
-            )
+            if isinstance(source, Mapping):
+                source = source[source_name]
+            else:
+                # A quantized source stands for its dequantized float values.
+                packed = lookup(source, source_name)
+                source = _parameter(source, source_name) if packed is None else packed.dequantize()
         target = _parameter(self.model, name)
         if source.shape != target.shape:
             raise ValueError(f"Swap shape {source.shape} does not match {target.shape}")
@@ -453,7 +465,7 @@ class EditingMixin:
     @property
     def editbook(self) -> EditBook:
         if not hasattr(self, "_editbook"):
-            self._editbook = EditBook(self.model)
+            self._editbook = EditBook(self.model, getattr(self, "quantization", None))
         return self._editbook
 
     @property
@@ -527,7 +539,7 @@ class EditingMixin:
         memory and is refused for a model split across devices. Failed merges
         leave the live model and the destination unchanged.
         """
-        if getattr(self, "quantization", None):
+        if getattr(self, "quantization", None) or has_quantized_layers(self.model):
             raise ValueError(
                 "Exporting a quantized model is not supported yet; export from a float session"
             )

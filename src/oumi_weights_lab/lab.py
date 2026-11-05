@@ -104,6 +104,9 @@ def block_hub_kernels(allow: bool) -> None:
     RuntimeError when the real package is already imported, since that is too late.
     """
     if allow:
+        # An earlier guarded load in this process may have left a block behind.
+        if "kernels" in sys.modules and sys.modules["kernels"] is None:
+            del sys.modules["kernels"]
         return
     loaded = sys.modules.get("kernels")
     if loaded is not None:

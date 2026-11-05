@@ -86,8 +86,12 @@ class QuantizedWeight:
         return values.reshape(self.shape).to(torch.float32)
 
 
-def lookup(model: Any, name: str) -> QuantizedWeight | None:
-    """The quantized weight called ``name``, or None for ordinary parameters and unknown names."""
+def lookup(model: Any, name: str, dtype: Any = None) -> QuantizedWeight | None:
+    """The quantized weight called ``name``, or None for ordinary parameters and unknown names.
+
+    ``dtype`` is the compute dtype that an int8 weight reports as its logical dtype. Without
+    it, a bare model's first float parameter stands in.
+    """
     owner_name, _, attribute = name.rpartition(".")
     if attribute != "weight" or not _layer_classes():
         return None
@@ -97,8 +101,9 @@ def lookup(model: Any, name: str) -> QuantizedWeight | None:
         return None
     if not is_quantized(owner):
         return None
-    float_dtype = next((p.dtype for p in model.parameters() if p.is_floating_point()), None)
-    return of(owner, name, float_dtype)
+    if dtype is None:
+        dtype = next((p.dtype for p in model.parameters() if p.is_floating_point()), None)
+    return of(owner, name, dtype)
 
 
 def of(module: Any, name: str = "", dtype: Any = None) -> QuantizedWeight | None:
@@ -129,6 +134,11 @@ def of(module: Any, name: str = "", dtype: Any = None) -> QuantizedWeight | None
         state.dtype,
         bool(getattr(state, "nested", False)),
     )
+
+
+def has_quantized_layers(model: Any) -> bool:
+    """Whether any module of ``model`` is a bitsandbytes layer."""
+    return any(is_quantized(module) for module in model.modules())
 
 
 def refuse_edit(model: Any, name: str) -> None:
