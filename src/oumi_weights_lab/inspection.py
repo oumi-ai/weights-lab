@@ -474,6 +474,9 @@ class InspectionMixin:
                 inputs["position_ids"] = (mask.long().cumsum(-1) - 1).clamp(min=0)
         if any(not (row[1:] != -100).any().item() for row in labels):
             raise ValueError("each row must have at least one scored token after its first token")
+        if modules is not None:
+            # Refuse positions this length cannot satisfy before any pass is spent.
+            _positions(torch.empty(1, ids.shape[1], 0), positions, 1)
         # Tied weights have several names; parts() lists every alias.
         named = dict(self.model.named_parameters(remove_duplicate=False))
         if parameters is not None:
@@ -489,8 +492,6 @@ class InspectionMixin:
                 or any(name not in named for name in names)
             ):
                 raise ValueError("parameters must name distinct existing model parameters")
-        if set(names) & set(module_names):
-            raise ValueError("a module name and a parameter name are both the same string")
         # Aliases of one tensor share one gradient, computed once.
         selected = list({id(named[name]): named[name] for name in names}.values())
         if any(not parameter.is_floating_point() for parameter in selected):
@@ -567,24 +568,22 @@ class InspectionMixin:
                     f"module {name!r} ran more than once in one forward, "
                     "so its gradient would mix calls"
                 )
-            if value.requires_grad and not always:
-                seen[name] = value
-                return None
             # A stand-in only this module sees. A view keeps the graph, so upstream gradients
             # still flow; a frozen model's activation has none, so it gets a detached leaf.
-            seen[name] = (
-                value.view_as(value) if value.requires_grad else value.detach().requires_grad_(True)
-            )
-            return seen[name]
+            if value.requires_grad:
+                seen[name] = value.view_as(value) if always else value
+            else:
+                seen[name] = value.detach().requires_grad_(True)
+            # The model gets a copy, so an in-place op downstream cannot modify a leaf or
+            # rebase the tensor the gradient is taken at.
+            return seen[name].clone()
 
         def after(module, args, output):
-            leaf = keep(_activation(output), False)
-            return None if leaf is None else _with_output(output, leaf)
+            return _with_output(output, keep(_activation(output), False))
 
         def before(module, args, kwargs):
             value, slot = _input_activation(args, kwargs)
-            leaf = keep(value, True)
-            return None if leaf is None else _with_input(args, kwargs, slot, leaf)
+            return _with_input(args, kwargs, slot, keep(value, True))
 
         return before if at == "input" else after
 

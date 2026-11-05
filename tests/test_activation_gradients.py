@@ -234,13 +234,6 @@ def test_activation_gradient_refusals(lab):
         lab.gradient(PROMPT, target=TARGET, modules=MLP, positions=[50])
 
 
-def test_module_and_parameter_names_must_not_collide(lab, monkeypatch):
-    # Real names never collide; force it to check the guard.
-    monkeypatch.setattr(lab.model, "named_parameters", lambda **_: iter([("lm_head", object())]))
-    with pytest.raises(ValueError, match="both"):
-        lab.gradient(PROMPT, target=TARGET, modules=["lm_head"], parameters=["lm_head"])
-
-
 def test_module_that_never_runs_raises(lab):
     lab.model.transformer.h[0].extra = torch.nn.Linear(16, 16)
     with pytest.raises(ValueError, match="did not run"):
@@ -292,3 +285,38 @@ def test_input_gradient_same_frozen_or_trainable(lab):
     frozen = lab.gradient(PROMPT, target=TARGET, modules=LN, at="input")[LN]
     assert frozen.abs().sum() > 0
     assert torch.allclose(frozen, trainable, atol=1e-6)
+
+
+class Double(torch.nn.Module):
+    def __init__(self, inplace):
+        super().__init__()
+        self.inplace = inplace
+
+    def forward(self, x):
+        return x.mul_(2) if self.inplace else x * 2
+
+
+@pytest.mark.parametrize("frozen", [False, True])
+@pytest.mark.parametrize("at", ["output", "input"])
+def test_in_place_consumer_of_hooked_tensor(lab, frozen, at):
+    mlp = lab.model.transformer.h[0].mlp
+    name = "transformer.h.0.mlp.c_fc" if at == "output" else "transformer.h.0.mlp.act"
+    mlp.act = Double(inplace=False)
+    for parameter in lab.model.parameters():
+        parameter.requires_grad_(True)
+    want = reference(lab, name, at)
+    mlp.act = Double(inplace=True)
+    for parameter in lab.model.parameters():
+        parameter.requires_grad_(not frozen)
+    got = lab.gradient(PROMPT, target=TARGET, modules=[name], at=at)[name]
+    assert got.abs().sum() > 0
+    assert torch.allclose(got[0], want[0], atol=1e-6)
+
+
+def test_bad_position_is_refused_before_any_pass(lab):
+    before = lab.forward_passes
+    with pytest.raises(ValueError, match="outside"):
+        lab.gradient(PROMPT, target=TARGET, modules=MLP, positions=[50])
+    with pytest.raises(ValueError, match="select no tokens"):
+        lab.gradient(PROMPT, target=TARGET, modules=MLP, positions=slice(10, 20))
+    assert lab.forward_passes == before

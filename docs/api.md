@@ -236,15 +236,15 @@ gradients = lab.gradient("hello world", parameters=[name], max_tokens=64)
   loss with respect to module activations. `modules` is a name or a nonempty list of
   distinct names; `at` is `"output"` or `"input"` as for `patch` (`"attention"` raises).
   Each entry is `[rows, selected tokens, ...]` on CPU in the activation's dtype. With
-  `modules`, `parameters=None` returns no parameter gradients; pass both for both. `positions`
-  takes the same forms as `record` but defaults to `"all"`, not the last token: the last
-  position predicts nothing scored, so its output gradient is zero. `positions` or `at`
-  without `modules` raises. A module that did not run, or ran twice in one forward, raises.
-  An input gradient is through that module's use of its input only, not through other
-  uses of the same tensor such as a residual connection, so it is the same on a frozen and
-  a trainable model. When the activation has no gradient path (every parameter frozen, or a frozen PEFT base),
-  the gradient is taken at a detached copy that replaces the activation; forward values do
-  not change.
+  `modules`, `parameters=None` returns no parameter gradients; pass both for both.
+  `positions` takes the same forms as `record` but defaults to `"all"`, not the last
+  token: the last position predicts nothing scored, so its output gradient is zero.
+  `positions` or `at` without `modules` raises, and so does a module that did not run
+  or ran twice in one forward. An input gradient is through that module's use of its
+  input only, not through other uses of the same tensor such as a residual connection,
+  so it is the same on a frozen and a trainable model. When the activation has no
+  gradient path (every parameter frozen, or a frozen PEFT base), the gradient is taken
+  at a detached copy that replaces the activation; forward values do not change.
 - `probe(features, labels, groups)` fits a ridge classifier, keeping each source
   document on one side of the split.
 - `lora_diagnostics(pattern="*", adapter=None)` reports each LoRA update's singular

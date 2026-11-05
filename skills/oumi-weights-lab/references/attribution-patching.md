@@ -6,7 +6,7 @@ Patching every module at every token costs one pass per site. Attribution patchi
 2. Record the clean activations at every token for the modules you want to rank.
 3. Take activation gradients of the loss on the clean answer, run on the corrupt prompt.
 4. Estimate each site as (clean - corrupt) times the gradient, summed over features.
-5. Rank the sites by the size of the estimate.
+5. Rank the sites by the estimate, most negative first.
 6. Confirm the top few with `patch` runs that put the clean activation at that position, scored with `score` or `evaluate`.
 
 ```python
@@ -40,13 +40,13 @@ for name in modules:
     delta = clean_acts[name][0] - corrupt_acts[name][0]  # [1, tokens, hidden]
     estimate = (delta * grads[name]).sum(-1)[0]  # [tokens]
     sites += [(float(value), name, token) for token, value in enumerate(estimate[:size])]
-sites.sort(key=lambda site: -abs(site[0]))
+sites.sort()  # most negative first: restoring these sites lowers the loss most
 print(sites[:5])
 ```
 
 Only prompt tokens are ranked, because later positions hold the answer itself.
 
-The loss falls when the gradient step moves toward the clean answer, so a negative estimate means restoring that site lowers the corrupt run's loss. Rank by the sign you care about and say which in your notes.
+The loss falls when the gradient step moves toward the clean answer, so a negative estimate means restoring that site lowers the corrupt run's loss. The list above ranks the most negative estimates first. To rank by size of effect either way, sort by `-abs(estimate)` instead, and say which you used in your notes.
 
 Confirm before reporting. For each top site, patch the clean activation into the corrupt run at that token and score the answer:
 
@@ -54,7 +54,7 @@ Confirm before reporting. For each top site, patch the clean activation into the
 name, token = sites[0][1], sites[0][2]
 saved = clean_acts[name][0][:, token : token + 1]
 with lab.patch(name, saved, positions=[token]):
-    patched = lab.score(corrupt_text, [answer])
+    patched = lab.score(corrupt_text, [answer], batch_size=1)
 ```
 
-Compare with the unpatched corrupt score and a control patch at an unrelated token. Check that `score` tokenizes the corrupt prompt to the same positions as the ranked row. Keep held-out data out of the ranking.
+The position is an absolute token index, so the `score` call needs `batch_size=1`: batched scoring left-pads and refuses nonnegative positions. Compare with the unpatched corrupt score and a control patch at an unrelated token. The recipe tokenizes with `add_special_tokens=False`, as `score` does, so the ranked row and the scored prompt have the same tokens. Check that `score` tokenizes the corrupt prompt to the same positions as the ranked row. Keep held-out data out of the ranking.
