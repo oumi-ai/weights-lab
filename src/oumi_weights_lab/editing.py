@@ -10,12 +10,14 @@ import copy
 import fnmatch
 import json
 import math
+import sys
 import tempfile
+import warnings
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .quantized import has_quantized_layers, lookup, other_method, refuse_edit
+from .quantized import QuantizedWeight, editable, has_quantized_layers, lookup, other_method
 
 _CHUNK = 262_144
 # Exports write shards of at most this size, which bounds the CPU memory each shard
@@ -82,14 +84,37 @@ def _parameter(model: Any, name: str) -> Any:
         raise ValueError(f"Unknown parameter {name!r}") from error
 
 
+def _outside_package() -> int:
+    """The ``stacklevel`` of the first caller outside this package, seen from the caller of this."""
+    frame, level = sys._getframe(1), 1
+    while frame is not None and frame.f_globals.get("__name__", "").startswith(__package__):
+        frame, level = frame.f_back, level + 1
+    return level
+
+
+def _cpu_index(index: Any) -> Any:
+    """``index`` with any tensor moved to the CPU, where a quantized weight is edited."""
+    import torch
+
+    if isinstance(index, torch.Tensor):
+        return index.cpu()
+    if isinstance(index, (tuple, list)):
+        return type(index)(_cpu_index(part) for part in index)
+    return index
+
+
 def _logical(model: Any, name: str, dtype: Any = None) -> Any:
     """A parameter, or a quantized weight dequantized to float32 on the CPU."""
     packed = lookup(model, name, dtype)
     return _parameter(model, name) if packed is None else packed.dequantize()
 
 
-def _projection_axis(owner: Any, attribute: str, side: str) -> tuple[int, int]:
-    """Return the axis a direction lives on and the length it must have."""
+def _projection_axis(owner: Any, attribute: str, side: str, shape: Any = None) -> tuple[int, int]:
+    """Return the axis a direction lives on and the length it must have.
+
+    ``shape`` is the logical shape of the weight, which differs from ``owner.weight.shape``
+    when the weight is packed.
+    """
     import torch
     from transformers.pytorch_utils import Conv1D
 
@@ -102,7 +127,7 @@ def _projection_axis(owner: Any, attribute: str, side: str) -> tuple[int, int]:
             return 0, owner.bias.shape[0]
         if attribute == "weight":
             axis = out_axis if side == "output" else 1 - out_axis
-            return axis, owner.weight.shape[axis]
+            return axis, (shape if shape is not None else owner.weight.shape)[axis]
     elif isinstance(owner, torch.nn.Embedding) and attribute == "weight":
         if side != "output":
             raise ValueError("An embedding has no input side; use side='output'")
@@ -241,7 +266,9 @@ class EditBook:
         import torch
 
         parameter = _parameter(self.model, name)
-        refuse_edit(self.model, name)
+        packed = editable(self.model, name)
+        if packed is not None:
+            return self._edit_quantized(packed, value, index, note)
         if not parameter.is_floating_point():
             method = other_method(self.model)
             raise ValueError(
@@ -300,6 +327,96 @@ class EditBook:
             raise
         return record["id"]
 
+    def _edit_quantized(self, weight: QuantizedWeight, value: Any, index: Any, note: str) -> str:
+        """Edit a packed weight: change it in float32, then requantize only the blocks it moved."""
+        import torch
+
+        index = _cpu_index(copy.deepcopy(index))
+        parameter = weight.parameter
+        state = parameter.quant_state
+        snapshot = weight.snapshot()
+        previous_revision = self.revision
+        history_size, active_size = len(self._history), len(self._active)
+        try:
+            with torch.no_grad():
+                before = weight.dequantize()
+                selected = before if index is None else before[index]
+                # The callable never sees the dequantized copy itself.
+                candidate_part = selected.detach().to(
+                    device=parameter.device, dtype=weight.dtype, copy=True
+                )
+                replacement = value(candidate_part) if callable(value) else value
+                if replacement is None:
+                    if not callable(value):
+                        raise ValueError("An edit value is required")
+                    replacement = candidate_part
+                replacement = torch.as_tensor(
+                    replacement, device=parameter.device, dtype=weight.dtype
+                )
+                if replacement.shape != selected.shape:
+                    raise ValueError(
+                        f"Edit shape {replacement.shape} does not match {selected.shape}"
+                    )
+                candidate = before.clone()
+                inside = torch.zeros(before.shape, dtype=torch.bool)
+                if index is None:
+                    candidate.copy_(replacement.cpu().float())
+                    inside[...] = True
+                else:
+                    candidate[index] = replacement.cpu().float()
+                    inside[index] = True
+                written = weight.write(candidate, before)
+                landed = weight.dequantize()
+            changed = landed != before
+
+            def norm(difference: Any) -> float:
+                return float(torch.linalg.vector_norm(difference))
+
+            quantization = {
+                "type": weight.method,
+                "blocksize": int(state.blocksize),
+                "blocks_requantized": written["blocks_requantized"],
+                "requested_delta_l2": norm((candidate - before)[inside]),
+                "realized_delta_l2": norm((landed - before)[inside]),
+                "residual_l2": norm((landed - candidate)[inside]),
+                "collateral_l2": norm((landed - before)[~inside]),
+                "changed_elements": int(changed.sum()),
+            }
+            record = {
+                "id": f"edit-{len(self._history) + 1:06d}",
+                "name": weight.name,
+                "index": repr(index),
+                "shape": list(weight.shape),
+                "dtype": str(weight.dtype),
+                "note": note,
+                "revision": previous_revision + 1,
+                "active": True,
+                "quantization": quantization,
+                "_index": index,
+                "_snapshot": snapshot,
+                "_parameter": parameter,
+                "_state": state,
+            }
+            if quantization["requested_delta_l2"] > 0 and quantization["realized_delta_l2"] == 0:
+                # Inside the try: a warning raised as an error rolls the edit back.
+                warnings.warn(
+                    f"{record['id']}: the change to {weight.name} was smaller than the "
+                    "quantization step, so no stored value changed; the edit is recorded and "
+                    "undo still works",
+                    UserWarning,
+                    stacklevel=_outside_package(),
+                )
+            self._history.append(record)
+            self._active.append(record)
+            self.revision = previous_revision + 1
+        except BaseException:
+            weight.restore(snapshot)
+            del self._history[history_size:]
+            del self._active[active_size:]
+            self.revision = previous_revision
+            raise
+        return record["id"]
+
     def zero(self, name: str, index: Any = None, note: str = "") -> str:
         return self.edit(name, lambda value: value.zero_(), index=index, note=note)
 
@@ -333,10 +450,11 @@ class EditBook:
         ):
             raise ValueError("scale must be a finite int or float")
         parameter = _parameter(self.model, name)
-        refuse_edit(self.model, name)
+        packed = editable(self.model, name)
+        shape = parameter.shape if packed is None else packed.shape
         owner_name, _, attribute = name.rpartition(".")
         owner = self.model.get_submodule(owner_name)
-        axis, length = _projection_axis(owner, attribute, side)
+        axis, length = _projection_axis(owner, attribute, side, shape)
         vector = torch.as_tensor(direction)
         if vector.ndim != 1 or vector.shape[0] != length:
             raise ValueError(f"direction must be 1-D with length {length}")
@@ -350,12 +468,12 @@ class EditBook:
         # overflowing or underflowing in the norm.
         vector = vector / largest
         unit = vector / vector.norm()
-        if parameter.ndim == 1:
+        if len(shape) == 1:
             if index is not None:
                 raise ValueError("A bias takes no index")
             full = None
         else:
-            other = parameter.shape[1 - axis]
+            other = shape[1 - axis]
             selected = _projection_index(index, other)
             full = (slice(None), selected) if axis == 0 else (selected, slice(None))
 
@@ -387,18 +505,18 @@ class EditBook:
     ) -> str:
         import torch
 
-        refuse_edit(self.model, name)
+        packed = editable(self.model, name)
         source_name = source_name or name
         if not isinstance(source, torch.Tensor):
             if isinstance(source, Mapping):
                 source = source[source_name]
             else:
                 # A quantized source stands for its dequantized float values.
-                packed = lookup(source, source_name)
-                source = _parameter(source, source_name) if packed is None else packed.dequantize()
-        target = _parameter(self.model, name)
-        if source.shape != target.shape:
-            raise ValueError(f"Swap shape {source.shape} does not match {target.shape}")
+                held = lookup(source, source_name)
+                source = _parameter(source, source_name) if held is None else held.dequantize()
+        shape = _parameter(self.model, name).shape if packed is None else packed.shape
+        if source.shape != shape:
+            raise ValueError(f"Swap shape {source.shape} does not match {shape}")
         value = source if index is None else source[index]
         return self.edit(name, value, index=index, note=note)
 
@@ -410,6 +528,8 @@ class EditBook:
         record = self._active[-1]
         if edit_id is not None and edit_id != record["id"]:
             raise ValueError("Undo must follow reverse edit order (LIFO)")
+        if "_snapshot" in record:
+            return self._undo_quantized(record)
         parameter = _parameter(self.model, record["name"])
         original = record["_original"]
         index = record["_index"]
@@ -445,6 +565,45 @@ class EditBook:
                     parameter.copy_(current.to(parameter.device))
                 else:
                     parameter[index] = current.to(parameter.device)
+            self._active[:] = active_before
+            record.clear()
+            record.update(record_before)
+            self.revision = previous_revision
+            raise
+        return record["id"]
+
+    def _undo_quantized(self, record: dict[str, Any]) -> str:
+        """Restore a packed weight's bytes and scales, after checking nothing was swapped out."""
+        snapshot = record["_snapshot"]
+        weight = self._packed(record["name"])
+        parameter = _parameter(self.model, record["name"])
+        if (
+            weight is None
+            or parameter is not record["_parameter"]
+            or getattr(parameter, "quant_state", None) is not record["_state"]
+            or parameter.data.dtype != snapshot["data"].dtype
+            or parameter.data.shape != snapshot["data"].shape
+            or weight.parameter.quant_state.absmax.dtype != snapshot["absmax"].dtype
+            or weight.parameter.quant_state.absmax.shape != snapshot["absmax"].shape
+            or weight.repacked
+        ):
+            raise RuntimeError("Parameter storage, dtype, or shape changed since the edit")
+        current = weight.snapshot()
+        record_before, active_before, previous_revision = (
+            record.copy(),
+            self._active.copy(),
+            self.revision,
+        )
+        try:
+            weight.restore(snapshot)
+            self._active.pop()
+            record["active"] = False
+            self.revision = previous_revision + 1
+            record["undone_revision"] = self.revision
+            for key in ("_snapshot", "_parameter", "_state", "_index"):
+                record.pop(key)
+        except BaseException:
+            weight.restore(current)
             self._active[:] = active_before
             record.clear()
             record.update(record_before)

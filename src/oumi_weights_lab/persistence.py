@@ -186,6 +186,10 @@ class PersistenceMixin:
         if destination.exists() or destination.is_symlink():
             raise FileExistsError(destination)
         book = self.editbook
+        if any("_snapshot" in record for record in book._active):
+            raise ValueError(
+                "Saving edits to quantized weights is not supported yet; undo them first"
+            )
         tensors, working, active = {}, {}, []
         for record in reversed(book._active):
             parameter = record["_parameter"]

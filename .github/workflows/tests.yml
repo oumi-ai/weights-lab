@@ -112,3 +112,4 @@ jobs:
           tests/test_budget.py tests/test_device_map.py tests/test_peft_export.py
           tests/test_multi_gpu_loading.py tests/test_cross_session.py tests/test_positions.py
           tests/test_circuits.py tests/test_activation_gradients.py tests/test_quantized_loading.py
+          tests/test_quantized_edits.py
