@@ -404,10 +404,11 @@ class InspectionMixin:
         is scored, so its output gradient is zero. With ``modules`` given, ``parameters=None``
         returns no parameter gradients; pass both to get both. A module that did not run, or
         ran more than once in one forward, raises, because its gradient would be missing or
-        would mix calls. On a model whose activations carry no gradient (every parameter
-        frozen), the gradient is taken at a detached copy that replaces the activation, so
-        forward values are unchanged. ``positions`` and ``at`` need ``modules``; ``at``
-        "attention" is refused.
+        would mix calls. An input gradient is through that module's use of its input only,
+        not other uses of the same tensor, such as a residual connection. Where the activation
+        has no gradient (every parameter frozen), the gradient is taken at a detached copy
+        that replaces it, so forward values are unchanged. ``positions`` and ``at`` need
+        ``modules``; ``at`` "attention" is refused.
         """
         import torch
         import torch.nn.functional as functional
@@ -560,26 +561,29 @@ class InspectionMixin:
     def _gradient_hook(name, at, seen):
         """A hook that records one module's activation for a row, ready for autograd.grad."""
 
-        def keep(value):
+        def keep(value, always):
             if name in seen:
                 raise ValueError(
                     f"module {name!r} ran more than once in one forward, "
                     "so its gradient would mix calls"
                 )
-            if value.requires_grad:
+            if value.requires_grad and not always:
                 seen[name] = value
                 return None
-            # Frozen models give activations no gradient path: grad at a detached stand-in.
-            seen[name] = value.detach().requires_grad_(True)
+            # A stand-in only this module sees. A view keeps the graph, so upstream gradients
+            # still flow; a frozen model's activation has none, so it gets a detached leaf.
+            seen[name] = (
+                value.view_as(value) if value.requires_grad else value.detach().requires_grad_(True)
+            )
             return seen[name]
 
         def after(module, args, output):
-            leaf = keep(_activation(output))
+            leaf = keep(_activation(output), False)
             return None if leaf is None else _with_output(output, leaf)
 
         def before(module, args, kwargs):
             value, slot = _input_activation(args, kwargs)
-            leaf = keep(value)
+            leaf = keep(value, True)
             return None if leaf is None else _with_input(args, kwargs, slot, leaf)
 
         return before if at == "input" else after

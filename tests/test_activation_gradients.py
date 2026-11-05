@@ -245,3 +245,50 @@ def test_module_that_never_runs_raises(lab):
     lab.model.transformer.h[0].extra = torch.nn.Linear(16, 16)
     with pytest.raises(ValueError, match="did not run"):
         lab.gradient(PROMPT, target=TARGET, modules=["transformer.h.0.extra"])
+
+
+LN = "transformer.h.0.ln_1"
+
+
+def standin_reference(lab, name):
+    """Gradient at a view of the module's input that only the module sees."""
+    ids, labels = inputs(lab)
+    kept = []
+
+    def hook(_, args):
+        view = args[0].view_as(args[0])
+        view.retain_grad()
+        kept.append(view)
+        return (view, *args[1:])
+
+    handle = lab.model.get_submodule(name).register_forward_pre_hook(hook)
+    try:
+        with torch.enable_grad():
+            logits = lab.model(input_ids=ids).logits
+            loss = functional.cross_entropy(
+                logits[:, :-1].reshape(-1, logits.shape[-1]), labels[:, 1:].reshape(-1)
+            )
+            loss.backward()
+        return kept[0].grad.clone()
+    finally:
+        handle.remove()
+        lab.model.zero_grad()
+
+
+def test_input_gradient_counts_only_the_modules_use(lab):
+    for parameter in lab.model.parameters():
+        parameter.requires_grad_(True)
+    want = standin_reference(lab, LN)
+    raw = reference(lab, LN, "input")
+    got = lab.gradient(PROMPT, target=TARGET, modules=LN, at="input")[LN]
+    assert torch.allclose(got[0], want[0], atol=1e-6)
+    assert not torch.allclose(got[0], raw[0], atol=1e-6)
+
+
+def test_input_gradient_same_frozen_or_trainable(lab):
+    trainable = lab.gradient(PROMPT, target=TARGET, modules=LN, at="input")[LN]
+    for parameter in lab.model.parameters():
+        parameter.requires_grad_(False)
+    frozen = lab.gradient(PROMPT, target=TARGET, modules=LN, at="input")[LN]
+    assert frozen.abs().sum() > 0
+    assert torch.allclose(frozen, trainable, atol=1e-6)

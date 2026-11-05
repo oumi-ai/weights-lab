@@ -32,4 +32,4 @@ last = lab.gradient(
 )
 ```
 
-`at="input"` takes the gradient at what the module is called with. `positions` takes an int, a list, `"all"`, or a slice, and defaults to `"all"`: the last token predicts nothing that is scored, so its output gradient is zero. Without `parameters`, no parameter gradients are returned. It works on a frozen model, since the gradient is taken at a detached copy of the activation. A module that runs twice in one forward raises, because its gradient would mix the calls.
+`at="input"` takes the gradient at what the module is called with, through that module's use of it only (not a residual that adds the same tensor back). `positions` takes an int, a list, `"all"`, or a slice, and defaults to `"all"`: the last token predicts nothing that is scored, so its output gradient is zero. Without `parameters`, no parameter gradients are returned. It works on a frozen model, since the gradient is taken at a detached copy of the activation. A module that runs twice in one forward raises, because its gradient would mix the calls.
