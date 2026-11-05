@@ -384,3 +384,18 @@ def other_method(model: Any) -> str | None:
     method = method or getattr(declared, "quant_method", None)
     method = getattr(method, "value", method)
     return None if method in (None, "bitsandbytes") else str(method)
+
+
+def quantization_settings(lab: Any) -> dict[str, Any] | None:
+    """How a lab's model is quantized, as a dict of ``method`` and ``blocksize`` or ``threshold``.
+
+    Bundles and exports record it. It is None for a float model. A lab that was not loaded
+    with a ``quantization`` summary reads the settings off the model's first packed layer.
+    """
+    declared = getattr(lab, "quantization", None)
+    if declared is None:
+        weight = next((found for m in lab.model.modules() if (found := of(m)) is not None), None)
+        declared = weight.describe() if weight is not None else None
+    if declared is None:
+        return None
+    return {key: declared[key] for key in ("method", "blocksize", "threshold") if key in declared}

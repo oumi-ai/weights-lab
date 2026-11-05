@@ -425,13 +425,6 @@ def test_quantize_refusals(bnb, checkpoint, load, tmp_path, monkeypatch):
     assert "quantized" in str(error.value) and "oumi-weights-lab[quantized]" in str(error.value)
 
 
-def test_export_refuses_quantized_model(bnb, checkpoint, load, tmp_path):
-    lab = load(checkpoint("llama"), quantize="nf4")
-    with pytest.raises(ValueError, match="quantized"):
-        lab.export(tmp_path / "exported")
-    assert not (tmp_path / "exported").exists()
-
-
 def test_setup_records_quantization(bnb, checkpoint, load, tmp_path):
     path = checkpoint("llama")
     summary = load(path, quantize="nf4").evaluate(ROWS)
@@ -631,12 +624,15 @@ def test_swap_reads_a_quantized_source_as_float(bnb, checkpoint, load, method):
     assert torch.equal(floating.model.get_parameter(Q_PROJ), before)
 
 
-def test_export_refuses_a_bare_lab_around_a_quantized_model(bnb, checkpoint, load, tmp_path):
+def test_a_bare_lab_around_a_quantized_model_exports_with_its_settings(
+    bnb, checkpoint, load, tmp_path
+):
     lab = load(checkpoint("llama"), quantize="nf4")
     bare = Lab(lab.model, lab.tokenizer, tmp_path / "bare")
     assert bare.quantization is None
-    with pytest.raises(ValueError, match="quantized"):
-        bare.export(tmp_path / "out")
+    out = bare.export(tmp_path / "out")
+    manifest = json.loads((out / "oumi_weights_lab_manifest.json").read_text())
+    assert manifest["quantization"] == {"method": "nf4", "blocksize": 64}
 
 
 def test_int8_logical_dtype_is_the_compute_dtype(bnb, checkpoint, load):
@@ -677,3 +673,33 @@ def test_quantized_mps_needs_torch_2_5(version, device, refused):
             lab_module._check_quantized_device(torch_like, device)
     else:
         lab_module._check_quantized_device(torch_like, device)
+
+
+@pytest.mark.parametrize("installed, refused", [("0.13.2", True), ("0.14.0", False)])
+def test_int8_adapter_needs_a_recent_peft(
+    bnb, checkpoint, load, tmp_path, monkeypatch, installed, refused
+):
+    """peft before 0.14 reads a bitsandbytes attribute that no longer exists on int8 layers."""
+    import importlib.metadata
+
+    from transformers import AutoModelForCausalLM
+
+    real = importlib.metadata.version
+    monkeypatch.setattr(
+        importlib.metadata, "version", lambda name: installed if name == "peft" else real(name)
+    )
+    path = checkpoint("llama")
+
+    def explode(*args, **kwargs):
+        raise AssertionError("weights loaded")
+
+    monkeypatch.setattr(AutoModelForCausalLM, "from_pretrained", explode)
+    if refused:
+        with pytest.raises(ValueError) as error:
+            load(path, quantize="int8", adapter="adapter")
+        assert all(text in str(error.value) for text in ("int8", "0.14.0", "0.13.2"))
+    else:
+        with pytest.raises(AssertionError, match="weights loaded"):
+            load(path, quantize="int8", adapter="adapter")
+    with pytest.raises(AssertionError, match="weights loaded"):
+        load(path, quantize="nf4", adapter="adapter")  # 4-bit has no floor.
