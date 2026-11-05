@@ -119,17 +119,23 @@ def test_tensor_digests_match_the_ones_existing_bundles_recorded():
 
 
 def _stopping_worker(path, seconds):
-    """A stand-in worker that ignores SIGTERM and finishes after ``seconds``."""
+    """A stand-in worker that ignores SIGTERM and finishes after ``seconds``.
+
+    It replaces its status file the way the real worker does, so stop never reads it
+    half-written while polling.
+    """
     import subprocess
     import sys
 
     status = path / "status.json"
     code = (
-        "import json, signal, time\n"
+        "import json, os, signal, time\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         f"time.sleep({seconds})\n"
-        f"open({str(status)!r}, 'w').write(json.dumps("
-        "{'state': 'stopped', 'reason': 'idle_timeout', 'edit_bundle': 'saved'}))\n"
+        f"with open({str(status) + '.tmp'!r}, 'w') as stream:\n"
+        "    json.dump({'state': 'stopped', 'reason': 'idle_timeout', 'edit_bundle': 'saved'}, "
+        "stream)\n"
+        f"os.replace({str(status) + '.tmp'!r}, {str(status)!r})\n"
     )
     return subprocess.Popen([sys.executable, "-c", code])
 

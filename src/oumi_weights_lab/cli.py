@@ -272,6 +272,9 @@ def _stop(args: argparse.Namespace) -> int:
             break
         time.sleep(0.1)
         status = _status(path)
+    if not _alive(status):
+        # The worker may have written its final status and exited since the last read.
+        status = _status(path)
     forced = False
     if _alive(status):
         pid = _pid(status)
