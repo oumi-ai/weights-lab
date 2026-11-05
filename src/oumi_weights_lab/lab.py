@@ -5,6 +5,7 @@ from typing import Any
 
 from .attachments import AttachmentMixin
 from .budget import PassBudget
+from .circuits import CircuitsMixin
 from .editing import EditingMixin
 from .hf_data import hf_rows
 from .inspection import InspectionMixin
@@ -13,7 +14,9 @@ from .scoring import ScoringMixin
 from .session import DTYPES
 
 
-class Lab(EditingMixin, ScoringMixin, InspectionMixin, AttachmentMixin, PersistenceMixin):
+class Lab(
+    EditingMixin, ScoringMixin, InspectionMixin, CircuitsMixin, AttachmentMixin, PersistenceMixin
+):
     """A loaded model, tokenizer, and the session's artifact directory.
 
     Forward passes count sequences run through the base language model, including
