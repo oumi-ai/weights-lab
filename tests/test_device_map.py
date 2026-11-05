@@ -327,3 +327,14 @@ def test_adapters_over_a_split_base_record_patch_edit_and_resume(
     for _ in names:
         split.undo()
     assert torch.equal(_logits(split), baseline)
+
+
+def test_activation_gradients_match_on_split_devices(labs):
+    split, single, _ = labs
+    modules = ["transformer.h.0.mlp", "transformer.h.1.mlp"]
+    got = split.gradient("hello world", target=" yes no", modules=modules)
+    want = single.gradient("hello world", target=" yes no", modules=modules)
+    for name in modules:
+        assert got[name].device.type == "cpu"
+        assert got[name].abs().sum() > 0
+        assert torch.allclose(got[name], want[name], atol=TOLERANCE)
