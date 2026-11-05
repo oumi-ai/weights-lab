@@ -942,6 +942,8 @@ class ScoringMixin(EvaluationMixin):
                 ]
             )
             run_dir = Path(self.artifacts) / "evaluations" / name
+            # Before the reservation, so a failure here leaves nothing behind.
+            setup = self._setup()
             with _reserve(
                 self.artifacts,
                 self.session_path,
@@ -953,7 +955,6 @@ class ScoringMixin(EvaluationMixin):
                 run_dir.mkdir(exist_ok=False)
             started = time.time()
             before = self.forward_passes
-            setup = self._setup()
             summary = {
                 "name": name,
                 "state": "running",

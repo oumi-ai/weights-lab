@@ -43,5 +43,6 @@ predictions can flip between setups, so also run the unchanged base model in bot
 sessions and compare those two runs as a control. A run saved before setup was recorded
 reports `["setup"]`.
 
-A run from a remote worker has to be fetched to the same filesystem first. The remote
-guide in the docs explains how results come back before teardown.
+A run from a remote worker has to be fetched first. Call
+`SkyPilotLauncher.download(remote_run_dir, local_path)` on the run's directory in the
+worker's artifacts, where `local_path` must not exist yet, then pass `local_path` as the run.

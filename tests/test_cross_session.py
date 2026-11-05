@@ -100,8 +100,10 @@ def test_cross_session_requires_same_held_out_status(tiny_lab, tiny_tokenizer, t
     second = other_lab(tiny_lab, tiny_tokenizer, tmp_path)
     held = tiny_lab.evaluate(ROWS, held_out=True, max_passes=100)
     dev = second.evaluate(ROWS)
-    with pytest.raises(ValueError, match="held_out differs"):
+    with pytest.raises(ValueError, match="held_out differs") as error:
         tiny_lab.compare_runs(held, dev, cross_session=True)
+    assert "same session" not in str(error.value)
+    assert "the same mode and scoring protocol/settings" in str(error.value)
     with pytest.raises(ValueError, match="held_out differs"):
         tiny_lab.diff(held, dev, cross_session=True)
 
@@ -148,3 +150,12 @@ def test_legacy_runs_without_setup(tiny_lab, tiny_tokenizer, tmp_path):
     report = tiny_lab.compare_runs(before, after, cross_session=True)
     assert report["cross_session"]["setup_differences"] == ["setup"]
     assert report["cross_session"]["after_setup"] is None
+
+
+def test_diff_names_the_other_key_when_the_session_also_differs(tiny_lab, tiny_tokenizer, tmp_path):
+    second = other_lab(tiny_lab, tiny_tokenizer, tmp_path)
+    before = tiny_lab.evaluate(ROWS)
+    after = second.evaluate(ROWS, batch_size=1)
+    with pytest.raises(ValueError, match="scoring_config") as error:
+        tiny_lab.diff(before, after)
+    assert "cross_session=True" not in str(error.value)

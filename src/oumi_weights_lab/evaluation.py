@@ -509,10 +509,12 @@ class EvaluationMixin:
         b, tasks_b, items_b = _read_run(self, after)
         difference = _protocol_difference(a, b, cross_session)
         if difference:
-            raise ValueError(
-                "comparison requires the same session, mode, and scoring protocol/settings; "
-                + difference
+            requires = (
+                "the same mode and scoring protocol/settings"
+                if cross_session
+                else "the same session, mode, and scoring protocol/settings"
             )
+            raise ValueError(f"comparison requires {requires}; {difference}")
         if _needs_checker_id(a):
             raise ValueError(
                 "a custom sampled checker or answer_key requires an explicit checker_id to compare"

@@ -125,7 +125,8 @@ report = lab.compare_runs(before, after)
   format, and held-out status. `cross_session=True` on `diff` and `compare_runs`
   skips only the session check, so runs from another session (an export reloaded in
   a new session, an adapter against its merged export, one GPU against a split model)
-  can pair by run directory path or summary. It must be a bool. Without it, a pair
+  can pair by run directory path or summary. It must be a bool, and `compare_suites`
+  passes it through to `compare_runs`. Without it, a pair
   that differs only by session is refused with a hint to pass it. Each new summary
   has a `setup` block: `devices`, `dtypes`, `torch`, `transformers`, `peft`,
   `adapter`, `attention`, `device_map`, `model_id`, and `model_commit`. With the
