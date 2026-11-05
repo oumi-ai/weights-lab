@@ -16,7 +16,7 @@ relative paths under `artifacts/`; other paths resolve from where `start` ran.
 | `zero(name, index=None)` | Zero a parameter or slice |
 | `swap(name, source, source_name=None, index=None)` | Copy a parameter or slice from a tensor, model, or dict |
 | `project_out(name, direction, *, side="output", index=None, scale=1.0, note="")` | Remove a direction from one weight or bias with a single edit; see below |
-| `undo(edit_id=None)` | Restore the most recent edit exactly; undo is strictly last-in, first-out |
+| `undo(edit_id=None)` | Restore the most recent edit exactly, packed bytes included for quantized weights; undo is strictly last-in, first-out |
 | `edits()` | Edit history |
 | `export(path)` | Hugging Face checkpoint plus edit manifest; a LoRA adapter is merged one layer at a time, other adapters into a copy of the model |
 | `save_edits(path)`, `load_edits(path)` | Save edits, undo history, pass count, and dataset reservations, then resume them in a fresh session of the same model (CLI: `start --resume PATH`) |
@@ -66,7 +66,7 @@ refused, and so is any `--quantize` on a GPTQ, AWQ, or other checkpoint.
 `compute_dtype` under `quantization`, and each run's `setup` block records the dict as
 `quantization`, so a cross-session report of nf4 against bf16 lists it.
 
-Quantized weights are read-only in this release:
+Quantized weights read through their dequantized values, and nf4 and fp4 weights edit:
 
 - `parts` reports a quantized weight's logical `shape`, `dtype`, and `numel`, and adds
   `quantization` with `method`, `blocksize` or `threshold`, `double_quant`,
@@ -77,11 +77,30 @@ Quantized weights are read-only in this release:
   and `compare` show the transposed shape, and comparing them with the float model raises
   a shape mismatch. Other layers compare against a float model of the same architecture,
   in either direction.
+- `edit`, `zero`, `swap`, and `project_out` work on nf4 and fp4 weights, with the index
+  and shapes of the logical weight (`[out, in]`, also for GPT-2's fused layers). The edit
+  dequantizes the weight, applies the change in float32, converts it to the weight's
+  dtype, and requantizes only the blocks (64 weights) that hold a changed value, writing
+  them back into the same parameter. Every other block keeps its exact bytes and scale,
+  and so does every code in a touched block whose value and scale did not move. `undo`
+  restores the packed bytes and scales exactly.
+- An edit's record has the usual keys, with the logical `shape` and `dtype`, and a
+  `quantization` block: `type`, `blocksize`, `blocks_requantized`, `requested_delta_l2`
+  (how far the edit asked to move the selection), `realized_delta_l2` (how far it
+  moved), `residual_l2` (distance from the request to what landed), `collateral_l2`
+  (how far weights outside the selection moved because they share a block whose scale
+  changed), and `changed_elements`. When a change is smaller than the quantization step
+  (`requested_delta_l2` above 0 and `realized_delta_l2` 0), the edit warns, is still
+  recorded, and undoes as usual.
+- Edits refuse with `ValueError`, and change nothing, on double-quantized weights
+  (`bnb_4bit_use_double_quant`, whose scales are shared across the whole tensor; reload
+  the float checkpoint with `--quantize`), on weights bitsandbytes has repacked for CPU
+  kernels (undo refuses those with `RuntimeError`), and on int8 weights. Float
+  parameters, including the bias of a quantized layer, edit and undo exactly. On a GPTQ
+  or AWQ checkpoint, an edit of a non-float parameter names the method.
 - `swap` accepts a quantized weight as its source and copies its dequantized float values.
-- `edit`, `zero`, `swap`, and `project_out` on a quantized weight raise `ValueError`
-  naming it, and change nothing. Float parameters, including the bias of a quantized
-  layer, edit and undo exactly. On a GPTQ or AWQ checkpoint, an edit of a non-float
-  parameter names the method.
+- `save_edits` refuses while a quantized edit is active, so undo it first; saving
+  quantized edits is not supported yet.
 - `gradient` skips quantized weights when `parameters` is omitted, raises `ValueError`
   when you name one, and still takes activation gradients (`modules=`) through
   quantized layers.

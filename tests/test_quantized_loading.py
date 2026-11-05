@@ -198,8 +198,8 @@ def test_compare_quantized_against_float_model(bnb, checkpoint, load):
     json.dumps(report)
 
 
-@pytest.mark.parametrize("method", METHODS)
-def test_edits_on_quantized_weights_refuse(bnb, checkpoint, load, method):
+def test_edits_on_int8_weights_refuse(bnb, checkpoint, load):
+    method = "int8"
     lab = load(checkpoint("llama"), quantize=method)
     before = packed_state(lab)
     calls = {
@@ -355,7 +355,7 @@ def test_prequantized_checkpoint_loads_read_only(bnb, checkpoint, load, tmp_path
     assert lab.quantization["method"] == "nf4" and lab.quantization["double_quant"] is True
     assert lab.quantization["compute_dtype"] == "float32"
     assert next(p for p in lab.parts() if p["name"] == Q_PROJ)["quantization"]["double_quant"]
-    with pytest.raises(ValueError, match="not supported yet"):
+    with pytest.raises(ValueError, match="bnb_4bit_use_double_quant"):
         lab.zero(Q_PROJ)
     ids = lab.tokenizer("hello world yes", return_tensors="pt")["input_ids"]
     with torch.no_grad():
