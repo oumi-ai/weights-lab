@@ -1374,7 +1374,7 @@ multi-gpu = [
 ]
 quantized = [
     { name = "accelerate" },
-    { name = "bitsandbytes", marker = "platform_release >= '23' or sys_platform != 'darwin'" },
+    { name = "bitsandbytes" },
 ]
 
 [package.dev-dependencies]
@@ -1389,7 +1389,7 @@ dev = [
 requires-dist = [
     { name = "accelerate", marker = "extra == 'multi-gpu'", specifier = ">=1.0" },
     { name = "accelerate", marker = "extra == 'quantized'", specifier = ">=1.0" },
-    { name = "bitsandbytes", marker = "(platform_release >= '23' and extra == 'quantized') or (sys_platform != 'darwin' and extra == 'quantized')", specifier = ">=0.50" },
+    { name = "bitsandbytes", marker = "extra == 'quantized'", specifier = ">=0.50" },
     { name = "datasets", marker = "extra == 'datasets'", specifier = ">=4" },
     { name = "peft", marker = "extra == 'adapters'", specifier = ">=0.13" },
     { name = "safetensors", specifier = ">=0.4.3" },
