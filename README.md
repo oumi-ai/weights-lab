@@ -108,7 +108,11 @@ From a source checkout, run the first two with `uv run python -m examples.NAME -
   `tests/live/validate_qwen_benchmark.py` evaluates it on MATH-500. On an H200
   (500 problems, 4 samples each), the edit scored 51.25% against 7.85% for the base
   model, and samples reaching the 32,768-token cap fell from 92.90% to 30.55%. This
-  reproduces the released edit, not its discovery.
+  reproduces the released edit, not its discovery. vLLM ran that benchmark;
+  `tests/live/validate_truncation.py` checks that the lab's own sampling hits the cap
+  as often. On 40 of the problems without the presence penalty, which transformers
+  lacks, both truncated 99.4% of the base model's samples, and the lab 51.3% of the
+  edited model's against 50.6% for vLLM.
 
 ## Documentation
 
