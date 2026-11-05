@@ -80,6 +80,57 @@ def _parameter(model: Any, name: str) -> Any:
         raise ValueError(f"Unknown parameter {name!r}") from error
 
 
+def _projection_axis(owner: Any, attribute: str, side: str) -> tuple[int, int]:
+    """Return the axis a direction lives on and the length it must have."""
+    import torch
+    from transformers.pytorch_utils import Conv1D
+
+    kind = f"{type(owner).__module__}.{type(owner).__qualname__}"
+    if isinstance(owner, (torch.nn.Linear, Conv1D)):
+        out_axis = 0 if isinstance(owner, torch.nn.Linear) else 1
+        if attribute == "bias":
+            if side != "output":
+                raise ValueError("A bias has no input side; use side='output'")
+            return 0, owner.bias.shape[0]
+        if attribute == "weight":
+            axis = out_axis if side == "output" else 1 - out_axis
+            return axis, owner.weight.shape[axis]
+    elif isinstance(owner, torch.nn.Embedding) and attribute == "weight":
+        if side != "output":
+            raise ValueError("An embedding has no input side; use side='output'")
+        return 1, owner.weight.shape[1]
+    raise ValueError(
+        f"project_out does not support {attribute!r} of {kind}; use lab.edit with your own callable"
+    )
+
+
+def _projection_index(index: Any, size: int) -> Any:
+    """Check a selection along the axis that is not projected and return a list or slice."""
+    if index is None:
+        return slice(None)
+    if isinstance(index, int) and not isinstance(index, bool):
+        index = [index]
+    if isinstance(index, slice):
+        parts = (index.start, index.stop)
+        if index.step not in (None, 1) or any(
+            part is not None and (not isinstance(part, int) or isinstance(part, bool))
+            for part in parts
+        ):
+            raise ValueError("A slice index needs integer bounds and a step of 1")
+        return slice(index.start, index.stop)
+    if (
+        isinstance(index, list)
+        and index
+        and all(isinstance(i, int) and not isinstance(i, bool) for i in index)
+    ):
+        if any(i < -size or i >= size for i in index):
+            raise ValueError(f"An index entry is outside the axis of length {size}")
+        if len({i % size for i in index}) != len(index):
+            raise ValueError("An index list must not repeat entries")
+        return list(index)
+    raise ValueError("index must be None, an int, a slice with step 1, or a nonempty list of ints")
+
+
 class EditBook:
     """Exact CPU snapshots of edited slices, with strictly LIFO undo.
 
@@ -196,6 +247,78 @@ class EditBook:
 
     def zero(self, name: str, index: Any = None, note: str = "") -> str:
         return self.edit(name, lambda value: value.zero_(), index=index, note=note)
+
+    def project_out(
+        self,
+        name: str,
+        direction: Any,
+        *,
+        side: str = "output",
+        index: Any = None,
+        scale: float = 1.0,
+        note: str = "",
+    ) -> str:
+        """Remove a direction from one weight or bias with a single reversible edit.
+
+        `side="output"` removes it from what the layer writes; `side="input"` removes
+        it from what the layer reads. `index` picks entries along the other axis.
+        Scale 1.0 removes the direction and 2.0 reflects across it. Supports the
+        weight and bias of `Linear` and `Conv1D` and the weight of `Embedding`; refuses
+        anything else, a wrong-length, zero, or non-finite direction, a bias index, and
+        an embedding input side.
+        """
+        import torch
+
+        if side not in ("output", "input"):
+            raise ValueError("side must be 'output' or 'input'")
+        if (
+            isinstance(scale, bool)
+            or not isinstance(scale, (int, float))
+            or not math.isfinite(scale)
+        ):
+            raise ValueError("scale must be a finite int or float")
+        parameter = _parameter(self.model, name)
+        owner_name, _, attribute = name.rpartition(".")
+        owner = self.model.get_submodule(owner_name)
+        axis, length = _projection_axis(owner, attribute, side)
+        vector = torch.as_tensor(direction)
+        if vector.ndim != 1 or vector.shape[0] != length:
+            raise ValueError(f"direction must be 1-D with length {length}")
+        vector = vector.detach().to(torch.float32)
+        if not bool(torch.isfinite(vector).all()):
+            raise ValueError("direction must be finite")
+        norm = vector.norm()
+        if norm == 0:
+            raise ValueError("direction must not be zero")
+        unit = vector / norm
+        if parameter.ndim == 1:
+            if index is not None:
+                raise ValueError("A bias takes no index")
+            full = None
+        else:
+            other = parameter.shape[1 - axis]
+            selected = _projection_index(index, other)
+            if isinstance(index, int) and not isinstance(index, bool):
+                selected = [index]
+            full = (slice(None), selected) if axis == 0 else (selected, slice(None))
+
+        def project(block: Any) -> Any:
+            work = block.to(torch.float32)
+            direction_ = unit.to(work.device)
+            if work.ndim == 1:
+                work = work - scale * direction_ * (direction_ @ work)
+            elif axis == 0:
+                work = work - scale * torch.outer(direction_, direction_ @ work)
+            else:
+                work = work - scale * torch.outer(work @ direction_, direction_)
+            return work.to(block.dtype)
+
+        return self.edit(
+            name,
+            project,
+            index=full,
+            note=note or f"project_out side={side} scale={scale}",
+        )
 
     def swap(
         self,
@@ -324,6 +447,20 @@ class EditingMixin:
         note: str = "",
     ) -> str:
         return self.editbook.swap(name, source, source_name, index, note)
+
+    def project_out(
+        self,
+        name: str,
+        direction: Any,
+        *,
+        side: str = "output",
+        index: Any = None,
+        scale: float = 1.0,
+        note: str = "",
+    ) -> str:
+        return self.editbook.project_out(
+            name, direction, side=side, index=index, scale=scale, note=note
+        )
 
     def undo(self, edit_id: str | None = None) -> str:
         return self.editbook.undo(edit_id)
