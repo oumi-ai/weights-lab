@@ -482,6 +482,33 @@ class ScoringMixin(EvaluationMixin):
                 f"an active record or patch uses token positions that left padding shifts; {same}"
             )
 
+    def _setup(self) -> dict[str, Any]:
+        """Describe where and how the model runs, so cross-session reports can show what differs."""
+        import torch
+        import transformers
+
+        model = getattr(self, "model", None)
+        parameters = list(model.parameters()) if model is not None else []
+        adapter = hasattr(model, "peft_config")
+        peft = None
+        if adapter:
+            import peft as peft_module
+
+            peft = peft_module.__version__
+        config = getattr(model, "config", None)
+        return {
+            "devices": sorted({str(p.device) for p in parameters}),
+            "dtypes": sorted({str(p.dtype) for p in parameters}),
+            "torch": torch.__version__,
+            "transformers": transformers.__version__,
+            "peft": peft,
+            "adapter": adapter,
+            "attention": getattr(config, "_attn_implementation", None),
+            "device_map": getattr(self, "device_map", None) is not None,
+            "model_id": getattr(self, "model_id", ""),
+            "model_commit": getattr(self, "model_commit", None),
+        }
+
     def _scoring_config(
         self, mode: str, batch_size: int, decoder: Any = None, stops: list[int] | None = None
     ) -> dict[str, Any]:
@@ -926,6 +953,7 @@ class ScoringMixin(EvaluationMixin):
                 run_dir.mkdir(exist_ok=False)
             started = time.time()
             before = self.forward_passes
+            setup = self._setup()
             summary = {
                 "name": name,
                 "state": "running",
@@ -933,6 +961,7 @@ class ScoringMixin(EvaluationMixin):
                 "session_id": session_id,
                 "model_id": getattr(self, "model_id", ""),
                 "model_commit": getattr(self, "model_commit", None),
+                "setup": setup,
                 "model_revision": getattr(self, "revision", 0),
                 "active_edit_ids": list(getattr(self, "active_edit_ids", [])),
                 "edits": self.edits() if hasattr(self, "edits") else [],

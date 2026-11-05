@@ -23,6 +23,7 @@ settings, and complete results. `compare_runs` and suite pairing are strict: sam
 ordered tasks, IDs, metadata, session, mode, seed, scoring policy, scoring
 config (including `batch_size`), and generation settings. Explicit IDs must be unique and complete. Custom sampled
 checkers and `answer_key` extractors require a matching explicit `checker_id` for comparison.
+To compare runs from different sessions, see [comparing across sessions](compare-checkpoints.md#compare-with-a-run-from-another-session).
 
 Inspect accuracy **and** candidate-set NLL/Brier/ECE overall and per source. For
 sampled runs, also inspect `truncation_share` and `mean_generated_tokens`: an edit

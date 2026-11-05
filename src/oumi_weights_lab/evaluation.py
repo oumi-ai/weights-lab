@@ -40,9 +40,15 @@ PROTOCOL_KEYS = (
     "num_samples",
     "answer_key_custom",
     "prompt_format",
+    "held_out",
 )
 # Values that runs saved before a protocol key existed implicitly used.
-PROTOCOL_DEFAULTS = {"num_samples": 1, "answer_key_custom": False}
+PROTOCOL_DEFAULTS = {"num_samples": 1, "answer_key_custom": False, "held_out": False}
+SESSION_HINT = "; pass cross_session=True to compare runs from different sessions"
+CROSS_SESSION_CAVEAT = (
+    "Runs come from different sessions. Near-tie predictions can flip between setups, "
+    "so run the unchanged base model in both sessions as a control."
+)
 # Runs saved before scoring configs were recorded scored one sequence per forward.
 LEGACY_SCORING_CONFIG = "legacy-v0.1"
 
@@ -53,16 +59,40 @@ def _needs_checker_id(summary: dict) -> bool:
     return bool(custom) and not summary.get("checker_id")
 
 
-def _protocol_difference(left: dict, right: dict) -> str | None:
-    """Name the first protocol setting two run summaries disagree on, or None."""
+def _protocol_difference(left: dict, right: dict, cross_session: bool = False) -> str | None:
+    """Name the first protocol setting two run summaries disagree on, or None.
+
+    Sessions are compared last, so another differing setting is the one reported:
+    opting in to cross-session comparison would not help then. ``cross_session``
+    skips the session check; every other setting still has to match.
+    """
     for key in PROTOCOL_KEYS:
+        if key == "session_id":
+            continue
         a = left.get(key, PROTOCOL_DEFAULTS.get(key))
         b = right.get(key, PROTOCOL_DEFAULTS.get(key))
         if key == "scoring_config":
             a, b = a or LEGACY_SCORING_CONFIG, b or LEGACY_SCORING_CONFIG
         if a != b:
             return f"{key} differs: {a!r} vs {b!r}"
+    if not cross_session and left.get("session_id") != right.get("session_id"):
+        return (
+            f"session_id differs: {left.get('session_id')!r} vs {right.get('session_id')!r}"
+            + SESSION_HINT
+        )
     return None
+
+
+def _check_cross_session(value: Any) -> None:
+    if not isinstance(value, bool):
+        raise ValueError("cross_session must be a bool")
+
+
+def _setup_differences(left: dict | None, right: dict | None) -> list[str]:
+    """Names of setup fields that differ, or ["setup"] when either run recorded none."""
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return ["setup"]
+    return sorted(key for key in left.keys() | right.keys() if left.get(key) != right.get(key))
 
 
 # Fields that name a row's source document, checked in this order for bootstrap clusters.
@@ -378,23 +408,40 @@ class EvaluationMixin:
         return read_json(path / "summary.json"), path
 
     def diff(
-        self, before: Any, after: Any, *, include_scores: bool = False
+        self,
+        before: Any,
+        after: Any,
+        *,
+        include_scores: bool = False,
+        cross_session: bool = False,
     ) -> list[dict[str, Any]]:
         """Return changed items between two successful runs of the same dataset.
 
         Rows pair by position. Both runs need the same session, mode, scoring
         protocol, and ordered prompts, options, answers, and metadata; only row
         IDs may differ. Use compare_runs for ID-checked pairing and statistics.
+
+        Runs from different sessions are refused unless ``cross_session=True``,
+        which skips only the session check. The scoring protocol, held-out status,
+        dataset, and prompts still have to match. ``cross_session`` must be a bool.
         """
+        _check_cross_session(cross_session)
         left, _ = self._run_summary(before)
         right, _ = self._run_summary(after)
         if left["state"] != "succeeded" or right["state"] != "succeeded":
             raise ValueError("diff requires two successful evaluation runs")
-        if any(left[key] != right[key] for key in ("session_id", "dataset_hash", "mode")):
-            raise ValueError("diff requires the same session, dataset, and scoring mode")
+        same = "diff requires the same session, dataset, and scoring mode"
+        if any(left[key] != right[key] for key in ("dataset_hash", "mode")):
+            raise ValueError(same)
+        if not cross_session and left["session_id"] != right["session_id"]:
+            # Name another difference when there is one; the opt-in would not help then.
+            other = _protocol_difference(left, right, cross_session=True)
+            if other:
+                raise ValueError(f"diff requires the same scoring protocol/settings; {other}")
+            raise ValueError(same + SESSION_HINT)
         _, left_tasks, left_items = _read_run(self, before)
         _, right_tasks, right_items = _read_run(self, after)
-        difference = _protocol_difference(left, right)
+        difference = _protocol_difference(left, right, cross_session)
         if difference:
             raise ValueError(f"diff requires the same scoring protocol/settings; {difference}")
         if _needs_checker_id(left):
@@ -434,8 +481,17 @@ class EvaluationMixin:
         top: int = 10,
         bootstrap_samples: int = 1000,
         seed: int = 0,
+        cross_session: bool = False,
     ) -> dict:
-        """Compare strictly paired runs, including failed rows, with document bootstrap CIs."""
+        """Compare strictly paired runs, including failed rows, with document bootstrap CIs.
+
+        Runs from different sessions are refused unless ``cross_session=True``,
+        which skips only the session check; every other protocol setting, including
+        held-out status, still has to match. The report then gains a
+        ``cross_session`` entry with both sessions, both setup blocks, and the setup
+        fields that differ. ``cross_session`` must be a bool.
+        """
+        _check_cross_session(cross_session)
         for key, value in (("group_by", group_by), ("bootstrap_group_by", bootstrap_group_by)):
             if value is not None and (not isinstance(value, str) or not value):
                 raise ValueError(f"{key} must be a nonempty field name")
@@ -451,7 +507,7 @@ class EvaluationMixin:
             raise ValueError("seed must be an integer")
         a, tasks_a, items_a = _read_run(self, before)
         b, tasks_b, items_b = _read_run(self, after)
-        difference = _protocol_difference(a, b)
+        difference = _protocol_difference(a, b, cross_session)
         if difference:
             raise ValueError(
                 "comparison requires the same session, mode, and scoring protocol/settings; "
@@ -536,7 +592,18 @@ class EvaluationMixin:
                 }
             )
         ranked = [mover for mover in movers if not mover["failed"]]
+        extra = {}
+        if cross_session:
+            extra["cross_session"] = {
+                "before_session": a.get("session_id"),
+                "after_session": b.get("session_id"),
+                "before_setup": a.get("setup"),
+                "after_setup": b.get("setup"),
+                "setup_differences": _setup_differences(a.get("setup"), b.get("setup")),
+                "caveat": CROSS_SESSION_CAVEAT,
+            }
         return {
+            **extra,
             "before_state": a["state"],
             "after_state": b["state"],
             "aggregate": report,
