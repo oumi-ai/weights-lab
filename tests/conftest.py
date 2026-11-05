@@ -2,12 +2,9 @@ import pytest
 
 
 @pytest.fixture
-def tiny_lab(tmp_path):
+def tiny_tokenizer():
     import tokenizers
-    import torch
-    from transformers import GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerFast
-
-    from oumi_weights_lab import Lab
+    from transformers import PreTrainedTokenizerFast
 
     backend = tokenizers.Tokenizer(
         tokenizers.models.WordLevel(
@@ -16,9 +13,18 @@ def tiny_lab(tmp_path):
         )
     )
     backend.pre_tokenizer = tokenizers.pre_tokenizers.Whitespace()
-    tokenizer = PreTrainedTokenizerFast(
+    return PreTrainedTokenizerFast(
         tokenizer_object=backend, unk_token="<unk>", eos_token="<eos>", pad_token="<eos>"
     )
+
+
+@pytest.fixture
+def tiny_lab(tmp_path, tiny_tokenizer):
+    import torch
+    from transformers import GPT2Config, GPT2LMHeadModel
+
+    from oumi_weights_lab import Lab
+
     torch.manual_seed(0)
     model = GPT2LMHeadModel(
         GPT2Config(
@@ -32,4 +38,4 @@ def tiny_lab(tmp_path):
             pad_token_id=1,
         )
     ).eval()
-    return Lab(model, tokenizer, tmp_path / "lab", model_id="test-model")
+    return Lab(model, tiny_tokenizer, tmp_path / "lab", model_id="test-model")
