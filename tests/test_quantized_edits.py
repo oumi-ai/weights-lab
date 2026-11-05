@@ -339,21 +339,6 @@ def test_double_quant_checkpoint_refuses_edits(checkpoint, load, tmp_path):
     assert same_packed(before, packed(lab)) and lab.edits() == []
 
 
-def test_int8_edits_still_refuse(checkpoint, load):
-    lab = load(checkpoint("llama"), quantize="int8")
-    before = lab.model.get_parameter(Q_PROJ).data.clone()
-    for call in (
-        lambda: lab.zero(Q_PROJ),
-        lambda: lab.edit(Q_PROJ, lambda value: value + 1),
-        lambda: lab.swap(Q_PROJ, torch.zeros(64, 64)),
-        lambda: lab.project_out(Q_PROJ, torch.ones(64)),
-    ):
-        with pytest.raises(ValueError, match="not supported yet") as error:
-            call()
-        assert Q_PROJ in str(error.value) and "int8" in str(error.value)
-    assert torch.equal(before, lab.model.get_parameter(Q_PROJ).data) and lab.edits() == []
-
-
 @pytest.mark.parametrize("method", FOUR_BIT)
 def test_project_out_on_quantized_linear(checkpoint, load, method):
     lab = load(checkpoint("llama"), quantize=method)
@@ -493,13 +478,6 @@ def test_save_edits_and_export_refuse_with_quantized_edits(checkpoint, load, tmp
     lab.undo()
     lab.zero("model.norm.weight")
     lab.save_edits(tmp_path / "float-bundle")
-
-
-def test_codec_refuses_unsupported_weights(checkpoint, load):
-    lab = load(checkpoint("llama"), quantize="int8")
-    weight = lookup(lab.model, Q_PROJ)
-    with pytest.raises(ValueError, match="int8"):
-        weight.snapshot()
 
 
 @pytest.mark.parametrize("device", ["cpu", "mps"])

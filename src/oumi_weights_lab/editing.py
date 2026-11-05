@@ -187,12 +187,16 @@ class EditBook:
 
     def _packed(self, name: str, model: Any = None) -> Any:
         """The quantized weight ``name``, whose int8 dtype is the Lab's compute dtype."""
+        dtype = self._compute_dtype() if model in (None, self.model) else None
+        return lookup(self.model if model is None else model, name, dtype)
+
+    def _compute_dtype(self) -> Any:
+        """The Lab's compute dtype, or None for a bare model."""
         import torch
 
-        dtype = None
-        if self._quantization and model in (None, self.model):
-            dtype = getattr(torch, self._quantization["compute_dtype"], None)
-        return lookup(self.model if model is None else model, name, dtype)
+        if not self._quantization:
+            return None
+        return getattr(torch, self._quantization["compute_dtype"], None)
 
     def parts(self, pattern: str = "*") -> list[dict[str, Any]]:
         """List parameters; a quantized weight reports its logical shape, dtype and size.
@@ -266,7 +270,7 @@ class EditBook:
         import torch
 
         parameter = _parameter(self.model, name)
-        packed = editable(self.model, name)
+        packed = editable(self.model, name, self._compute_dtype())
         if packed is not None:
             return self._edit_quantized(packed, value, index, note)
         if not parameter.is_floating_point():
@@ -333,7 +337,7 @@ class EditBook:
 
         index = _cpu_index(copy.deepcopy(index))
         parameter = weight.parameter
-        state = parameter.quant_state
+        state = weight.state
         snapshot = weight.snapshot()
         previous_revision = self.revision
         history_size, active_size = len(self._history), len(self._active)
@@ -374,7 +378,7 @@ class EditBook:
 
             quantization = {
                 "type": weight.method,
-                "blocksize": int(state.blocksize),
+                "blocksize": weight.blocksize,
                 "blocks_requantized": written["blocks_requantized"],
                 "requested_delta_l2": norm((candidate - before)[inside]),
                 "realized_delta_l2": norm((landed - before)[inside]),
@@ -450,7 +454,7 @@ class EditBook:
         ):
             raise ValueError("scale must be a finite int or float")
         parameter = _parameter(self.model, name)
-        packed = editable(self.model, name)
+        packed = editable(self.model, name, self._compute_dtype())
         shape = parameter.shape if packed is None else packed.shape
         owner_name, _, attribute = name.rpartition(".")
         owner = self.model.get_submodule(owner_name)
@@ -505,7 +509,7 @@ class EditBook:
     ) -> str:
         import torch
 
-        packed = editable(self.model, name)
+        packed = editable(self.model, name, self._compute_dtype())
         source_name = source_name or name
         if not isinstance(source, torch.Tensor):
             if isinstance(source, Mapping):
@@ -581,11 +585,11 @@ class EditBook:
             weight is None
             or parameter is not record["_parameter"]
             or getattr(parameter, "quant_state", None) is not record["_state"]
-            or parameter.data.dtype != snapshot["data"].dtype
-            or parameter.data.shape != snapshot["data"].shape
-            or weight.parameter.quant_state.absmax.dtype != snapshot["absmax"].dtype
-            or weight.parameter.quant_state.absmax.shape != snapshot["absmax"].shape
             or weight.repacked
+            or any(
+                part.dtype != snapshot[name].dtype or part.shape != snapshot[name].shape
+                for name, part in weight.live().items()
+            )
         ):
             raise RuntimeError("Parameter storage, dtype, or shape changed since the edit")
         current = weight.snapshot()

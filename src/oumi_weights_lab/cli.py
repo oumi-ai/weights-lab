@@ -512,7 +512,8 @@ def _parser() -> argparse.ArgumentParser:
         "--quantize",
         choices=session.QUANTIZE,
         help="load the model with bitsandbytes in this format (needs the quantized extra); "
-        "quantized weights are read-only, and this cannot be combined with --device-map",
+        "quantized weights can be edited with exact undo (not double-quantized ones), and this "
+        "cannot be combined with --device-map",
     )
     start.add_argument(
         "--allow-hub-kernels",

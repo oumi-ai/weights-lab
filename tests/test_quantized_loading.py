@@ -198,26 +198,6 @@ def test_compare_quantized_against_float_model(bnb, checkpoint, load):
     json.dumps(report)
 
 
-def test_edits_on_int8_weights_refuse(bnb, checkpoint, load):
-    method = "int8"
-    lab = load(checkpoint("llama"), quantize=method)
-    before = packed_state(lab)
-    calls = {
-        "edit": lambda: lab.edit(Q_PROJ, lambda value: value.zero_()),
-        "indexed edit": lambda: lab.edit(Q_PROJ, lambda value: value.zero_(), index=(0,)),
-        "zero": lambda: lab.zero(Q_PROJ),
-        "swap": lambda: lab.swap(Q_PROJ, torch.zeros(64, 64)),
-        "project_out": lambda: lab.project_out(Q_PROJ, torch.ones(64)),
-    }
-    for call in calls.values():
-        with pytest.raises(ValueError, match="not supported yet") as error:
-            call()
-        assert Q_PROJ in str(error.value) and method in str(error.value)
-    assert lab.edits() == [] and lab.revision == 0
-    after = packed_state(lab)
-    assert torch.equal(before[0], after[0]) and torch.equal(before[1], after[1])
-
-
 @pytest.mark.parametrize("method", METHODS)
 def test_float_parameters_edit_and_undo_exactly(bnb, checkpoint, load, method):
     lab = load(checkpoint("llama"), quantize=method)
