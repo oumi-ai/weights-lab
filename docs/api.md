@@ -15,10 +15,33 @@ relative paths under `artifacts/`; other paths resolve from where `start` ran.
 | `edit(name, value, index=None, note="")` | Replace a parameter or slice with a tensor, or with a callable's result; shapes must match exactly |
 | `zero(name, index=None)` | Zero a parameter or slice |
 | `swap(name, source, source_name=None, index=None)` | Copy a parameter or slice from a tensor, model, or dict |
+| `project_out(name, direction, *, side="output", index=None, scale=1.0, note="")` | Remove a direction from one weight or bias with a single edit; see below |
 | `undo(edit_id=None)` | Restore the most recent edit exactly; undo is strictly last-in, first-out |
 | `edits()` | Edit history |
 | `export(path)` | Hugging Face checkpoint plus edit manifest; a LoRA adapter is merged one layer at a time, other adapters into a copy of the model |
 | `save_edits(path)`, `load_edits(path)` | Save edits, undo history, pass count, and dataset reservations, then resume them in a fresh session of the same model (CLI: `start --resume PATH`) |
+
+`project_out` writes `W - scale * d (dᵀW)` or its transpose, where `d` is the
+direction scaled to unit length. Scale 1.0 removes the direction and 2.0 reflects
+across it. It makes one `edit`, so undo, `edits()`, and saved bundles work as usual.
+`side="output"` removes the direction from what the layer writes; `side="input"`
+removes it from what the layer reads. The direction must be 1-D, finite, nonzero,
+and as long as that axis.
+
+| Parameter | Stored shape | `side="output"` (direction length) | `side="input"` (direction length) |
+| --- | --- | --- | --- |
+| `Linear` weight | [out, in] | out | in |
+| `Conv1D` weight | [in, out] | out | in |
+| `Embedding` weight | [vocab, dim] | dim | refused |
+| `Linear` or `Conv1D` bias | [out] | out | refused |
+
+`index` picks entries along the other axis and never the projected one: input
+columns for a `Linear` output projection, output rows for a `Linear` input
+projection, and token rows for an embedding. It takes None, an int, a slice with
+step 1, or a nonempty list of distinct ints, and a bias takes none. Any other module
+or attribute, such as a norm, a PEFT `lora.Linear` wrapper, or an unsupported index,
+raises `ValueError`; use `edit` with your own callable. For an adapter, edit its
+`base_layer` and `lora_B` weights.
 
 Only API edits can be undone or saved; writes made directly through `model` are
 untracked. A resumed session can tighten the saved pass limit but not raise it.

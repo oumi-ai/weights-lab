@@ -108,6 +108,6 @@ jobs:
         if: steps.changes.outputs.run == 'true' && matrix.dependencies == 'minimum'
         run: >-
           .venv/bin/pytest -q tests/test_local_model.py tests/test_adapter.py tests/test_loading.py
-          tests/test_persistence.py tests/test_scoring.py tests/test_interventions.py
+          tests/test_persistence.py tests/test_project_out.py tests/test_scoring.py tests/test_interventions.py
           tests/test_budget.py tests/test_device_map.py tests/test_peft_export.py
           tests/test_multi_gpu_loading.py tests/test_cross_session.py

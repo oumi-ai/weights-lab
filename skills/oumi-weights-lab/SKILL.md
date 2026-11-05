@@ -82,6 +82,7 @@ Read only the one you need:
 
 - [Worked example](references/worked-example.md): full baseline, ablation, undo, and report snippet.
 - [Zero or swap parts](references/zero-swap.md): reversible ablations and matched checkpoint slices.
+- [Remove a direction](references/direction-edits.md): project a direction out of a weight, bias, or embedding.
 - [Compare checkpoints](references/compare-checkpoints.md): parameter deltas without forward passes.
 - [Evaluation reports and screens](references/evaluation.md): paired statistics, regression suites, and pinned dev subsets.
 - [Save and resume edits](references/edit-bundles.md): save points that carry undo history and held-out reservations.
