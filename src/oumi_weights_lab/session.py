@@ -30,6 +30,9 @@ TERMINAL_STATES = frozenset({"stopped", "failed"})
 DEFAULT_SNIPPET_TIMEOUT = 300.0
 DEFAULT_POLL_INTERVAL = 0.1
 DEFAULT_SHUTDOWN_GRACE = 30.0
+# Saving the deadline bundle hashes every weight, which takes minutes on a model
+# spread over several GPUs.
+MULTI_GPU_SHUTDOWN_GRACE = 300.0
 
 
 @contextmanager
@@ -138,10 +141,13 @@ def validate_placement(config: dict[str, Any]) -> None:
 
 def validate_lifecycle(config: dict[str, Any]) -> dict[str, Any]:
     config = config.copy()
+    grace = MULTI_GPU_SHUTDOWN_GRACE if config.get("device_map") else DEFAULT_SHUTDOWN_GRACE
     for name in ("idle_timeout", "max_lifetime", "shutdown_grace"):
-        value = config.get(name, DEFAULT_SHUTDOWN_GRACE if name == "shutdown_grace" else None)
-        if value is None and name != "shutdown_grace":
-            continue
+        value = config.get(name)
+        if value is None:
+            if name != "shutdown_grace":
+                continue
+            value = grace
         if isinstance(value, bool):
             raise ValueError(f"{name} must be finite and nonnegative")
         try:

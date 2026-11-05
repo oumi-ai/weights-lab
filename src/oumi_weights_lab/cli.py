@@ -125,6 +125,8 @@ def _start(args: argparse.Namespace) -> int:
         return _remote_start(args)
     if args.infra:
         raise ValueError("--infra requires --cluster")
+    if args.disk_size is not None:
+        raise ValueError("--disk-size requires --cluster")
     path = args.session.expanduser().resolve()
     config = {
         "model": args.model,
@@ -247,13 +249,26 @@ def _matches_worker(pid: int, path: Path) -> bool:
     return command.endswith(f"-m oumi_weights_lab _worker --session {path}")
 
 
+def _saving_until(path: Path, status: dict) -> float:
+    """When a stopping worker's shutdown grace ends, or 0 when it is not stopping."""
+    if status.get("state") != "stopping":
+        return 0.0
+    try:
+        grace = float(session.read_json(path / "config.json")["shutdown_grace"])
+        return float(status["updated_at"]) + grace
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0.0
+
+
 def _stop(args: argparse.Namespace) -> int:
     path = args.session.expanduser().resolve()
     status = _status(path)
     (path / "STOP").touch()
     deadline = time.monotonic() + args.timeout
     while _alive(status):
-        if time.monotonic() >= deadline:
+        # A worker past its deadline saves an edit bundle within its shutdown grace;
+        # killing it then would lose the bundle, and its watchdog enforces the grace.
+        if time.monotonic() >= deadline and time.time() >= _saving_until(path, status):
             break
         time.sleep(0.1)
         status = _status(path)
@@ -357,13 +372,14 @@ def _remote_start(args):
     for key in ("device_map", "max_memory", "idle_timeout", "max_lifetime"):
         if getattr(args, key) is not None:
             config[key] = getattr(args, key)
-    if args.shutdown_grace != session.DEFAULT_SHUTDOWN_GRACE:
+    if args.shutdown_grace is not None:
         config["shutdown_grace"] = args.shutdown_grace
     _configuration(args.model, config)  # Reject static errors before provisioning.
     transport = SkyPilotLauncher(args.cluster, python=args.remote_python)
     config.update(
         source=args.source,
         accelerators=args.accelerators,
+        disk_size=args.disk_size,
         idle_minutes=args.idle_minutes,
         infra=args.infra,
     )
@@ -505,9 +521,9 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument(
         "--shutdown-grace",
         type=_positive,
-        default=session.DEFAULT_SHUTDOWN_GRACE,
         help="seconds for graceful shutdown before forced kill "
-        f"(default: {session.DEFAULT_SHUTDOWN_GRACE:g})",
+        f"(default: {session.DEFAULT_SHUTDOWN_GRACE:g}, or "
+        f"{session.MULTI_GPU_SHUTDOWN_GRACE:g} with --device-map)",
     )
     start.add_argument(
         "--source",
@@ -517,6 +533,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     start.add_argument("--infra", help="SkyPilot infrastructure, e.g. slurm/mycluster/gpu")
     start.add_argument("--accelerators", default="A100:1")
+    start.add_argument(
+        "--disk-size",
+        type=int,
+        help="SkyPilot cluster disk in GB, for large checkpoints and exports",
+    )
     start.add_argument(
         "--idle-minutes",
         type=int,

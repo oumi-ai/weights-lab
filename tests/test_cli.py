@@ -162,6 +162,7 @@ def test_start_parser_defaults_use_shared_session_constants():
     start = ["start", "--session", "s", "--model", "m"]
     args = parser.parse_args(start)
     assert args.snippet_timeout == session.DEFAULT_SNIPPET_TIMEOUT
-    assert args.shutdown_grace == session.DEFAULT_SHUTDOWN_GRACE
+    # Unset, so create_session can choose the default from --device-map.
+    assert args.shutdown_grace is None
     for dtype in session.DTYPES:
         assert parser.parse_args([*start, "--dtype", dtype]).dtype == dtype

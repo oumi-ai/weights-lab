@@ -1,8 +1,8 @@
 """A model split across devices by accelerate behaves like the same model on one device.
 
 CI splits the model across two CPU placements, which exercises accelerate's hooks.
-On a Mac the second half also runs on MPS, which catches tensors left on the wrong
-device. The live multi-GPU validator covers CUDA.
+On a Mac the second half also runs on MPS, and on a node with two GPUs on the second
+GPU, which catches tensors left on the wrong device.
 """
 
 import copy
@@ -25,6 +25,8 @@ if torch.backends.mps.is_available():
         pytest.param(("cpu", "mps"), id="cpu+mps"),
         pytest.param(("mps", "cpu"), id="mps+cpu"),
     ]
+if torch.cuda.device_count() >= 2:
+    SPLITS.append(pytest.param(("cuda:0", "cuda:1"), id="cuda+cuda"))
 # MPS kernels round differently from CPU ones.
 TOLERANCE = 1e-4
 
@@ -70,7 +72,7 @@ def _device_map(first, second):
 
 def _dispatch(model, devices):
     device_map = _device_map(*devices)
-    if set(devices) == {"cpu"}:
+    if not ("cpu" in devices and len(set(devices)) > 1):
         return accelerate.dispatch_model(model, device_map=device_map, force_hooks=True)
     # dispatch_model reads "cpu" as offload to the accelerator, so attach the hooks it
     # attaches for a map of GPU indices: one per block, plus one returning outputs to
@@ -116,13 +118,13 @@ def test_the_device_map_and_input_device_come_from_the_dispatch(labs):
     assert split.device_map == _device_map(first, second)
     split.device_map["lm_head"] = "elsewhere"
     assert split.device_map["lm_head"] == second  # callers get a copy
-    assert split.device.type == first
-    devices = {torch.device(part["device"]).type for part in split.parts("lm_head.*")}
-    assert devices == {second}
+    assert str(split.device).startswith(first)
+    devices = {part["device"] for part in split.parts("lm_head.*")}
+    assert len(devices) == 1 and devices.pop().startswith(second)
     # accelerate's hooks run every block on its device and return outputs to the inputs'.
     assert split.model._hf_hook.io_same_device
     hook = split.model.transformer.h[1]._hf_hook
-    assert torch.device(hook.execution_device).type == second
+    assert str(torch.device(hook.execution_device)).startswith(second)
 
 
 @pytest.mark.filterwarnings("ignore:You are calling .generate")
