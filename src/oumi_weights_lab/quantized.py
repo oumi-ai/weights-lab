@@ -299,7 +299,8 @@ class Int8Codec:
             data, scales, _ = functional.int8_vectorwise_quant(values, threshold=0.0)
             with torch.no_grad():
                 for target in self._tensors("CB"):
-                    target.index_copy_(0, rows.to(target.device), data.to(target.device))
+                    # Index assignment, because MPS lacks index_copy before torch 2.8.
+                    target[rows.to(target.device)] = data.to(target.device)
                 self._store_scales(rows, scales)
         return {"blocks_requantized": int(rows.numel())}
 

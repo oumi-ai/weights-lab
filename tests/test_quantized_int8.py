@@ -304,3 +304,16 @@ def test_int8_edits_use_the_compute_dtype(checkpoint, load, dtype):
     lab.undo()
     lab.undo()
     assert same_packed(state, packed(lab))
+
+
+def test_int8_edit_and_undo_on_mps(checkpoint, load):
+    if not torch.backends.mps.is_available():
+        pytest.skip("requires Apple MPS hardware")
+    if tuple(int(part) for part in torch.__version__.split("+")[0].split(".")[:2]) < (2, 5):
+        pytest.skip("quantized models on MPS need torch 2.5 or later")
+    lab = load(checkpoint("llama"), quantize="int8", device="mps")
+    before = packed(lab)
+    lab.edit(Q_PROJ, lambda block: block * 0.5, index=(slice(0, 2), slice(None)))
+    assert not same_packed(before, packed(lab))
+    lab.undo()
+    assert same_packed(before, packed(lab))
