@@ -673,3 +673,27 @@ def test_allow_hub_kernels_clears_an_earlier_block(monkeypatch):
     block_hub_kernels(True)
     assert "kernels" not in sys.modules
     block_hub_kernels(True)  # Nothing to clear is fine.
+
+
+@pytest.mark.parametrize(
+    ("version", "device", "refused"),
+    [
+        ("2.4.0", "mps", True),
+        ("2.4.1+cpu", "mps:0", True),
+        ("2.5.1", "mps", False),
+        ("2.10.0", "mps", False),
+        ("2.4.0", "cpu", False),
+        ("2.4.0", "cuda:0", False),
+    ],
+)
+def test_quantized_mps_needs_torch_2_5(version, device, refused):
+    from types import SimpleNamespace
+
+    from oumi_weights_lab import lab as lab_module
+
+    torch_like = SimpleNamespace(__version__=version)
+    if refused:
+        with pytest.raises(RuntimeError, match="torch 2.5 or later"):
+            lab_module._check_quantized_device(torch_like, device)
+    else:
+        lab_module._check_quantized_device(torch_like, device)

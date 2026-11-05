@@ -16,7 +16,7 @@ All three leave embeddings, norms, biases, and `lm_head` in float. Expect small 
 oumi-weights-lab start --session sessions/q --model MODEL_ID --quantize nf4 --dtype bfloat16
 ```
 
-- On a GPU (`--device cuda`) or an Apple-silicon Mac on macOS 14 or later (`--device mps`), loading works as for a float model. `--device cpu` works too and is slow.
+- On a GPU (`--device cuda`) or an Apple-silicon Mac on macOS 14 or later with torch 2.5 or later (`--device mps`), loading works as for a float model. `--device cpu` works too and is slow.
 - `--quantize` cannot be combined with `--device-map`: the model must fit on one device.
 - It needs the `quantized` extra, which the Claude Code plugin includes. Without bitsandbytes the start fails before any weights load, with the install command.
 - Layers compute in `--dtype`. With the default, that is the checkpoint's float dtype.

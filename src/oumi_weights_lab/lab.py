@@ -203,6 +203,7 @@ def load_lab(config: dict[str, Any], session_path: Path) -> Lab:
     quantized = bool(quantize) or prequantized is not None
     if quantized:
         version = _require_bitsandbytes()
+        _check_quantized_device(torch, device)
     placement = {}
     if quantized:
         placement["device_map"] = {"": str(device)}
@@ -349,6 +350,22 @@ def _require_bitsandbytes() -> str:
             "Intel Macs or macOS before 14."
         ) from error
     return bitsandbytes.__version__
+
+
+def _check_quantized_device(torch: Any, device: Any) -> None:
+    """Refuse a quantized model on Apple MPS with a torch too old for bitsandbytes there.
+
+    On torch 2.4, bitsandbytes' MPS kernels need an operator that torch does not implement
+    for MPS, so loading fails partway through with an unrelated error.
+    """
+    if str(device).split(":")[0] != "mps":
+        return
+    release = tuple(int(part) for part in torch.__version__.split("+")[0].split(".")[:2])
+    if release < (2, 5):
+        raise RuntimeError(
+            f"Quantized models on Apple MPS need torch 2.5 or later; this is torch "
+            f"{torch.__version__}. Upgrade torch, or load with --device cpu."
+        )
 
 
 def _quantization_config(method: str, compute_dtype: Any) -> Any:
