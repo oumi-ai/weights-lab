@@ -161,6 +161,19 @@ def test_remote_backup_uses_remote_archive_path_and_downloads_without_overwrite(
     assert destination.read_bytes() == b"remote archive"
 
 
+def test_sky_start_forwards_gpu_placement_only_when_given(transports, capsys):
+    start = ["start", "--cluster", "lab", "--session", "/remote/s", "--model", "base"]
+    placement = ["--device-map", "balanced", "--max-memory", "0=70GiB,1=70GiB"]
+    assert cli.main([*start, "--accelerators", "H100:2", *placement]) == 0
+    assert cli.main(start) == 0
+    capsys.readouterr()
+    first, second = (call[3] for call in transports[0]["SkyPilotLauncher"].calls)
+    assert first["device_map"] == "balanced"
+    assert first["max_memory"] == {"0": "70GiB", "1": "70GiB"}
+    assert first["accelerators"] == "H100:2"
+    assert "device_map" not in second and "max_memory" not in second
+
+
 def test_sky_start_forwards_checkpoint_pins_budget_and_infra(transports, capsys):
     arguments = [
         "start",

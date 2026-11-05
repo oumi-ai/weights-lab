@@ -22,6 +22,13 @@ def _json(value: dict) -> None:
     print(json.dumps(value), flush=True)
 
 
+def _max_memory(text: str) -> dict[str, str]:
+    try:
+        return session.parse_max_memory(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
+
+
 def _positive(value: str) -> float:
     number = float(value)
     if not math.isfinite(number) or number <= 0:
@@ -123,6 +130,8 @@ def _start(args: argparse.Namespace) -> int:
         "model": args.model,
         "device": args.device,
         "dtype": args.dtype,
+        "device_map": args.device_map,
+        "max_memory": args.max_memory,
         "snippet_timeout": args.snippet_timeout,
         "poll_interval": session.DEFAULT_POLL_INTERVAL,
         "pass_limit": args.pass_limit,
@@ -345,7 +354,7 @@ def _remote_start(args):
     if args.resume is not None:
         # The launcher resolves a relative remote path as it does the session path.
         config["resume"] = str(args.resume)
-    for key in ("idle_timeout", "max_lifetime"):
+    for key in ("device_map", "max_memory", "idle_timeout", "max_lifetime"):
         if getattr(args, key) is not None:
             config[key] = getattr(args, key)
     if args.shutdown_grace != session.DEFAULT_SHUTDOWN_GRACE:
@@ -465,6 +474,17 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--resume", type=Path, help="edit bundle to resume in this new session")
     start.add_argument("--device", default="auto")
     start.add_argument("--dtype", default="auto", choices=session.DTYPES)
+    start.add_argument(
+        "--device-map",
+        choices=session.DEVICE_MAPS,
+        help="spread the model over every visible CUDA GPU; CPU and disk offload are refused",
+    )
+    start.add_argument(
+        "--max-memory",
+        type=_max_memory,
+        help="with --device-map, use only these GPUs, up to this much memory on each, "
+        "such as 0=70GiB,1=70GiB (default: 90%% of every GPU's free memory)",
+    )
     start.add_argument("--snippet-timeout", type=_positive, default=session.DEFAULT_SNIPPET_TIMEOUT)
     start.add_argument(
         "--pass-limit",

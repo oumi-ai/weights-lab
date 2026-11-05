@@ -156,7 +156,8 @@ gradients = lab.gradient("hello world", parameters=[name], max_tokens=64)
 - `lab.device` is the device of the input embeddings; move tokenizer outputs there.
   For a model dispatched across devices, `lab.device_map` is a copy of its
   module-to-device map (`None` for a model moved to one device), and outputs come
-  back on the inputs' device.
+  back on the inputs' device. `lab.device_memory` gives GiB of parameters per
+  device, which `peek` reports as `devices`.
 - `record` captures activations on CPU at the chosen positions, the last token by
   default. Around batched scoring, each capture is one packed batch of rows and
   options; use `batch_size=1` for one capture per option. `patch` replaces them with a tensor or a callable's result. Both remove

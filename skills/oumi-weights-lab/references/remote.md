@@ -4,9 +4,9 @@ Use an agent execution environment with the `oumi-weights-lab` CLI available (fr
 the Claude Code plugin, or `uv tool install git+https://github.com/oumi-ai/weights-lab`)
 and upstream SkyPilot installed and authenticated for the chosen infrastructure.
 
-The remote worker installs the same code the CLI runs, with adapter and Hugging
-Face datasets support (gated datasets, like gated models, need credentials on
-the worker): the
+The remote worker installs the same code the CLI runs, with adapter, Hugging
+Face datasets, and multi-GPU support (gated datasets, like gated models, need
+credentials on the worker): the
 plugin's or checkout's sanitized package source, or the git commit the CLI was
 installed from. Pass `--source /path/to/weights-lab` to ship a different checkout.
 The worker needs git for a commit install. Model access and credentials must be
@@ -28,6 +28,17 @@ remote path; use a new one for each `start`, since a path that already holds a
 session fails startup. For Slurm, configure `~/.slurm/config` using the upstream
 [Slurm guide](https://docs.skypilot.ai/en/latest/reference/slurm/slurm-getting-started.html),
 run `sky check`, then add `--infra slurm/mycluster/mypartition` to `start`.
+
+For a model larger than one GPU, request several and spread the model over them:
+
+```sh
+oumi-weights-lab start --cluster lab-big \
+  --model Qwen/Qwen3-32B --session /tmp/lab --accelerators H100:2 --device-map balanced
+```
+
+`peek` then lists GiB of parameters on each GPU under `devices`. A model that
+does not fit in 90% of the GPUs' free memory, or in `--max-memory`, is refused
+before its weights download.
 
 Export any checkpoint under `artifacts/` while the model is alive, then stop and
 back up before destroying the worker:

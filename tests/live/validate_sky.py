@@ -21,7 +21,7 @@ SETUP = (
     "curl -LsSf https://astral.sh/uv/0.10.12/install.sh | "
     "env UV_INSTALL_DIR=/tmp/oumi-weights-lab-uv UV_NO_MODIFY_PATH=1 sh\n"
     f"{UV} venv --seed --python 3.11 /tmp/oumi-weights-lab-env\n"
-    f"{UV} pip install --python {PYTHON} '.[adapters,datasets]'\n"
+    f"{UV} pip install --python {PYTHON} '.[adapters,datasets,multi-gpu]'\n"
 )
 
 

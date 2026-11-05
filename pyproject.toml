@@ -27,6 +27,7 @@ Issues = "https://github.com/oumi-ai/weights-lab/issues"
 [project.optional-dependencies]
 adapters = ["peft>=0.13"]
 datasets = ["datasets>=4"]
+multi-gpu = ["accelerate>=1.0"]
 
 [project.scripts]
 oumi-weights-lab = "oumi_weights_lab.cli:main"

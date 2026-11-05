@@ -6,6 +6,7 @@ import fcntl
 import json
 import math
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -19,6 +20,11 @@ from .budget import PassBudget
 
 DIRECTORIES = ("inbox", "running", "completed", "outputs", "results", "artifacts")
 DTYPES = ("auto", "float32", "float16", "bfloat16")
+# How --device-map spreads a model over GPUs, as Transformers names the strategies.
+DEVICE_MAPS = ("balanced", "sequential")
+_MEMORY_SIZE = re.compile(r"[0-9]+(?:\.[0-9]+)?(?:[KMG]iB|[KMG]B)")
+_GPU_INDEX = re.compile(r"[0-9]+")
+_MAX_MEMORY_FORMAT = "--max-memory takes GPU=SIZE pairs, such as 0=70GiB,1=70GiB"
 # Worker status states: starting, loading, ready, running, stopping, stopped, failed.
 TERMINAL_STATES = frozenset({"stopped", "failed"})
 DEFAULT_SNIPPET_TIMEOUT = 300.0
@@ -71,6 +77,7 @@ def create_session(path: Path, config: dict[str, Any]) -> Path:
     if not config.get("model"):
         raise ValueError("a model name or checkpoint path is required")
     PassBudget(config.get("pass_limit"))
+    validate_placement(config)
     config = validate_lifecycle(config)
     config = {
         "snippet_timeout": DEFAULT_SNIPPET_TIMEOUT,
@@ -88,6 +95,45 @@ def create_session(path: Path, config: dict[str, Any]) -> Path:
     write_json(path / "config.json", config)
     write_json(path / "status.json", {"state": "starting", "model": config["model"]})
     return path
+
+
+def parse_max_memory(text: str) -> dict[str, str]:
+    """Read ``0=70GiB,1=70GiB`` as GPU indices (as strings, for JSON) mapped to sizes."""
+    limits: dict[str, str] = {}
+    for entry in text.split(","):
+        index, separator, size = (part.strip() for part in entry.partition("="))
+        if not separator or not _GPU_INDEX.fullmatch(index) or str(int(index)) in limits:
+            raise ValueError(_MAX_MEMORY_FORMAT)
+        limits[str(int(index))] = size
+    _check_max_memory(limits)
+    return limits
+
+
+def _check_max_memory(limits: Any) -> None:
+    if (
+        not isinstance(limits, dict)
+        or not limits
+        or not all(isinstance(index, str) and _GPU_INDEX.fullmatch(index) for index in limits)
+        or not all(
+            isinstance(size, str) and _MEMORY_SIZE.fullmatch(size) for size in limits.values()
+        )
+    ):
+        raise ValueError(_MAX_MEMORY_FORMAT)
+
+
+def validate_placement(config: dict[str, Any]) -> None:
+    """Check ``device_map`` and ``max_memory`` before a session or cluster exists."""
+    device_map, max_memory = config.get("device_map"), config.get("max_memory")
+    if device_map is None:
+        if max_memory is not None:
+            raise ValueError("--max-memory needs --device-map")
+        return
+    if device_map not in DEVICE_MAPS:
+        raise ValueError("--device-map must be balanced or sequential")
+    if str(config.get("device", "auto")) not in ("auto", "cuda"):
+        raise ValueError("--device-map spreads a model over CUDA GPUs; use --device auto or cuda")
+    if max_memory is not None:
+        _check_max_memory(max_memory)
 
 
 def validate_lifecycle(config: dict[str, Any]) -> dict[str, Any]:

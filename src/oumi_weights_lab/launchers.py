@@ -23,6 +23,7 @@ from .session import (
     DTYPES,
     TERMINAL_STATES,
     validate_lifecycle,
+    validate_placement,
 )
 
 # argv: session path, launch ID. A session left at the path by an earlier launch has
@@ -101,7 +102,21 @@ def _configuration(model, config):
         if not math.isfinite(number) or number <= 0:
             raise ValueError(f"{name} must be finite and positive")
     PassBudget(configuration.get("pass_limit"))
+    validate_placement(configuration)
     return validate_lifecycle(configuration)
+
+
+def _check_gpu_indices(accelerators, max_memory):
+    """Refuse --max-memory GPUs the cluster will not have, before provisioning it."""
+    request = re.fullmatch(r"[A-Za-z0-9_.-]+(?::([0-9]+))?", str(accelerators or ""))
+    if not max_memory or request is None:
+        return
+    count = int(request.group(1) or 1)
+    highest = max(int(index) for index in max_memory)
+    if highest >= count:
+        raise ValueError(
+            f"--max-memory names GPU {highest}, but {accelerators} has GPUs 0 to {count - 1}"
+        )
 
 
 def _source_checkout(source):
@@ -137,7 +152,7 @@ def _installed_commit():
 def _worker_requirement(checkout):
     """Install what the caller runs: its checkout, or the same git commit."""
     if checkout is not None:
-        return ".[adapters,datasets]"
+        return ".[adapters,datasets,multi-gpu]"
     installed = _installed_commit()
     if installed is None:
         raise ValueError(
@@ -145,7 +160,7 @@ def _worker_requirement(checkout):
             "checkout, install from git+https://github.com/oumi-ai/weights-lab, or pass --source"
         )
     url, commit = installed
-    return f"oumi-weights-lab[adapters,datasets] @ git+{url}@{commit}"
+    return f"oumi-weights-lab[adapters,datasets,multi-gpu] @ git+{url}@{commit}"
 
 
 def _worker_script(session, configuration):
@@ -362,6 +377,7 @@ class SkyPilotLauncher:
         configuration = _configuration(
             model, {"idle_timeout": 900, "max_lifetime": 14400, **config}
         )
+        _check_gpu_indices(accelerators, configuration.get("max_memory"))
         launch_id = uuid.uuid4().hex
         configuration["launch_id"] = launch_id
         session = self._path(session)

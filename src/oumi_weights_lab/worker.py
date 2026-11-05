@@ -62,6 +62,8 @@ class Worker:
         self.namespace: dict[str, Any] = {}
         self._shutdown_reason: str | None = None
         self._deadline: threading.Timer | None = None
+        # GiB of parameters per device, reported in every status once the model loads.
+        self._devices: dict[str, float] | None = None
 
     def _status(self, state: str, **extra: Any) -> None:
         status = {
@@ -69,6 +71,7 @@ class Worker:
             "pid": os.getpid(),
             "model": self.config["model"],
             "updated_at": time.time(),
+            **({"devices": self._devices} if self._devices else {}),
             **extra,
         }
         with session_lock(self.path):
@@ -213,6 +216,7 @@ class Worker:
 
                     self.loader = load_lab
                 self.lab = self.loader(self.config, self.path)
+                self._devices = getattr(self.lab, "device_memory", None)
                 self.namespace = {
                     "__name__": "__oumi_weights_lab__",
                     "lab": self.lab,

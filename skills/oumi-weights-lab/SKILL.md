@@ -10,7 +10,7 @@ Load one model into a persistent worker, then send it Python snippets. Snippets 
 
 ## Setup
 
-Run `oumi-weights-lab --help`. If it fails, ask the user to install the CLI with `uv tool install git+https://github.com/oumi-ai/weights-lab`, or `uv tool install 'oumi-weights-lab[adapters,datasets] @ git+https://github.com/oumi-ai/weights-lab'` for LoRA adapters and Hugging Face datasets (`lab.hf_rows`). Under the Claude Code plugin, the first call builds an environment and downloads PyTorch; allow it several minutes.
+Run `oumi-weights-lab --help`. If it fails, ask the user to install the CLI with `uv tool install git+https://github.com/oumi-ai/weights-lab`, or `uv tool install 'oumi-weights-lab[adapters,datasets,multi-gpu] @ git+https://github.com/oumi-ai/weights-lab'` for LoRA adapters, Hugging Face datasets (`lab.hf_rows`), and multi-GPU loading. Under the Claude Code plugin, the first call builds an environment and downloads PyTorch; allow it several minutes.
 
 ## Session commands
 
@@ -24,6 +24,7 @@ Run `oumi-weights-lab --help`. If it fails, ask the user to install the CLI with
 
 - Use a new `--session` directory for every `start`; a stopped session cannot be restarted.
 - `start` returns while the model loads, and snippets queue until it is ready. `--device` defaults to CUDA, then Apple MPS, then CPU. `--dtype` defaults to the checkpoint's own.
+- For a model too big for one GPU, add `--device-map balanced` to spread it over every visible GPU (`sequential` fills GPU 0 first). `--max-memory 0=70GiB,1=70GiB` uses only the GPUs it names, up to that much on each; by default the model may use 90% of every GPU's free memory. A model that would need CPU or disk offload is refused before any weights load. `peek` reports GiB of parameters per device under `devices`.
 - Stdout is JSON. `--follow` streams snippet output to stderr. `--snippet-timeout` stops a snippet that runs too long; `send --timeout` only limits how long the CLI waits.
 - Snippet files can live anywhere; `--file` sends their contents. Snippets run in the directory where `start` ran, so read inputs by absolute path and write outputs under `artifacts`.
 - Add `--adapter PATH_OR_ID` to load a LoRA adapter. For a cloud GPU or Slurm, read [remote workers](references/remote.md).
