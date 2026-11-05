@@ -24,71 +24,190 @@ def _activation(output):
     return value
 
 
+_RECORD_AT = ("output", "input", "attention")
+_PATCH_AT = ("output", "input")
+
+
+def _is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _listed(positions):
-    """Positions as given, with an iterable read once so every hook call sees the same list."""
-    if positions is None or isinstance(positions, int):
+    """Positions checked and normalized once, when a context opens.
+
+    A slice or "all" is kept as given, an iterable is read once so every hook call sees the
+    same list, and anything that cannot work on any call raises. Whether positions fit a
+    given call is checked by ``_positions`` at the forward.
+    """
+    if positions is None or _is_int(positions):
+        return positions
+    if isinstance(positions, str):
+        if positions != "all":
+            raise ValueError('positions must be an integer, a list of integers, a slice, or "all"')
+        return positions
+    if isinstance(positions, slice):
+        if not all(part is None or _is_int(part) for part in (positions.start, positions.stop)):
+            raise ValueError("slice positions must use integers or None")
+        if positions.step is not None and (not _is_int(positions.step) or positions.step < 1):
+            raise ValueError("slice positions need a positive integer step")
         return positions
     try:
-        return list(positions)
+        values = list(positions)
     except TypeError:
-        return positions  # _positions reports the invalid value on the first forward.
+        raise ValueError(
+            'positions must be an integer, a list of integers, a slice, or "all"'
+        ) from None
+    if not values or not all(_is_int(index) for index in values):
+        raise ValueError("positions must be an integer or a nonempty list of integers")
+    if len(set(values)) != len(values):
+        raise ValueError("positions must select distinct tokens")
+    return values
 
 
-def _integer_positions(positions):
-    """The integer positions a hook will select, for batched scoring's padding checks."""
+def _padding_positions(positions):
+    """The positions batched scoring must check against left padding.
+
+    A negative position counts from the end and survives padding; a nonnegative one does not.
+    "all" is safe. A slice is safe only when it ends at the end of every sequence: a negative
+    start, a stop of None or a negative number, and a step of 1. Any other slice counts from
+    the left, so it returns 0.
+    """
     if positions is None:
         return [-1]
-    values = [positions] if isinstance(positions, int) else positions
+    if isinstance(positions, str):
+        return []
+    if isinstance(positions, slice):
+        start, stop, step = positions.start, positions.stop, positions.step
+        anchored = (
+            start is not None and start < 0 and (stop is None or stop < 0) and step in (None, 1)
+        )
+        return [start] if anchored else [0]
+    values = [positions] if _is_int(positions) else positions
     if not isinstance(values, list):
         return []
-    return [index for index in values if isinstance(index, int) and not isinstance(index, bool)]
+    return [index for index in values if _is_int(index)]
 
 
-def _positions(value, positions):
-    selected = (
-        [-1]
-        if positions is None
-        else [positions]
-        if isinstance(positions, int)
-        else list(positions)
-    )
-    if not selected or any(
-        not isinstance(index, int) or isinstance(index, bool) for index in selected
-    ):
+def _positions(value, positions, dim=1):
+    """Indices along ``dim`` of ``value`` that ``positions`` selects on this call."""
+    size = value.shape[dim]
+    if isinstance(positions, str):
+        return list(range(size))
+    if isinstance(positions, slice):
+        selected = list(range(*positions.indices(size)))
+        if not selected:
+            raise ValueError("positions select no tokens")
+        return selected
+    selected = [-1] if positions is None else [positions] if _is_int(positions) else list(positions)
+    if not selected or any(not _is_int(index) for index in selected):
         raise ValueError("positions must be an integer or a nonempty list of integers")
-    if any(index < -value.shape[1] or index >= value.shape[1] for index in selected):
+    if any(index < -size or index >= size for index in selected):
         raise ValueError("token position is outside the module output")
     # Aliases such as [2, -1] on three tokens would silently drop one replacement.
-    selected = [index % value.shape[1] for index in selected]
+    selected = [index % size for index in selected]
     if len(set(selected)) != len(selected):
         raise ValueError("positions must select distinct tokens")
     return selected
 
 
+def _take(value, indices, dim=1):
+    """A copy of ``value`` restricted to ``indices`` along ``dim``."""
+    import torch
+
+    return value.index_select(dim, torch.as_tensor(indices, device=value.device))
+
+
+def _replaced(value, positions, values):
+    """``value`` with the selected token positions replaced by ``values`` (a tensor or callable)."""
+    import torch
+
+    indices = _positions(value, positions)
+    replacement = values(_take(value, indices)) if callable(values) else values
+    replacement = torch.as_tensor(replacement, device=value.device, dtype=value.dtype)
+    updated = value.clone()
+    updated[:, indices] = replacement
+    return updated
+
+
+def _input_activation(args, kwargs):
+    """The tensor a module is called with, and where it came from (0 or "hidden_states")."""
+    import torch
+
+    if args and isinstance(args[0], torch.Tensor):
+        value, slot = args[0], 0
+    elif isinstance(kwargs.get("hidden_states"), torch.Tensor):
+        value, slot = kwargs["hidden_states"], "hidden_states"
+    else:
+        raise ValueError(
+            "module has no tensor input: expected a tensor as the first argument "
+            "or as hidden_states="
+        )
+    if value.ndim < 3:
+        raise ValueError("module input must be a tensor [batch, tokens, ...]")
+    return value, slot
+
+
+def _with_input(args, kwargs, slot, updated):
+    """``(args, kwargs)`` with ``updated`` in the slot ``_input_activation`` read it from."""
+    if slot == 0:
+        return (updated, *args[1:]), kwargs
+    return args, {**kwargs, slot: updated}
+
+
+def _attention_weights(output):
+    """The ``[batch, heads, queries, keys]`` weights in an eager attention module's output."""
+    import torch
+
+    pair = isinstance(output, (tuple, list)) and len(output) > 1
+    hidden, weights = (output[0], output[1]) if pair else (None, None)
+    # Batch and query counts must match the first output, or any 4-D tensor would pass.
+    if (
+        not isinstance(weights, torch.Tensor)
+        or weights.ndim != 4
+        or not isinstance(hidden, torch.Tensor)
+        or hidden.ndim < 2
+        or weights.shape[0] != hidden.shape[0]
+        or weights.shape[2] != hidden.shape[1]
+    ):
+        raise ValueError(
+            "attention capture needs a module whose output's second element is the attention "
+            "weights; the lab loads eager attention, so check the module name points at an "
+            "attention block, not a layer or a linear-attention block"
+        )
+    return weights
+
+
+def _check_at(at, allowed):
+    if not isinstance(at, str) or at not in allowed:
+        raise ValueError(f"at must be one of {', '.join(map(repr, allowed))}")
+
+
 def _remove_by_identity(module, hook):
     """Remove ``hook`` from torch's private hook dicts when its handle was never returned.
 
-    A torch without these dicts leaves the hook registered; it is inert once removed.
+    Covers forward hooks and forward pre-hooks. A torch without these dicts leaves the hook
+    registered; it is inert once removed.
     """
-    hooks = getattr(module, "_forward_hooks", {})
-    for key in [key for key, value in hooks.items() if value is hook]:
-        for attribute in (
-            "_forward_hooks",
-            "_forward_hooks_with_kwargs",
-            "_forward_hooks_always_called",
-        ):
-            getattr(module, attribute, {}).pop(key, None)
+    for family in (
+        ("_forward_hooks", "_forward_hooks_with_kwargs", "_forward_hooks_always_called"),
+        ("_forward_pre_hooks", "_forward_pre_hooks_with_kwargs"),
+    ):
+        hooks = getattr(module, family[0], {})
+        for key in [key for key, value in hooks.items() if value is hook]:
+            for attribute in family:
+                getattr(module, attribute, {}).pop(key, None)
 
 
 class _TemporaryHook:
-    """A forward hook that does nothing once removed, even if it stays registered.
+    """A forward hook, or with ``pre=True`` a forward pre-hook, inert once removed.
 
-    Worker timeouts raise BaseException anywhere, including inside
-    register_forward_hook after the hook is stored but before its handle returns.
+    A pre-hook is called as ``function(module, args, kwargs)``. Worker timeouts raise
+    BaseException anywhere, including inside register_forward_hook after the hook is
+    stored but before its handle returns.
     """
 
-    def __init__(self, module, function):
-        self.module, self.function = module, function
+    def __init__(self, module, function, pre=False):
+        self.module, self.function, self.pre = module, function, pre
         self.active = True
         self.handle = None
 
@@ -96,7 +215,10 @@ class _TemporaryHook:
         return self.function(*args) if self.active else None
 
     def register(self, **kwargs):
-        self.handle = self.module.register_forward_hook(self, **kwargs)
+        if self.pre:
+            self.handle = self.module.register_forward_pre_hook(self, with_kwargs=True, **kwargs)
+        else:
+            self.handle = self.module.register_forward_hook(self, **kwargs)
 
     def remove(self):
         self.active = False
@@ -133,7 +255,7 @@ class InspectionMixin:
     @contextmanager
     def _track_positions(self, positions):
         """List an active hook's positions so batched scoring can refuse padding that moves them."""
-        entry = (object(), _integer_positions(positions))
+        entry = (object(), _padding_positions(positions))
         if not hasattr(self, "_position_hooks"):
             self._position_hooks = []
         try:
@@ -148,9 +270,19 @@ class InspectionMixin:
         return [dict(item) for item in getattr(self, "_patches", [])]
 
     @contextmanager
-    def record(self, modules, positions=None):
-        """Capture selected output positions as detached CPU tensors for each call."""
+    def record(self, modules, positions=None, at="output"):
+        """Capture selected positions as detached CPU tensors for each call.
+
+        ``at`` picks what to capture. "output" is a module's output, "input" its first
+        tensor argument (or ``hidden_states=``), and "attention" the attention weights
+        ``[batch, heads, selected, keys]`` from an attention block, where positions select
+        queries. Positions are None (the last token), an int, a list of distinct ints,
+        "all", or a slice. Attention capture needs eager attention and refuses a module
+        whose output has no 4-D second element. A bad ``at`` or position raises before any
+        hook is registered.
+        """
         _eager(self.model)
+        _check_at(at, _RECORD_AT)
         positions = _listed(positions)
         names = [modules] if isinstance(modules, str) else list(modules)
         if not names or len(set(names)) != len(names):
@@ -158,17 +290,24 @@ class InspectionMixin:
         targets = [(name, self.model.get_submodule(name)) for name in names]
         captured = {name: [] for name in names}
         hooks = []
+
+        def read(args, last):
+            if at == "input":
+                return _input_activation(args, last)[0], 1
+            if at == "attention":
+                return _attention_weights(last), 2
+            return _activation(last), 1
+
         try:
             for name, target in targets:
 
-                def capture(module, inputs, output, name=name):
-                    value = _activation(output)
-                    captured[name].append(
-                        value[:, _positions(value, positions)].detach().cpu().clone()
-                    )
+                def capture(module, args, last, name=name):
+                    value, dim = read(args, last)
+                    chosen = _take(value, _positions(value, positions, dim), dim)
+                    captured[name].append(chosen.detach().cpu().clone())
 
                 # Track before registering so an interrupt cannot orphan the hook.
-                hooks.append(_TemporaryHook(target, capture))
+                hooks.append(_TemporaryHook(target, capture, pre=at == "input"))
                 hooks[-1].register()
             with self._track_positions(positions):
                 yield captured
@@ -177,30 +316,32 @@ class InspectionMixin:
                 hook.remove()
 
     @contextmanager
-    def patch(self, module, values, positions=None):
+    def patch(self, module, values, positions=None, at="output"):
         """Replace selected activation positions for the duration of the context.
 
+        ``at`` is "output" or "input"; an input patch replaces the module's first tensor
+        argument (or ``hidden_states=``) before it runs. Positions are as for ``record``.
         A callable receives the selected tensor and must return its replacement.
-        Tensor replacements may broadcast to the selected activation shape.
+        Tensor replacements may broadcast to the selected activation shape and take the
+        incoming tensor's device and dtype. Attention weights cannot be patched; use record.
         """
-        import torch
-
         _eager(self.model)
+        if at == "attention":
+            raise ValueError("attention weights cannot be patched; use record")
+        _check_at(at, _PATCH_AT)
         positions = _listed(positions)
         target = self.model.get_submodule(module)
 
         def replace(hooked, inputs, output):
-            value = _activation(output)
-            indices = _positions(value, positions)
-            chosen = value[:, indices].clone()
-            replacement = values(chosen) if callable(values) else values
-            replacement = torch.as_tensor(replacement, device=value.device, dtype=value.dtype)
-            updated = value.clone()
-            updated[:, indices] = replacement
+            updated = _replaced(_activation(output), positions, values)
             if isinstance(output, tuple):
                 entries = (updated, *output[1:])
                 return type(output)(*entries) if hasattr(output, "_fields") else entries
             return updated
+
+        def replace_input(hooked, args, kwargs):
+            value, slot = _input_activation(args, kwargs)
+            return _with_input(args, kwargs, slot, _replaced(value, positions, values))
 
         self._patch_revision = getattr(self, "_patch_revision", 0) + 1
         if not hasattr(self, "_patches"):
@@ -209,9 +350,12 @@ class InspectionMixin:
             "id": f"patch-{self._patch_revision}",
             "module": module,
             "positions": repr(positions),
+            "at": at,
             "kind": "callable" if callable(values) else "tensor",
         }
-        hook = _TemporaryHook(target, replace)
+        hook = _TemporaryHook(
+            target, replace_input if at == "input" else replace, pre=at == "input"
+        )
         # Worker timeouts raise BaseException anywhere, so register inside cleanup.
         try:
             hook.register()

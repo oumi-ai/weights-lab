@@ -99,7 +99,7 @@ report = lab.compare_runs(before, after)
   (default 8), packing whole rows in order. The summary's `scoring_config`
   records how a run was scored, and runs pair only when it matches; runs saved
   before configs were recorded count as `legacy-v0.1`. While a logit attachment,
-  or a `record` or `patch` at nonnegative positions, is active, use
+  or a `record` or `patch` at positions counted from the left, is active, use
   `batch_size=1` for the run and the runs you compare it with, because left
   padding shifts what those hooks see. Items record each option's token count as
   `option_tokens`.
@@ -206,6 +206,30 @@ gradients = lab.gradient("hello world", parameters=[name], max_tokens=64)
   default. Around batched scoring, each capture is one packed batch of rows and
   options; use `batch_size=1` for one capture per option. `patch` replaces them with a tensor or a callable's result. Both remove
   their hooks on exit.
+- `at` says what to capture or replace. `record(..., at=)` takes `"output"` (the
+  default), `"input"`, or `"attention"`; `patch(..., at=)` takes `"output"` or `"input"`.
+  An input is the module's first tensor argument, or `hidden_states=` when the call
+  passes it by keyword; a module with neither raises. Both must be `[batch, tokens, ...]`.
+  Patching the input of `o_proj` (or GPT-2's `attn.c_proj`) acts on the per-head outputs.
+- `positions` is `None` (the last token), an int, a list of distinct ints, `"all"`, or a
+  slice. `"all"` selects every token of each call, so under cached generation the first
+  call has the whole prompt and later calls have one token each. A slice follows Python
+  rules on each call's length; its step must be positive, and one that selects nothing
+  raises. Malformed values raise when the context opens; out-of-range ints and
+  selections that pick nothing raise at the forward, because they depend on each
+  call's length.
+- Batched `score` and `evaluate` left-pad. A position counted from the left (an int of 0
+  or more, or a slice that does not end at the end of the sequence) is refused unless
+  `batch_size=1`. `"all"`, negative ints, and slices like `slice(-2, None)` (negative
+  start, no stop or a negative one, step 1) are safe.
+- `record(name, at="attention")` captures attention weights `[batch, heads, selected,
+  keys]` from an attention block such as `model.layers.0.self_attn` or
+  `transformer.h.0.attn`; positions select queries. It needs eager attention, which the
+  lab loads, and a module whose output's second element is the weights, so it refuses
+  layers, MLPs, and linear-attention blocks; in a hybrid model only the full-attention
+  layers can be captured. Some architectures return no weights on older Transformers
+  versions (OPT on 4.56, for example), and capture raises there. Attention cannot be
+  patched. `lab.patches()` lists each patch's `at`.
 - `gradient` returns per-row mean causal-loss gradients on CPU and leaves `.grad` and
   `requires_grad` unchanged. Pass `target` to score only the answer tokens.
 - `probe(features, labels, groups)` fits a ridge classifier, keeping each source
