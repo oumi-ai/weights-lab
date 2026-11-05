@@ -1,3 +1,4 @@
+import functools
 import json
 import math
 from pathlib import Path
@@ -1090,3 +1091,111 @@ def test_empty_prompt_held_out_rows_cannot_return_with_another_answer(lab):
     # Scores do not depend on which option is gold, so this would replay held-out scores.
     with pytest.raises(ValueError, match="overlaps reserved"):
         lab.evaluate([{**row, "answer": "B"}], name="flipped")
+
+
+def _always_emit(model, token):
+    """Make every forward put all probability on one token."""
+    original = model.forward
+
+    @functools.wraps(original)  # Keeps the signature, so position_ids still show.
+    def forward(*args, **kwargs):
+        output = original(*args, **kwargs)
+        logits = torch.full_like(output.logits, -1e4)
+        logits[..., token] = 1e4
+        output.logits = logits
+        return output
+
+    model.forward = forward
+
+
+@pytest.fixture
+def turn_end_lab(tiny_lab):
+    """Like a checkpoint whose generation config omits the tokenizer's EOS, "<eos>" (1).
+
+    The model's own EOS is "no" (5), and the model always emits "<eos>".
+    """
+    tiny_lab.model.generation_config.eos_token_id = 5
+    _always_emit(tiny_lab.model, 1)
+    return tiny_lab
+
+
+def test_sampled_generation_also_stops_at_the_tokenizers_eos(turn_end_lab):
+    summary = turn_end_lab.evaluate(
+        [{"prompt": "hello", "answer": ""}, {"prompt": "hello world", "answer": ""}],
+        mode="sampled",
+        generation_config={"max_new_tokens": 3},
+        batch_size=2,
+    )
+    items = _items(summary)
+    assert [(i["finish_reason"], i["generated_tokens"]) for i in items] == [("eos", 1)] * 2
+    assert summary["truncation_share"] == 0.0
+    assert summary["scoring_config"]["stop_token_ids"] == [5, 1]
+
+
+def test_an_explicit_eos_token_id_still_decides_where_generation_stops(turn_end_lab):
+    summary = turn_end_lab.evaluate(
+        [{"prompt": "hello", "answer": ""}],
+        mode="sampled",
+        generation_config={"max_new_tokens": 3, "eos_token_id": 5},
+    )
+    items = _items(summary)
+    assert [(i["finish_reason"], i["generated_tokens"]) for i in items] == [("max_tokens", 3)]
+    assert "stop_token_ids" not in summary["scoring_config"]
+
+
+def test_runs_that_stop_at_the_tokenizers_eos_refuse_to_pair_with_earlier_runs(turn_end_lab):
+    rows = [{"prompt": "hello", "answer": ""}]
+    config = {"max_new_tokens": 3}
+    current = turn_end_lab.evaluate(rows, name="current", mode="sampled", generation_config=config)
+    earlier = turn_end_lab.evaluate(rows, name="earlier", mode="sampled", generation_config=config)
+    turn_end_lab.diff(current, earlier)  # Two runs that stop the same way pair.
+    path = Path(earlier["run_dir"]) / "summary.json"
+    summary = json.loads(path.read_text())
+    del summary["scoring_config"]["stop_token_ids"]  # As v0.2.0 saved it.
+    path.write_text(json.dumps(summary))
+    with pytest.raises(ValueError, match="scoring_config differs"):
+        turn_end_lab.diff(current, earlier)
+
+
+def test_scoring_config_is_unchanged_when_the_model_already_stops_at_the_tokenizers_eos(
+    tiny_lab,
+):
+    summary = tiny_lab.evaluate(
+        [{"prompt": "hello", "answer": ""}], mode="sampled", generation_config={"max_new_tokens": 2}
+    )
+    assert set(summary["scoring_config"]) == {"sampler", "batch_size", "padding_side"}
+
+
+def test_lab_generate_also_stops_at_the_tokenizers_eos(turn_end_lab):
+    seen = []
+    original = turn_end_lab.model.generate
+
+    def generate(*args, **kwargs):
+        seen.append(kwargs.get("eos_token_id"))
+        return original(*args, **kwargs)
+
+    turn_end_lab.model.generate = generate
+    turn_end_lab.generate("hello", max_new_tokens=3, do_sample=False)
+    turn_end_lab.generate("hello", max_new_tokens=3, do_sample=False, eos_token_id=5)
+    assert seen == [[5, 1], 5]
+
+
+def test_lab_generate_with_a_generation_config_stops_where_it_says(turn_end_lab):
+    from transformers import GenerationConfig
+
+    def reply(**settings):
+        return turn_end_lab.generate(
+            "hello", generation_config=GenerationConfig(max_new_tokens=3, **settings)
+        )
+
+    seen = []
+    original = turn_end_lab.model.generate
+
+    def generate(*args, **kwargs):
+        seen.append(kwargs.get("eos_token_id"))
+        return original(*args, **kwargs)
+
+    turn_end_lab.model.generate = generate
+    reply()  # Its EOS is unset, so generate() fills in the model's, plus the tokenizer's.
+    reply(eos_token_id=5)  # Its own EOS is kept.
+    assert seen == [[5, 1], None]

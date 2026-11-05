@@ -53,6 +53,28 @@ def effective_config(model: Any, settings: dict[str, Any]) -> tuple[Any, dict[st
     return config, unused
 
 
+def stop_token_ids(model: Any, tokenizer: Any, settings: dict[str, Any]) -> list[int] | None:
+    """The model's EOS tokens plus the tokenizer's, when the model's omit it.
+
+    vLLM stops on both. A checkpoint without a generation_config.json takes its EOS
+    from the model config, which can miss the token a chat turn ends with: Qwen3.5
+    stops on <|endoftext|> but ends turns with <|im_end|>. Returns None when this adds
+    nothing, or when the caller chooses eos_token_id, directly or in a generation_config.
+    """
+    if "eos_token_id" in settings:
+        return None
+    passed = settings.get("generation_config")
+    if passed is not None and getattr(passed, "eos_token_id", None) is not None:
+        return None
+    # generate() fills a passed config's unset EOS from the model's own.
+    token = getattr(tokenizer, "eos_token_id", None)
+    current = getattr(getattr(model, "generation_config", None), "eos_token_id", None)
+    current = [] if current is None else [current] if isinstance(current, int) else list(current)
+    if token is None or token in current:
+        return None
+    return [*current, int(token)]
+
+
 def neutral_sampling_settings() -> dict[str, Any]:
     """Settings for the greedy pass that takes the sampler's draw: no warpers, plain greedy.
 

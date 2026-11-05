@@ -482,14 +482,21 @@ class ScoringMixin(EvaluationMixin):
                 f"an active record or patch uses token positions that left padding shifts; {same}"
             )
 
-    def _scoring_config(self, mode: str, batch_size: int, decoder: Any = None) -> dict[str, Any]:
+    def _scoring_config(
+        self, mode: str, batch_size: int, decoder: Any = None, stops: list[int] | None = None
+    ) -> dict[str, Any]:
         """Describe how a run scores, so only runs scored the same way pair."""
         if mode == "sampled":
-            return {
+            config = {
                 "sampler": _sampler_name(decoder),
                 "batch_size": batch_size,
                 "padding_side": "left" if batch_size > 1 else "none",
             }
+            # Recorded only when the tokenizer's EOS was added, so runs that stop where
+            # they did before still pair with earlier runs.
+            if stops is not None:
+                config["stop_token_ids"] = stops
+            return config
         from .inspection import _accepts
 
         model = getattr(self, "model", None)
@@ -724,6 +731,7 @@ class ScoringMixin(EvaluationMixin):
             PerSequenceSampler,
             effective_config,
             neutral_sampling_settings,
+            stop_token_ids,
             warpers,
         )
 
@@ -738,6 +746,9 @@ class ScoringMixin(EvaluationMixin):
             [[0] * (length - len(row)) + [1] * len(row) for row in prompts], device=device
         )
         settings = dict(generation_config)
+        stops = stop_token_ids(self.model, self.tokenizer, settings)
+        if stops is not None:
+            settings["eos_token_id"] = stops
         # What generate() will run, including the model's own generation defaults.
         config, _ = effective_config(self.model, settings)
         sampler = _sampler_name(config)
@@ -865,9 +876,9 @@ class ScoringMixin(EvaluationMixin):
         json.dumps(generation_config or {}, allow_nan=False)
         tasks, identities = _tasks(data, mode)
         unbatchable: list[str] = []
-        decoder = None
+        decoder = stops = None
         if mode == "sampled":
-            from .sampling import effective_config
+            from .sampling import effective_config, stop_token_ids
 
             generate = getattr(getattr(self, "model", None), "generate", None)
             generation_config = _generation_kwargs(generation_config, generate)
@@ -880,6 +891,7 @@ class ScoringMixin(EvaluationMixin):
                     "forward, so sampled evaluation cannot charge it per generated token"
                 )
             unbatchable = _padding_sensitive(decoder)
+            stops = stop_token_ids(getattr(self, "model", None), self.tokenizer, generation_config)
             if num_samples > 1 and not generation_config.get("do_sample"):
                 raise ValueError(
                     "num_samples>1 needs do_sample=True; greedy samples would all be the same"
@@ -937,7 +949,7 @@ class ScoringMixin(EvaluationMixin):
                 "checker_id": checker_id,
                 "seed": seed,
                 "generation_config": generation_config or {},
-                "scoring_config": self._scoring_config(mode, batch_size, decoder),
+                "scoring_config": self._scoring_config(mode, batch_size, decoder, stops),
                 "tokenizer_policy": "separate_prompt_continuation_no_special_tokens_sum",
                 "max_passes": max_passes,
                 "started_at": started,

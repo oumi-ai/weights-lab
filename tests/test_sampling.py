@@ -8,6 +8,7 @@ from oumi_weights_lab.sampling import (  # noqa: E402
     FinishTracker,
     PerSequenceSampler,
     effective_config,
+    stop_token_ids,
     warpers,
 )
 
@@ -84,3 +85,28 @@ def test_tracker_records_why_and_when_each_row_finished(tiny_lab, monkeypatch):
         if step == 2:
             assert tracker.unfinished == 1
     assert tracker.results(len(steps)) == [(2, "stop_string"), (1, "eos"), (3, "max_tokens")]
+
+
+@pytest.mark.parametrize(
+    ("model_eos", "tokenizer_eos", "settings", "expected"),
+    [
+        (5, 1, {}, [5, 1]),  # Qwen3.5: the model's EOS omits the end of the turn.
+        ([5, 6], 1, {}, [5, 6, 1]),
+        (None, 1, {}, [1]),
+        (1, 1, {}, None),  # Already stops there, so nothing changes.
+        ([5, 1], 1, {}, None),
+        (5, None, {}, None),  # A tokenizer without an EOS adds nothing.
+        (5, 1, {"eos_token_id": 5}, None),  # The caller's choice wins.
+        (5, 1, {"eos_token_id": None}, None),
+        (5, 1, {"generation_config": transformers.GenerationConfig(eos_token_id=5)}, None),
+        (5, 1, {"generation_config": transformers.GenerationConfig()}, [5, 1]),
+    ],
+)
+def test_stop_token_ids_add_the_tokenizers_eos_unless_the_caller_chose(
+    model_eos, tokenizer_eos, settings, expected
+):
+    from types import SimpleNamespace
+
+    model = SimpleNamespace(generation_config=transformers.GenerationConfig(eos_token_id=model_eos))
+    tokenizer = SimpleNamespace(eos_token_id=tokenizer_eos)
+    assert stop_token_ids(model, tokenizer, settings) == expected
