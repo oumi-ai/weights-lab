@@ -75,7 +75,8 @@ print(json.dumps(lab.diff(baseline, ablated), indent=2))
 3. After undoing, measure again: restored results must match the baseline.
 4. If you will choose among several edits or settings, set aside held-out rows first. Evaluate only the final choice on them, once, with `held_out=True` and `max_passes`. Held-out rows can never become dev rows, even after a failed run. A single pre-planned edit needs no held-out split.
 5. Report the question, model and device, parameters edited, dataset size, baseline, edited, and restored results, changed items, forward passes, and the limits of the evidence. A small hand-written set is a diagnostic, not a benchmark.
-6. To keep edited weights, call `lab.export("NAME")` before stopping. Export fails while attachments or patches are active, and `backup` never saves weights.
+6. An attention pattern, a probe score, or a plot is a lead. Before calling something a mechanism, confirm it with an intervention, a control intervention, and new prompts. A null ablation does not show a part is unused, and an ablation that breaks the behavior does not show the part is the whole mechanism.
+7. To keep edited weights, call `lab.export("NAME")` before stopping. Export fails while attachments or patches are active, and `backup` never saves weights.
 
 ## Recipes
 
@@ -90,6 +91,7 @@ Read only the one you need:
 - [Activation patching](references/activation-patching.md): replace hidden states or module inputs at chosen tokens, and capture attention weights.
 - [Attention heads](references/heads.md): list heads as weight slices, ablate one, and screen for induction heads.
 - [Attribution patching](references/attribution-patching.md): rank module and token sites with activation gradients, then confirm with real patches.
+- [Find and test a circuit](references/circuit-workflow.md): chain the logit lens, attribution patching, patches, and ablations into one tested claim.
 - [Steering vectors](references/steering.md): add a recorded direction to the residual stream.
 - [Logit lens](references/logit-lens.md): read each layer's output through the final norm and head.
 - [Short-row gradients](references/gradients.md): per-row gradients for selected parameters.
