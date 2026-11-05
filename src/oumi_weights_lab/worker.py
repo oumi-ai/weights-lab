@@ -64,6 +64,8 @@ class Worker:
         self._deadline: threading.Timer | None = None
         # GiB of parameters per device, reported in every status once the model loads.
         self._devices: dict[str, float] | None = None
+        # The method and compute dtype of a quantized model, reported in every status.
+        self._quantization: dict[str, str] | None = None
 
     def _status(self, state: str, **extra: Any) -> None:
         status = {
@@ -72,6 +74,7 @@ class Worker:
             "model": self.config["model"],
             "updated_at": time.time(),
             **({"devices": self._devices} if self._devices else {}),
+            **({"quantization": self._quantization} if self._quantization else {}),
             **extra,
         }
         with session_lock(self.path):
@@ -217,6 +220,12 @@ class Worker:
                     self.loader = load_lab
                 self.lab = self.loader(self.config, self.path)
                 self._devices = getattr(self.lab, "device_memory", None)
+                quantization = getattr(self.lab, "quantization", None)
+                if quantization:
+                    self._quantization = {
+                        "method": quantization["method"],
+                        "compute_dtype": quantization["compute_dtype"],
+                    }
                 self.namespace = {
                     "__name__": "__oumi_weights_lab__",
                     "lab": self.lab,

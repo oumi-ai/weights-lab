@@ -18,7 +18,7 @@ if command -v uv >/dev/null 2>&1 && [ -f "$root/pyproject.toml" ] && [ -f "$root
     fi
     # Run the module, not the console script, so PATH lookup cannot find this wrapper.
     exec uv run ${quiet:+"$quiet"} --frozen --no-dev \
-        --extra adapters --extra datasets --extra multi-gpu --project "$root" \
+        --extra adapters --extra datasets --extra multi-gpu --extra quantized --project "$root" \
         python -m oumi_weights_lab "$@"
 fi
 

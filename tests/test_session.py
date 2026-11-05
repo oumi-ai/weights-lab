@@ -93,3 +93,19 @@ def test_json_replacement_is_flushed_to_disk(tmp_path, monkeypatch):
     write_json(tmp_path / "_registry.json", {"datasets": {}}, durable=True)
     # Both the replacement file and its directory entry reach disk.
     assert len(synced) == 2
+
+
+def test_validate_placement_checks_quantize_and_hub_kernels():
+    from oumi_weights_lab.session import QUANTIZE, validate_placement
+
+    assert QUANTIZE == ("nf4", "fp4", "int8")
+    for method in (None, *QUANTIZE):
+        validate_placement({"model": "m", "quantize": method})
+    validate_placement({"model": "m", "allow_hub_kernels": True})
+    for bad in ("nf8", "NF4", "", 4, True, ["nf4"]):
+        with pytest.raises(ValueError, match="nf4, fp4, int8"):
+            validate_placement({"model": "m", "quantize": bad})
+    with pytest.raises(ValueError, match="cannot be combined with --device-map"):
+        validate_placement({"model": "m", "quantize": "int8", "device_map": "sequential"})
+    with pytest.raises(ValueError, match="allow_hub_kernels"):
+        validate_placement({"model": "m", "allow_hub_kernels": "yes"})

@@ -21,6 +21,8 @@ SETUP_FIELDS = {
     "adapter",
     "attention",
     "device_map",
+    "quantization",
+    "allow_hub_kernels",
     "model_id",
     "model_commit",
 }
@@ -127,6 +129,8 @@ def test_setup_block_recorded(tiny_lab):
     assert setup["peft"] is None
     assert setup["attention"] == tiny_lab.model.config._attn_implementation
     assert setup["device_map"] is False
+    assert setup["quantization"] is None
+    assert setup["allow_hub_kernels"] is False
     assert setup["model_id"] == "test-model"
     assert setup["torch"] == torch.__version__
     json.dumps(setup)

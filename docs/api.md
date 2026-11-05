@@ -9,8 +9,8 @@ relative paths under `artifacts/`; other paths resolve from where `start` ran.
 
 | Call | Effect |
 | --- | --- |
-| `parts(pattern="*")` | Parameter names, shapes, dtypes, and devices |
-| `measure(name)` | Statistics for one parameter |
+| `parts(pattern="*")` | Parameter names, shapes, dtypes, and devices; quantized weights add a `quantization` block |
+| `measure(name)` | Statistics for one parameter; a quantized weight is measured after dequantizing |
 | `compare(other, pattern="*")` | Current-minus-reference statistics against a model or tensor dict |
 | `edit(name, value, index=None, note="")` | Replace a parameter or slice with a tensor, or with a callable's result; shapes must match exactly |
 | `zero(name, index=None)` | Zero a parameter or slice |
@@ -48,6 +48,51 @@ untracked. A resumed session can tighten the saved pass limit but not raise it.
 Edits act on each parameter where it lives, so a model split across devices edits
 and undoes the same way, and a bundle saved under one device layout resumes under
 another.
+
+## Quantized models
+
+`start --quantize nf4` (or `fp4`, `int8`) loads the model with bitsandbytes on one cpu,
+mps, or cuda device. It needs the `quantized` extra, which pulls in `accelerate` too, and
+is refused before any weights load when bitsandbytes is missing. It cannot be combined
+with `--device-map`. nf4 and fp4 are 4-bit codes with 64-weight blocks and no double
+quantization; int8 is LLM.int8 with its default outlier threshold. Layers compute in the
+`--dtype` (the checkpoint's float dtype under `auto`, float32 when it states none).
+Embeddings, norms, biases, and `lm_head` stay float. A checkpoint that bitsandbytes
+already quantized loads as it is without `--quantize`; a `--quantize` that disagrees is
+refused, and so is any `--quantize` on a GPTQ, AWQ, or other checkpoint.
+`lab.quantization` is None for float models, and otherwise a dict with `method`,
+`source` (`"load"` or `"checkpoint"`), `compute_dtype`, `double_quant`, `blocksize`
+(4-bit) or `threshold` (int8), and `bitsandbytes`. `peek` reports `method` and
+`compute_dtype` under `quantization`, and each run's `setup` block records the dict as
+`quantization`, so a cross-session report of nf4 against bf16 lists it.
+
+Quantized weights are read-only in this release:
+
+- `parts` reports a quantized weight's logical `shape`, `dtype`, and `numel`, and adds
+  `quantization` with `method`, `blocksize` or `threshold`, `double_quant`,
+  `packed_shape`, and `packed_dtype`. Other entries are unchanged.
+- `measure` and `compare` use the dequantized float32 values, report the logical shape,
+  and add the same `quantization` block. A quantized model compares against a float
+  model of the same architecture, in either direction.
+- `edit`, `zero`, `swap`, and `project_out` on a quantized weight raise `ValueError`
+  naming it, and change nothing. Float parameters, including the bias of a quantized
+  layer, edit and undo exactly. On a GPTQ or AWQ checkpoint, an edit of a non-float
+  parameter names the method.
+- `gradient` skips quantized weights when `parameters` is omitted, raises `ValueError`
+  when you name one, and still takes activation gradients (`modules=`) through
+  quantized layers.
+- `heads` and `head_weights` read through the dequantized weights. transformers stores
+  GPT-2's fused layers quantized as `[out, in]`, so a head's `index` selects rows of
+  `c_attn` and columns of `c_proj` there, the transpose of the float model; the weights
+  `head_weights` returns have the same shapes either way.
+- `export` raises `ValueError`: export from a float session. `save_edits` and
+  `start --resume` work for edits to float parameters; resume with the same `--quantize`.
+
+`--allow-hub-kernels` lets kernel code downloaded from the Hugging Face Hub run, as
+bitsandbytes does on macOS 26 and on CPUs with AVX512-BF16 when the optional `kernels`
+package is installed. Without it every session blocks that package, and bitsandbytes
+falls back to its built-in kernels. If `kernels` was already imported, the session fails
+to start and names the flag. `lab.allow_hub_kernels` and the `setup` block record it.
 
 ## Evaluation
 
@@ -152,7 +197,8 @@ report = lab.compare_runs(before, after)
   passes it through to `compare_runs`. Without it, a pair
   that differs only by session is refused with a hint to pass it. Each new summary
   has a `setup` block: `devices`, `dtypes`, `torch`, `transformers`, `peft`,
-  `adapter`, `attention`, `device_map`, `model_id`, and `model_commit`. With the
+  `adapter`, `attention`, `device_map`, `quantization`, `allow_hub_kernels`, `model_id`,
+  and `model_commit`. With the
   opt-in, `compare_runs` adds `cross_session` with `before_session`,
   `after_session`, `before_setup`, `after_setup`, `setup_differences` (field names
   that differ, or `["setup"]` when a run has none), and a caveat. `diff` returns
@@ -279,6 +325,8 @@ weights = lab.head_weights(0, 1)  # q, k, v, o as float32 CPU tensors, plus bias
   heads. Raises `NotImplementedError` for fused `qkv_proj` (Phi-3), `query_key_value`
   (GPT-NeoX, Falcon, Bloom), latent attention, a model with no attention block, and
   LoRA models: export the merged model and start a session on it.
+- On a quantized model the weights are dequantized for the read; see
+  [Quantized models](#quantized-models).
 
 ## Attachments (experimental)
 

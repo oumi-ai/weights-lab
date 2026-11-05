@@ -581,3 +581,20 @@ def test_remote_commands_in_a_shell_loop_leave_loop_input_alone(tmp_path):
         "starting",
         "starting",
     ]
+
+
+def test_sky_start_forwards_quantize_and_hub_kernels_only_when_given(transports, capsys):
+    start = ["start", "--cluster", "lab", "--session", "/remote/s", "--model", "base"]
+    assert cli.main([*start, "--quantize", "nf4", "--allow-hub-kernels"]) == 0
+    assert cli.main(start) == 0
+    capsys.readouterr()
+    first, second = (call[3] for call in transports[0]["SkyPilotLauncher"].calls)
+    assert first["quantize"] == "nf4" and first["allow_hub_kernels"] is True
+    assert "quantize" not in second and "allow_hub_kernels" not in second
+
+
+def test_sky_start_refuses_a_bad_quantize_before_provisioning(transports, capsys):
+    start = ["start", "--cluster", "lab", "--session", "/remote/s", "--model", "base"]
+    assert cli.main([*start, "--quantize", "int8", "--device-map", "balanced"]) != 0
+    assert "cannot be combined" in capsys.readouterr().err
+    assert transports[0]["SkyPilotLauncher"].calls == []

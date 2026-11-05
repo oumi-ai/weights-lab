@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .quantized import is_quantized, lookup, of
+
 # Children that mark an attention layout this module does not split into heads.
 _REFUSED = {
     "qkv_proj": "a fused qkv_proj (Phi-3)",
@@ -18,15 +20,18 @@ _REFUSED = {
 _PROJECTIONS = ("q_proj", "k_proj", "v_proj")
 
 
-def _dense(parameter: Any, index: Any = None) -> Any:
-    """A detached float32 CPU copy of a parameter slice.
+def _dense(model: Any, name: str, index: Any = None) -> Any:
+    """A detached float32 CPU copy of a slice of the parameter ``name``.
 
-    Every weight read goes through here, so a later quantized-weight reader has one place
-    to dequantize.
+    Every weight read goes through here, which dequantizes quantized weights.
     """
     import torch
 
-    selected = parameter.detach()
+    packed = lookup(model, name)
+    if packed is not None:
+        dense = packed.dequantize()
+        return (dense if index is None else dense[index]).clone()
+    selected = model.get_parameter(name).detach()
     if index is not None:
         selected = selected[index]
     return selected.to(device="cpu", dtype=torch.float32, copy=True)
@@ -90,14 +95,22 @@ def _split(module: Any, children: dict[str, Any], name: str, model: Any) -> dict
             "biased": {key: children[key].bias is not None for key in _PROJECTIONS},
         }
     if {"c_attn", "c_proj"} <= children.keys() and not getattr(module, "is_cross_attention", False):
-        if not (isinstance(children["c_attn"], Conv1D) and isinstance(children["c_proj"], Conv1D)):
+        # transformers quantizes GPT-2's Conv1D into a Linear4bit or Linear8bitLt that stores
+        # [out, in], so the layers are transposed from their float form.
+        fused = [children["c_attn"], children["c_proj"]]
+        if not all(isinstance(child, Conv1D) or is_quantized(child) for child in fused):
+            return None
+        stored = [of(child).shape if is_quantized(child) else child.weight.shape for child in fused]
+        transposed = isinstance(fused[0], Conv1D)
+        if transposed != isinstance(fused[1], Conv1D):
             return None
         hd = _head_dim(module, model)
-        width = children["c_proj"].weight.shape[0]
-        if width % hd or children["c_attn"].weight.shape[1] != 3 * width:
+        width = stored[1][0]
+        if width % hd or stored[0][1 if transposed else 0] != 3 * width:
             raise ValueError(f"{name}: projection sizes are not whole {hd}-wide heads")
         return {
             "kind": "fused",
+            "transposed": transposed,
             "head_dim": hd,
             "heads": width // hd,
             "kv_heads": width // hd,
@@ -144,9 +157,10 @@ def _linear_parts(name: str, child: str, biased: bool, start: int, stop: int) ->
     return parts
 
 
-def _fused_parts(attn: str, offset: int, lo: int, hi: int) -> list[dict]:
+def _fused_parts(attn: str, offset: int, lo: int, hi: int, transposed: bool) -> list[dict]:
+    heads = _columns if transposed else _rows
     return [
-        _part(f"{attn}.weight", _columns(offset + lo, offset + hi)),
+        _part(f"{attn}.weight", heads(offset + lo, offset + hi)),
         _part(f"{attn}.bias", (slice(offset + lo, offset + hi),)),
     ]
 
@@ -165,11 +179,12 @@ def _entries(name: str, layout: dict[str, Any]) -> list[dict[str, Any]]:
             width, attn = layout["width"], f"{name}.c_attn"
             output = f"{name}.c_proj"
 
+            flip = layout["transposed"]
             parts = {
-                "q": _fused_parts(attn, 0, lo, hi),
-                "k": _fused_parts(attn, width, lo, hi),
-                "v": _fused_parts(attn, 2 * width, lo, hi),
-                "o": [_part(f"{output}.weight", _rows(lo, hi))],
+                "q": _fused_parts(attn, 0, lo, hi, flip),
+                "k": _fused_parts(attn, width, lo, hi, flip),
+                "v": _fused_parts(attn, 2 * width, lo, hi, flip),
+                "o": [_part(f"{output}.weight", _rows(lo, hi) if flip else _columns(lo, hi))],
             }
         else:
             biased = layout["biased"]
@@ -253,12 +268,14 @@ class CircuitsMixin:
         if type(head) is not int or not 0 <= head < len(in_layer):
             raise ValueError(f"head must be in 0..{len(in_layer) - 1} for layer {layer}")
         entry = in_layer[head]
-        # GPT-2's Conv1D stores in x out; nn.Linear stores out x in.
-        fused = entry["o_input"]["module"].endswith(".c_proj")
+        # GPT-2's Conv1D stores in x out; nn.Linear (and its quantized form) stores out x in.
+        from transformers.pytorch_utils import Conv1D
+
+        fused = isinstance(self.model.get_submodule(entry["o_input"]["module"]), Conv1D)
         weights = {}
         for key in ("q", "k", "v", "o", "gate"):
             for part in entry.get(key, []):
-                tensor = _dense(self.model.get_parameter(part["name"]), part["index"])
+                tensor = _dense(self.model, part["name"], part["index"])
                 if part["name"].endswith(".bias"):
                     weights[f"{key}_bias"] = tensor
                 else:

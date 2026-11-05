@@ -95,11 +95,11 @@ jobs:
         run: uv venv --python python
       - name: Install latest CPU dependencies
         if: steps.changes.outputs.run == 'true' && matrix.dependencies == 'latest'
-        run: uv pip install --torch-backend cpu -e '.[adapters,datasets,multi-gpu]' pytest pyyaml
+        run: uv pip install --torch-backend cpu -e '.[adapters,datasets,multi-gpu,quantized]' pytest pyyaml
       - name: Install minimum supported CPU dependencies
         if: steps.changes.outputs.run == 'true' && matrix.dependencies == 'minimum'
         run: |
-          uv pip install --torch-backend cpu -e '.[adapters,multi-gpu]' 'torch==2.4.0' 'transformers==4.56.0' 'safetensors==0.4.3' 'peft==0.13.0' 'accelerate==1.0.0' pytest pyyaml
+          uv pip install --torch-backend cpu -e '.[adapters,multi-gpu]' 'torch==2.4.0' 'transformers==4.56.0' 'safetensors==0.4.3' 'peft==0.13.0' 'accelerate==1.0.0' 'bitsandbytes==0.50.0' pytest pyyaml
           uv pip check
       - name: Full unit suite
         if: steps.changes.outputs.run == 'true' && matrix.dependencies == 'latest'
@@ -111,4 +111,4 @@ jobs:
           tests/test_persistence.py tests/test_project_out.py tests/test_scoring.py tests/test_interventions.py
           tests/test_budget.py tests/test_device_map.py tests/test_peft_export.py
           tests/test_multi_gpu_loading.py tests/test_cross_session.py tests/test_positions.py
-          tests/test_circuits.py tests/test_activation_gradients.py
+          tests/test_circuits.py tests/test_activation_gradients.py tests/test_quantized_loading.py

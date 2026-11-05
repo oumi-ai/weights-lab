@@ -72,6 +72,8 @@ def test_wrapper_runs_the_plugin_copy_with_its_lockfile(tmp_path):
         "datasets",
         "--extra",
         "multi-gpu",
+        "--extra",
+        "quantized",
     ]
     expected += ["--project"]
     expected += [str(plugin.resolve()), "python", "-m", "oumi_weights_lab"]

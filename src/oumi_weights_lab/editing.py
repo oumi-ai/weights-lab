@@ -15,6 +15,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .quantized import lookup, other_method, refuse_edit
+
 _CHUNK = 262_144
 # Exports write shards of at most this size, which bounds the CPU memory each shard
 # needs while it is written.
@@ -78,6 +80,12 @@ def _parameter(model: Any, name: str) -> Any:
         return model.get_parameter(name)
     except (AttributeError, KeyError) as error:
         raise ValueError(f"Unknown parameter {name!r}") from error
+
+
+def _logical(model: Any, name: str) -> Any:
+    """A parameter, or a quantized weight dequantized to float32 on the CPU."""
+    packed = lookup(model, name)
+    return _parameter(model, name) if packed is None else packed.dequantize()
 
 
 def _projection_axis(owner: Any, attribute: str, side: str) -> tuple[int, int]:
@@ -152,8 +160,15 @@ class EditBook:
         return [record["id"] for record in self._active]
 
     def parts(self, pattern: str = "*") -> list[dict[str, Any]]:
-        return [
-            {
+        """List parameters; a quantized weight reports its logical shape, dtype and size.
+
+        A quantized weight's entry also has a ``quantization`` block that says how it is packed.
+        """
+        found = []
+        for name, value in self.model.named_parameters(remove_duplicate=False):
+            if not fnmatch.fnmatchcase(name, pattern):
+                continue
+            entry = {
                 "name": name,
                 "shape": list(value.shape),
                 "dtype": str(value.dtype),
@@ -161,31 +176,53 @@ class EditBook:
                 "numel": value.numel(),
                 "requires_grad": value.requires_grad,
             }
-            for name, value in self.model.named_parameters(remove_duplicate=False)
-            if fnmatch.fnmatchcase(name, pattern)
-        ]
+            packed = lookup(self.model, name)
+            if packed is not None:
+                entry.update(
+                    shape=list(packed.shape),
+                    dtype=str(packed.dtype),
+                    numel=packed.shape.numel(),
+                    quantization=packed.describe(),
+                )
+            found.append(entry)
+        return found
 
     def measure(self, name: str) -> dict[str, Any]:
+        """Statistics of one parameter; a quantized weight is measured after dequantizing."""
         parameter = _parameter(self.model, name)
+        packed = lookup(self.model, name)
+        if packed is None:
+            return {
+                "name": name,
+                "shape": list(parameter.shape),
+                "dtype": str(parameter.dtype),
+                **_stats(parameter),
+            }
         return {
             "name": name,
-            "shape": list(parameter.shape),
-            "dtype": str(parameter.dtype),
-            **_stats(parameter),
+            "shape": list(packed.shape),
+            "dtype": str(packed.dtype),
+            **_stats(packed.dequantize()),
+            "quantization": packed.describe(),
         }
 
     def compare(self, other: Any, pattern: str = "*") -> list[dict[str, Any]]:
         results = []
         for part in self.parts(pattern):
             name = part["name"]
-            parameter = _parameter(self.model, name)
-            reference = other[name] if isinstance(other, Mapping) else _parameter(other, name)
+            parameter = _logical(self.model, name)
+            reference = other[name] if isinstance(other, Mapping) else _logical(other, name)
             if parameter.shape != reference.shape:
                 raise ValueError(
                     f"Shape mismatch for {name}: {parameter.shape} != {reference.shape}"
                 )
             results.append(
-                {"name": name, "shape": list(parameter.shape), **_stats(parameter, reference)}
+                {
+                    "name": name,
+                    "shape": list(parameter.shape),
+                    **_stats(parameter, reference),
+                    **({"quantization": part["quantization"]} if "quantization" in part else {}),
+                }
             )
         return results
 
@@ -193,8 +230,13 @@ class EditBook:
         import torch
 
         parameter = _parameter(self.model, name)
+        refuse_edit(self.model, name)
         if not parameter.is_floating_point():
-            raise ValueError("Only floating-point parameters can be edited")
+            method = other_method(self.model)
+            raise ValueError(
+                "Only floating-point parameters can be edited"
+                + (f"; {name} is stored by {method} quantization" if method else "")
+            )
         index = copy.deepcopy(index)
         selected = parameter if index is None else parameter[index]
         original = selected.detach().to(device="cpu", copy=True)
@@ -280,6 +322,7 @@ class EditBook:
         ):
             raise ValueError("scale must be a finite int or float")
         parameter = _parameter(self.model, name)
+        refuse_edit(self.model, name)
         owner_name, _, attribute = name.rpartition(".")
         owner = self.model.get_submodule(owner_name)
         axis, length = _projection_axis(owner, attribute, side)
@@ -333,6 +376,7 @@ class EditBook:
     ) -> str:
         import torch
 
+        refuse_edit(self.model, name)
         source_name = source_name or name
         if not isinstance(source, torch.Tensor):
             source = (
@@ -483,6 +527,10 @@ class EditingMixin:
         memory and is refused for a model split across devices. Failed merges
         leave the live model and the destination unchanged.
         """
+        if getattr(self, "quantization", None):
+            raise ValueError(
+                "Exporting a quantized model is not supported yet; export from a float session"
+            )
         attachments = getattr(self, "attachments", None)
         if callable(attachments) and attachments():
             raise ValueError("Detach active attachments before exporting a standalone checkpoint")
