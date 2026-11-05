@@ -152,6 +152,24 @@ def test_stop_records_cancelled_results_before_the_terminal_status(
     assert json.loads(capsys.readouterr().out)["state"] == "stopped"
 
 
+def test_stop_keeps_the_final_status_a_worker_writes_as_it_exits(session_path, monkeypatch, capsys):
+    write_json(session_path / "status.json", {"state": "stopping", "pid": 4242})
+    final = {"state": "stopped", "reason": "idle_timeout", "edit_bundle": "/bundles/saved"}
+    checks = []
+
+    def racing_alive(pid):
+        # The worker writes its final status and exits after stop last read status.json.
+        checks.append(pid)
+        if len(checks) == 2:
+            write_json(session_path / "status.json", final)
+        return len(checks) < 2
+
+    monkeypatch.setattr(cli.session, "is_process_alive", racing_alive)
+    assert main(["stop", "--session", str(session_path), "--timeout", "5"]) == 0
+    assert json.loads(capsys.readouterr().out) == final
+    assert read_json(session_path / "status.json") == final
+
+
 def test_terminal_states_are_the_worker_status_terminal_states():
     # status.json holds only worker states; snippet result states never appear there.
     assert cli.TERMINAL_STATES == {"stopped", "failed"}
