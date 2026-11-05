@@ -87,6 +87,7 @@ Read only the one you need:
 - [Evaluation reports and screens](references/evaluation.md): paired statistics, regression suites, and pinned dev subsets.
 - [Save and resume edits](references/edit-bundles.md): save points that carry undo history and held-out reservations.
 - [Activation patching](references/activation-patching.md): replace hidden states or module inputs at chosen tokens, and capture attention weights.
+- [Attention heads](references/heads.md): list heads as weight slices, ablate one, and screen for induction heads.
 - [Steering vectors](references/steering.md): add a recorded direction to the residual stream.
 - [Logit lens](references/logit-lens.md): read each layer's output through the final norm and head.
 - [Short-row gradients](references/gradients.md): per-row gradients for selected parameters.

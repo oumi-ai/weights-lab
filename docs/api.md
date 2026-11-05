@@ -237,6 +237,34 @@ gradients = lab.gradient("hello world", parameters=[name], max_tokens=64)
 - `lora_diagnostics(pattern="*", adapter=None)` reports each LoRA update's singular
   values and rank without running the model.
 
+## Attention heads
+
+```python
+heads = lab.heads(layers=[0])
+lab.zero(**heads[1]["o"][0])
+weights = lab.head_weights(0, 1)  # q, k, v, o as float32 CPU tensors, plus biases
+```
+
+- `heads(layers=None)` lists one dict per (layer, head), ordered by layer then head.
+  It has `layer`, `head`, `kv_head`, `group` (heads sharing the key/value head),
+  `module`, and `q`, `k`, `v`, `o` lists of parts, plus `gate` for gated queries. A part
+  is `{"name", "index"}`, so `lab.zero(**part)` and `lab.edit(**part, value=...)` work,
+  and the indexes survive edit bundles. `q`, `k`, `v` and `gate` add a bias part where
+  the model has one; `o` has none. `o_input` is `{"module", "at": "input", "features":
+  [start, stop]}`, the slice of the output projection's input that this head writes.
+  Heads in one group share `k` and `v` parts, so zeroing them hits the whole group.
+- `head_weights(layer, head)` returns float32 CPU tensors in `nn.Linear` orientation:
+  `q`, `k`, `v` as `[head_dim, hidden]`, `o` as `[hidden, head_dim]`, `gate` for gated
+  queries, and `q_bias`, `k_bias`, `v_bias`, `gate_bias` as `[head_dim]` when present.
+- Layouts: separate `q_proj`/`k_proj`/`v_proj` with `o_proj` or `out_proj` (Llama,
+  Mistral, Qwen2/3, Gemma, OLMo, OPT); gated queries, where `q_proj` holds each head's
+  query then gate (Qwen3.5, Qwen3-Next); and GPT-2's fused `c_attn`. Linear-attention
+  blocks are skipped.
+- Raises `ValueError` for layers or heads the model lacks, or sizes that are not whole
+  heads. Raises `NotImplementedError` for fused `qkv_proj` (Phi-3), `query_key_value`
+  (GPT-NeoX, Falcon, Bloom), latent attention, a model with no attention block, and
+  LoRA models: export the merged model and start a session on it.
+
 ## Attachments (experimental)
 
 `lab.attach(component, mode="prefix")` transforms prompts for `generate`, `score`,
