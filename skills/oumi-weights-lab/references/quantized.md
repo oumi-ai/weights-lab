@@ -18,6 +18,7 @@ oumi-weights-lab start --session sessions/q --model MODEL_ID --quantize nf4 --dt
 
 - On a GPU (`--device cuda`) or an Apple-silicon Mac on macOS 14 or later with torch 2.5 or later (`--device mps`), loading works as for a float model. `--device cpu` works too and is slow.
 - `--quantize` cannot be combined with `--device-map`: the model must fit on one device.
+- `--adapter` works on a quantized base. With int8 it needs peft 0.14.0 or newer, and the start is refused before any weights load if peft is older; nf4 and fp4 work on every supported peft.
 - It needs the `quantized` extra, which the Claude Code plugin includes. The plugin leaves it out on Intel Macs and on macOS before 14, where bitsandbytes has no wheel, and `--quantize` there fails with that explanation. Without bitsandbytes the start fails before any weights load, with the install command.
 - Layers compute in `--dtype`. With the default, that is the checkpoint's float dtype.
 
@@ -34,8 +35,7 @@ print([p for p in lab.parts("*layers.0.self_attn.q_proj*")])
 - `lab.evaluate`, `lab.score`, generation, `lab.record`, `lab.patch`, `lab.heads`, and `lab.head_weights` work. `lab.gradient` skips quantized weights and returns the float ones; asking for a quantized weight by name is refused. Activation gradients with `modules=` work through quantized layers.
 - Edits to the float parameters (embeddings, norms, biases, `lm_head`) work and undo exactly.
 - `lab.edit`, `lab.zero`, `lab.swap`, and `lab.project_out` work on nf4, fp4, and int8 weights; see Editing 4-bit weights and Editing int8 weights below.
-- `lab.export` is refused; export from a float session.
-- `lab.save_edits` and `--resume` work for float-parameter edits, and `save_edits` refuses while an edit to a packed weight is active. Resume with the same `--quantize`, because the saved fingerprint covers the packed weights.
+- `lab.save_edits`, `--resume`, and `lab.export` work with quantized edits; see Save, resume, and export below.
 
 ## Editing 4-bit weights
 
@@ -65,6 +65,19 @@ int8 edits take the same arguments and return the same record, and undo is exact
 - Zeroing a whole row gives it scale 0, and it stays finite.
 - Undo restores the bytes and the scales, before or after the first forward pass, even though bitsandbytes moves the scales from the weight to the layer on that pass.
 - A layer that keeps float weights (`has_fp16_weights`) is refused. The lab does not load layers that way.
+
+## Save, resume, and export
+
+```python
+bundle = lab.save_edits("candidate-v1")
+```
+
+- The bundle holds the packed bytes and scales (nf4, fp4, or int8) before and after each quantized edit, so resume restores them exactly and undo after resume is still byte for byte. A bundle with a quantized edit is format version 2.
+- Resume with the same `--quantize` and the same base checkpoint. A bundle with quantized edits resumes only into a session with the same method and block size, and the error names both settings. A float bundle into a quantized session, or the reverse, is refused too.
+- If the weights in the new session are not the bytes the bundle started from, resume stops and changes nothing.
+- `lab.export("checkpoint")` writes the quantized model as it is, packed bytes and all. Load it with `AutoModelForCausalLM.from_pretrained` and no extra settings, and you get the same bytes and the same logits. The export is about a quarter of the 16-bit size for 4-bit and about half for int8.
+- An export cannot merge a LoRA adapter into a quantized base, and refuses. Export from a float session for that.
+- `tests/live/validate_quantized.py` runs these steps on a real model: `--device cuda` or `--device mps`, `--quantize nf4`, `fp4`, or `int8`.
 
 ## Prequantized checkpoints
 

@@ -465,21 +465,6 @@ def test_head_ablation_on_quantized_model(checkpoint, load, method):
     assert torch.equal(logits(lab), baseline)
 
 
-@pytest.mark.parametrize("method", FOUR_BIT)
-def test_save_edits_and_export_refuse_with_quantized_edits(checkpoint, load, tmp_path, method):
-    lab = load(checkpoint("llama"), quantize=method)
-    lab.zero(Q_PROJ, index=(0, slice(0, 8)))
-    with pytest.raises(ValueError, match="quantized"):
-        lab.save_edits(tmp_path / "bundle")
-    assert not (tmp_path / "bundle").exists()
-    with pytest.raises(ValueError, match="quantized"):
-        lab.export(tmp_path / "exported")
-    assert not (tmp_path / "exported").exists()
-    lab.undo()
-    lab.zero("model.norm.weight")
-    lab.save_edits(tmp_path / "float-bundle")
-
-
 @pytest.mark.parametrize("device", ["cpu", "mps"])
 def test_tensor_index_on_any_device_works(checkpoint, load, device):
     if device == "mps" and not torch.backends.mps.is_available():

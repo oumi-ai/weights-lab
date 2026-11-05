@@ -205,6 +205,8 @@ def load_lab(config: dict[str, Any], session_path: Path) -> Lab:
     if quantized:
         version = _require_bitsandbytes()
         _check_quantized_device(torch, device)
+        if config.get("adapter"):
+            _require_peft_for(prequantized["method"] if prequantized else quantize)
     placement = {}
     if quantized:
         placement["device_map"] = {"": str(device)}
@@ -366,6 +368,29 @@ def _check_quantized_device(torch: Any, device: Any) -> None:
         raise RuntimeError(
             f"Quantized models on Apple MPS need torch 2.5 or later; this is torch "
             f"{torch.__version__}. Upgrade torch, or load with --device cpu."
+        )
+
+
+# The oldest peft that attaches an adapter to a base of each method on bitsandbytes 0.50. Older
+# peft reads a MatmulLtState attribute that bitsandbytes removed, so an int8 base crashes.
+PEFT_FOR_QUANTIZED = {"int8": "0.14.0"}
+
+
+def _require_peft_for(method: str) -> None:
+    """Refuse an adapter on a quantized base when the installed peft is too old for it."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    from packaging.version import Version
+
+    needed = PEFT_FOR_QUANTIZED.get(method)
+    try:
+        installed = version("peft")
+    except PackageNotFoundError:
+        return  # The adapter path reports the missing extra.
+    if needed is not None and Version(installed) < Version(needed):
+        raise ValueError(
+            f"An adapter on a {method} quantized model needs peft {needed} or newer, and peft "
+            f"{installed} is installed; upgrade peft, or load the adapter on a float model"
         )
 
 

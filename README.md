@@ -21,7 +21,8 @@ Version 0.3 is experimental, and snippets run as trusted Python with your filesy
 and network access.
 
 Tested on CPU, Apple MPS, NVIDIA H200, a 72B model split across eight NVIDIA H100s,
-and SkyPilot with Slurm.
+and SkyPilot with Slurm. Quantized loading, editing, saved bundles, and export are checked
+by `tests/live/validate_quantized.py` on CUDA or MPS.
 
 ![Your coding agent edits a running model's weights: GPT-2's next word changes from Paris to banana, then undo restores Paris. The same model stays loaded throughout.](docs/assets/agent-workbench.svg)
 

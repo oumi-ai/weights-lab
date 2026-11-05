@@ -32,11 +32,18 @@ attachments and leave evaluation/pass-limit contexts before saving. Hashing the
 base and copying edited parameters can take time and CPU memory on large models.
 Saving does not run model forwards. Keep logs and evaluation artifacts separately.
 
+Edits to nf4, fp4 and int8 weights save too. Such a bundle stores the packed bytes and
+scales before and after each edit and has `format_version` 2. Resume it with the same
+`--quantize`; a different method or block size is refused, naming both. Resume
+checks that the packed bytes match the bundle's starting bytes, then undo works byte
+for byte as before.
+
 For SkyPilot, the bundle must already exist at the remote path passed to
 `--resume`; the flag does not upload it. Download saved bundles before teardown.
 To share a complete model instead, use `lab.export(...)` while it is alive. With
 a LoRA adapter, export merges one layer at a time and restores it, so the GPUs
 never hold a second copy; CPU memory holds the merged layers until the checkpoint
 is written, up to the model's size when every linear layer has an adapter. DoRA,
-quantized layers, and other PEFT methods merge a copy of the whole model, which
-is refused for a model split across GPUs.
+and other PEFT methods merge a copy of the whole model, which is refused for a
+model split across GPUs. A quantized model exports as it is, packed bytes and all;
+merging an adapter into a quantized base is refused.

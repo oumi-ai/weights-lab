@@ -17,7 +17,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .quantized import QuantizedWeight, editable, has_quantized_layers, lookup, other_method
+from .quantized import (
+    QuantizedWeight,
+    editable,
+    has_quantized_layers,
+    lookup,
+    other_method,
+    quantization_settings,
+)
 
 _CHUNK = 262_144
 # Exports write shards of at most this size, which bounds the CPU memory each shard
@@ -693,18 +700,24 @@ class EditingMixin:
     def export(self, path: str | Path) -> Path:
         """Save a standalone HF checkpoint; relative paths use the artifacts dir.
 
+        A quantized model is written through ``save_pretrained`` with its packed bytes and
+        scales as they are in memory, so reloading the export gives the same bytes and
+        logits; the manifest records its ``quantization`` settings. Merging a PEFT adapter
+        into a quantized base is refused before anything is copied.
+
         PEFT exports merge the adapter into the current weights, preserving base
         weight edits as well as adapters. LoRA layers merge one at a time into a CPU
         copy and are then restored exactly, so the GPUs never hold a second copy; CPU
         memory holds every merged layer until the checkpoint is written. Other
-        adapters (DoRA, quantized layers, other PEFT methods, tied embeddings under
+        adapters (DoRA, other PEFT methods, tied embeddings under
         an adapter) merge a clone of the whole model, which needs a second model's
         memory and is refused for a model split across devices. Failed merges
         leave the live model and the destination unchanged.
         """
-        if getattr(self, "quantization", None) or has_quantized_layers(self.model):
+        if hasattr(self.model, "peft_config") and has_quantized_layers(self.model):
             raise ValueError(
-                "Exporting a quantized model is not supported yet; export from a float session"
+                "Exporting is refused: merging an adapter into a quantized base is not "
+                "supported, because the merged weights cannot be stored in the packed format"
             )
         attachments = getattr(self, "attachments", None)
         if callable(attachments) and attachments():
@@ -769,6 +782,7 @@ class EditingMixin:
                 "active_edit_ids": self.active_edit_ids,
                 "edits": self.edits(),
                 "merged_adapter": merged_adapter,
+                "quantization": quantization_settings(self),
             }
             (staged / "oumi_weights_lab_manifest.json").write_text(
                 json.dumps(manifest, indent=2) + "\n", encoding="utf-8"

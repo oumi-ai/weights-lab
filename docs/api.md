@@ -104,8 +104,8 @@ Quantized weights read through their dequantized values, and nf4, fp4, and int8 
   parameters, including the bias of a quantized layer, edit and undo exactly. On a GPTQ
   or AWQ checkpoint, an edit of a non-float parameter names the method.
 - `swap` accepts a quantized weight as its source and copies its dequantized float values.
-- `save_edits` refuses while a quantized edit is active, so undo it first; saving
-  quantized edits is not supported yet.
+- `save_edits` and `start --resume` carry quantized edits; see
+  [Saving and exporting quantized edits](#saving-and-exporting-quantized-edits).
 - `gradient` skips quantized weights when `parameters` is omitted, raises `ValueError`
   when you name one, and still takes activation gradients (`modules=`) through
   quantized layers.
@@ -113,8 +113,42 @@ Quantized weights read through their dequantized values, and nf4, fp4, and int8 
   GPT-2's fused layers quantized as `[out, in]`, so a head's `index` selects rows of
   `c_attn` and columns of `c_proj` there, the transpose of the float model; the weights
   `head_weights` returns have the same shapes either way.
-- `export` raises `ValueError` for any model with bitsandbytes layers: export from a float session. `save_edits` and
-  `start --resume` work for edits to float parameters; resume with the same `--quantize`.
+- `export` writes a quantized model through `save_pretrained`, and refuses to merge a
+  PEFT adapter into a quantized base.
+- An adapter (`--adapter`) loads on a quantized base. On an int8 base it needs peft 0.14.0
+  or newer, and `start` refuses before loading weights when the installed peft is older;
+  nf4 and fp4 work on every supported peft.
+
+### Saving and exporting quantized edits
+
+A bundle with a quantized edit has `format_version` 2; a bundle with none stays at 1, and
+`load_edits` reads both and refuses any other version. For each active quantized edit the
+payload holds the packed parts before and after it, named `{id}-before.<part>` and
+`{id}-after.<part>` (`data` and `absmax` for nf4 and fp4, `data` and `scales` for int8), all CPU copies. The
+manifest's entry for the edit gains a `quantization` block with `type`, `blocksize`,
+the logical `shape` and `dtype`, the `parts`, and the edit's `quantization` report. The
+manifest also records the lab's `quantization` settings: `method` and `blocksize` or
+`threshold`, or null for a float model.
+
+Resume replays each edit in order. The packed parts the model holds must equal the edit's
+`before` parts, or `load_edits` raises `ValueError` and changes nothing. It then writes the
+`after` parts, and keeps the `before` parts as the edit's undo snapshot, so undo after
+resume is exact and still last in, first out.
+
+A bundle with quantized edits resumes only into a lab with the same method and the same
+`blocksize` or `threshold`. `load_edits` checks that before the fingerprint, and the
+message names both settings, including when the lab is float. Only a float bundle into
+a quantized lab goes through the fingerprint check, and its message says that
+quantization differs. The fingerprint
+covers the packed bytes and scales and the model config's `quantization_config`; it is the
+same across loads and across the first forward, and a saved bundle's base fingerprint is
+taken over the pre-edit bytes.
+
+`export` on a quantized model calls `save_pretrained`, so the packed bytes and scales
+go out as they are in memory. `from_pretrained(path)` with no other settings then gives a
+model of the same method with identical bytes, scales, and logits. The export manifest
+has a `quantization` block with the same settings. Merging a PEFT adapter into a
+quantized base is refused with `ValueError`, before anything is copied.
 
 `--allow-hub-kernels` lets kernel code downloaded from the Hugging Face Hub run, as
 bitsandbytes does on macOS 26 and on CPUs with AVX512-BF16 when the optional `kernels`

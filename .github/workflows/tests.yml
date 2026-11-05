@@ -113,3 +113,4 @@ jobs:
           tests/test_multi_gpu_loading.py tests/test_cross_session.py tests/test_positions.py
           tests/test_circuits.py tests/test_activation_gradients.py tests/test_quantized_loading.py
           tests/test_quantized_edits.py tests/test_quantized_int8.py
+          tests/test_quantized_persistence.py

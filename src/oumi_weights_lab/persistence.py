@@ -14,6 +14,7 @@ from typing import Any
 
 from .budget import PassBudget
 from .editing import EditBook, _regions
+from .quantized import quantization_settings
 from .session import read_json, session_lock, write_json
 
 
@@ -49,8 +50,34 @@ def _interleaved(targets: dict[str, Any]) -> list[str]:
     return [name for names in rounds for name in names if name is not None]
 
 
-def _fingerprint(lab: Any, originals: dict | None = None) -> str:
-    originals = originals or {}
+def _state_key(name: str, part: str) -> str:
+    """The state-dict entry that holds one part of a packed weight.
+
+    ``data`` is the weight itself, 4-bit ``absmax`` sits beside it, and the int8 row
+    ``scales`` are the layer's ``SCB`` entry.
+    """
+    if part == "data":
+        return name
+    if part == "scales":
+        return f"{name.removesuffix('.weight')}.SCB"
+    return f"{name}.{part}"
+
+
+def _describe_quantization(settings: dict | None) -> str:
+    if settings is None:
+        return "float weights (not quantized)"
+    detail = ", ".join(f"{key} {value}" for key, value in settings.items() if key != "method")
+    return f"{settings['method']} quantization" + (f" ({detail})" if detail else "")
+
+
+def _fingerprint(lab: Any, originals: dict | None = None, packed: dict | None = None) -> str:
+    """Hash the model's identity.
+
+    ``originals`` maps ``id(tensor)`` to the pre-edit values of an edited float parameter.
+    ``packed`` maps state-dict names to the pre-edit values of the entries a quantized edit
+    changed, such as a weight's packed bytes and its scales.
+    """
+    originals, packed = originals or {}, packed or {}
     state = lab.model.state_dict(keep_vars=True)
     storage = {}
     for value in state.values():
@@ -59,7 +86,13 @@ def _fingerprint(lab: Any, originals: dict | None = None) -> str:
             if key in storage and storage[key] is not value:
                 raise ValueError("distinct tensors sharing storage cannot be saved as edit bundles")
             storage[key] = value
-    targets = {name: originals.get(id(value), value) for name, value in state.items()}
+    unknown = set(packed) - set(state)
+    if unknown:
+        raise ValueError(f"packed originals name unknown state entries: {sorted(unknown)}")
+    targets = {
+        name: packed[name] if name in packed else originals.get(id(value), value)
+        for name, value in state.items()
+    }
     # Hashing every tensor dominates a deadline save on large models, so hash in
     # parallel, taking tensors from each device in turn so copies from every GPU
     # overlap. MPS is not safe to drive from several threads; hash it serially.
@@ -186,17 +219,17 @@ class PersistenceMixin:
         if destination.exists() or destination.is_symlink():
             raise FileExistsError(destination)
         book = self.editbook
-        if any("_snapshot" in record for record in book._active):
-            raise ValueError(
-                "Saving edits to quantized weights is not supported yet; undo them first"
-            )
         tensors, working, active = {}, {}, []
+        walked: dict[str, dict[str, Any]] = {}  # Packed parts per weight, walked back in time.
         for record in reversed(book._active):
             parameter = record["_parameter"]
             encoded_index = _encode_index(record["_index"], tensors)
             index = _decode_index(encoded_index, tensors)
             if self.model.get_parameter(record["name"]) is not parameter:
                 raise ValueError("parameter storage changed since the edit")
+            if "_snapshot" in record:
+                active.append(self._save_quantized(record, encoded_index, walked, tensors))
+                continue
             if id(parameter) not in working:
                 working[id(parameter)] = parameter.detach().cpu().clone()
             current = working[id(parameter)]
@@ -215,9 +248,15 @@ class PersistenceMixin:
         registry_path = self.artifacts / "evaluations" / "_registry.json"
         with session_lock(self.session_path):
             registry = read_json(registry_path) if registry_path.exists() else None
+            packed = {
+                _state_key(name, part): value
+                for name, parts in walked.items()
+                for part, value in parts.items()
+            }
             manifest = {
-                "format_version": 1,
-                "base_sha256": _fingerprint(self, working),
+                "format_version": 2 if walked else 1,
+                "base_sha256": _fingerprint(self, working, packed),
+                "quantization": quantization_settings(self),
                 "model_id": self.model_id,
                 "model_commit": getattr(self, "model_commit", None),
                 "book_revision": book.revision,
@@ -241,6 +280,89 @@ class PersistenceMixin:
             staged.rename(destination)
         return destination
 
+    def _save_quantized(
+        self, record: dict, encoded_index: Any, current: dict, tensors: dict
+    ) -> dict:
+        """Store the packed parts before and after one quantized edit; return its active entry.
+
+        ``current`` holds each weight's parts as of the edit being saved, starting from the live
+        state, and moves back to the parts before it. After the oldest edit it holds the base.
+        """
+        name, snapshot = record["name"], record["_snapshot"]
+        weight = self.editbook._packed(name)
+        if weight is None or weight.state is not record.get("_state"):
+            raise ValueError("parameter storage changed since the edit")
+        after = current.get(name) or weight.snapshot()
+        if set(after) != set(snapshot) or any(
+            after[part].dtype != snapshot[part].dtype or after[part].shape != snapshot[part].shape
+            for part in snapshot
+        ):
+            raise ValueError("parameter dtype or shape changed since the edit")
+        for part in snapshot:
+            tensors[f"{record['id']}-after.{part}"] = after[part].contiguous().clone()
+            tensors[f"{record['id']}-before.{part}"] = snapshot[part].contiguous().clone()
+        current[name] = snapshot
+        described = weight.describe()
+        return {
+            "id": record["id"],
+            "index": encoded_index,
+            "quantization": {
+                "type": weight.method,
+                "blocksize": weight.blocksize,
+                **{key: described[key] for key in ("threshold",) if key in described},
+                "shape": list(weight.shape),
+                "dtype": str(weight.dtype),
+                "parts": sorted(snapshot),
+                "report": copy.deepcopy(record["quantization"]),
+            },
+        }
+
+    def _replay_quantized(
+        self, book: EditBook, record: dict, entry: dict, tensors: dict, state: dict
+    ) -> tuple:
+        """Check one saved quantized edit against the packed state replay has reached.
+
+        ``state`` maps each weight name to its weight and its parts so far; they advance to the
+        edit's ``after`` parts. Returns the weight and the edit's private snapshot, the ``before``
+        parts.
+        """
+        import torch
+
+        block, name = entry["quantization"], record["name"]
+        weight = book._packed(name)
+        if weight is None:
+            raise ValueError(f"saved quantized edit names {name}, which is not quantized here")
+        described = weight.describe()
+        keys = ("type", "blocksize", "threshold", "shape", "dtype")
+        saved = {key: block.get(key) for key in keys}
+        live = {
+            "type": weight.method,
+            "blocksize": weight.blocksize,
+            "threshold": described.get("threshold"),
+            "shape": list(weight.shape),
+            "dtype": str(weight.dtype),
+        }
+        if saved != live:
+            raise ValueError(f"saved quantized edit does not match {name}: {saved} != {live}")
+        if name not in state:
+            state[name] = (weight, weight.snapshot())
+        reached = state[name][1]
+        parts = block["parts"]
+        wanted = [f"{record['id']}-{side}.{part}" for side in ("before", "after") for part in parts]
+        if sorted(parts) != sorted(reached) or any(key not in tensors for key in wanted):
+            raise ValueError("saved quantized edit has the wrong parts")
+        before = {part: tensors[f"{record['id']}-before.{part}"] for part in parts}
+        after = {part: tensors[f"{record['id']}-after.{part}"] for part in parts}
+        for part in parts:
+            if before[part].dtype != reached[part].dtype or not torch.equal(
+                before[part], reached[part]
+            ):
+                raise ValueError("saved edit original does not match replay state")
+            if after[part].dtype != before[part].dtype or after[part].shape != before[part].shape:
+                raise ValueError("saved edit shape mismatch")
+        state[name] = (weight, after)
+        return weight, before
+
     def load_edits(self, path: str | Path) -> None:
         """Resume a saved bundle into a fresh, identical model and experiment.
 
@@ -258,16 +380,32 @@ class PersistenceMixin:
         checksum = manifest.pop("sha256", None)
         if _manifest_digest(manifest) != checksum:
             raise ValueError("edit bundle manifest checksum mismatch")
-        if manifest.get("format_version") != 1:
+        if manifest.get("format_version") not in (1, 2):
             raise ValueError("unsupported edit bundle format")
         for key in ("book_revision", "component_revision"):
             PassBudget._validate(manifest[key], key)
         if _file_digest(bundle / "edits.safetensors") != manifest["payload_sha256"]:
             raise ValueError("edit bundle payload checksum mismatch")
-        if _fingerprint(self) != manifest["base_sha256"]:
+        saved_quantization = manifest.get("quantization")
+        own_quantization = quantization_settings(self)
+        quantized = [entry for entry in manifest["active"] if "quantization" in entry]
+        if quantized and manifest["format_version"] == 1:
+            raise ValueError("edit bundle format 1 cannot hold quantized edits")
+        if quantized and saved_quantization != own_quantization:
             raise ValueError(
-                "base model, tokenizer or checkpoint content does not match edit bundle"
+                "edit bundle was saved from a model with "
+                f"{_describe_quantization(saved_quantization)}, but this model has "
+                f"{_describe_quantization(own_quantization)}; resume with the same quantization"
             )
+        if _fingerprint(self) != manifest["base_sha256"]:
+            message = "base model, tokenizer or checkpoint content does not match edit bundle"
+            if saved_quantization != own_quantization:
+                message += (
+                    f"; the bundle's model has {_describe_quantization(saved_quantization)} and "
+                    f"this model has {_describe_quantization(own_quantization)}, so quantization "
+                    "differs"
+                )
+            raise ValueError(message)
         used, inherited = manifest["forward_passes"], manifest["pass_limit"]
         PassBudget._validate(used, "saved forward passes")
         PassBudget(inherited)
@@ -286,11 +424,21 @@ class PersistenceMixin:
         book = EditBook(self.model, getattr(self, "quantization", None))
         book._history = history
         book.revision = manifest["book_revision"]
-        working, originals = {}, {}
+        working, originals, replayed = {}, {}, {}
         for entry in manifest["active"]:
             record = by_id[entry["id"]]
             parameter = self.model.get_parameter(record["name"])
             index = _decode_index(entry["index"], tensors)
+            if "quantization" in entry:
+                weight, before = self._replay_quantized(book, record, entry, tensors, replayed)
+                record.update(
+                    _index=index,
+                    _snapshot=before,
+                    _parameter=parameter,
+                    _state=weight.state,
+                )
+                book._active.append(record)
+                continue
             if id(parameter) not in working:
                 originals[id(parameter)] = (parameter, parameter.detach().cpu().clone())
                 working[id(parameter)] = originals[id(parameter)][1].clone()
@@ -311,6 +459,7 @@ class PersistenceMixin:
             raise ValueError("edit history and active edits disagree")
         import torch
 
+        starts = [(weight, weight.snapshot()) for weight, _ in replayed.values()]
         with session_lock(self.session_path):
             if registry_path.exists():
                 raise ValueError("load_edits requires a fresh experiment")
@@ -318,6 +467,8 @@ class PersistenceMixin:
                 with torch.no_grad():
                     for key, value in working.items():
                         originals[key][0].copy_(value)
+                    for weight, final in replayed.values():
+                        weight.restore(final)
                 if manifest["registry"] is not None:
                     registry_path.parent.mkdir(parents=True, exist_ok=True)
                     write_json(registry_path, manifest["registry"], durable=True)
@@ -325,6 +476,8 @@ class PersistenceMixin:
                 with torch.no_grad():
                     for parameter, original in originals.values():
                         parameter.copy_(original)
+                    for weight, start in starts:
+                        weight.restore(start)
                 registry_path.unlink(missing_ok=True)
                 raise
             self._editbook = book
