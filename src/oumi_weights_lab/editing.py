@@ -16,6 +16,9 @@ from pathlib import Path
 from typing import Any
 
 _CHUNK = 262_144
+# Exports write shards of at most this size, which bounds the CPU memory each shard
+# needs while it is written.
+SHARD_SIZE = "5GB"
 
 
 def _regions(tensor: Any, index: tuple = ()):
@@ -331,9 +334,14 @@ class EditingMixin:
     def export(self, path: str | Path) -> Path:
         """Save a standalone HF checkpoint; relative paths use the artifacts dir.
 
-        PEFT exports clone and merge the complete current model, preserving base
-        weight edits as well as adapters. This temporarily needs a second model's
-        memory. Unsupported merges fail without changing the live model or output.
+        PEFT exports merge the adapter into the current weights, preserving base
+        weight edits as well as adapters. LoRA layers merge one at a time into a CPU
+        copy and are then restored exactly, so the GPUs never hold a second copy; CPU
+        memory holds every merged layer until the checkpoint is written. Other
+        adapters (DoRA, quantized layers, other PEFT methods, tied embeddings under
+        an adapter) merge a clone of the whole model, which needs a second model's
+        memory and is refused for a model split across devices. Failed merges
+        leave the live model and the destination unchanged.
         """
         attachments = getattr(self, "attachments", None)
         if callable(attachments) and attachments():
@@ -350,7 +358,23 @@ class EditingMixin:
             raise ValueError("Export destination must be absent or an empty directory")
         model = self.model
         merged_adapter = hasattr(model, "peft_config")
+        layerwise = False
         if merged_adapter:
+            from .merging import layerwise_blocker
+
+            blocker = layerwise_blocker(model)
+            layerwise = blocker is None
+            # Transformers maps GPU indices, accelerate also accepts names.
+            devices = {
+                f"cuda:{device}" if isinstance(device, int) else str(device)
+                for device in (getattr(self, "device_map", None) or {}).values()
+            }
+            if not layerwise and len(devices) > 1:
+                raise ValueError(
+                    f"Cannot export this adapter from a model split across devices ({blocker}): "
+                    "merging it needs a copy of the whole model"
+                )
+        if merged_adapter and not layerwise:
             if not callable(getattr(model, "merge_and_unload", None)):
                 raise ValueError("This adapter cannot be exported as a full merged model")
             # Bound hook callbacks can refer back to the Lab and its undo history.
@@ -365,7 +389,14 @@ class EditingMixin:
             prefix=".oumi-weights-lab-export-", dir=destination.parent
         ) as temp:
             staged = Path(temp) / "checkpoint"
-            model.save_pretrained(staged)
+            if layerwise:
+                from .merging import merged_state_dict
+
+                model.get_base_model().save_pretrained(
+                    staged, state_dict=merged_state_dict(model), max_shard_size=SHARD_SIZE
+                )
+            else:
+                model.save_pretrained(staged, max_shard_size=SHARD_SIZE)
             self.tokenizer.save_pretrained(staged)
             manifest = {
                 "format_version": 1,
