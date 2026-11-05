@@ -62,12 +62,11 @@ def _layer_index(name: str) -> int:
     raise ValueError(f"cannot find a layer index in the module name {name!r}")
 
 
-def _split(module: Any, name: str, model: Any) -> dict[str, Any] | None:
+def _split(module: Any, children: dict[str, Any], name: str, model: Any) -> dict[str, Any] | None:
     """The head layout of one module, or None when it is not an attention block."""
     from torch import nn
     from transformers.pytorch_utils import Conv1D
 
-    children = dict(module.named_children())
     if set(_PROJECTIONS) <= children.keys():
         output = next((key for key in ("o_proj", "out_proj") if key in children), None)
         if output is None or not all(
@@ -113,15 +112,23 @@ def _blocks(model: Any) -> list[tuple[str, dict[str, Any]]]:
             "head slices read base weights only; export the merged model and start a session on it"
         )
     found = []
+    owners: dict[int, str] = {}
     for name, module in model.named_modules():
+        children = dict(module.named_children())
         for child, layout in _REFUSED.items():
-            if child in dict(module.named_children()):
+            if child in children:
                 raise NotImplementedError(
                     f"{name} uses {layout}; heads cannot be split into per-head slices"
                 )
-        layout = _split(module, name, model)
+        layout = _split(module, children, name, model)
         if layout is not None:
-            _layer_index(name)
+            layer = _layer_index(name)
+            if layer in owners:
+                raise NotImplementedError(
+                    f"{owners[layer]} and {name} have the same layer index {layer}; "
+                    "heads supports one stack of numbered layers"
+                )
+            owners[layer] = name
             found.append((name, layout))
     if not found:
         raise NotImplementedError(

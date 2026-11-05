@@ -259,7 +259,9 @@ weights = lab.head_weights(0, 1)  # q, k, v, o as float32 CPU tensors, plus bias
 - Layouts: separate `q_proj`/`k_proj`/`v_proj` with `o_proj` or `out_proj` (Llama,
   Mistral, Qwen2/3, Gemma, OLMo, OPT); gated queries, where `q_proj` holds each head's
   query then gate (Qwen3.5, Qwen3-Next); and GPT-2's fused `c_attn`. Linear-attention
-  blocks are skipped.
+  blocks are skipped. A model with two attention stacks that reuse layer indexes (a
+  vision tower and a text decoder, or an encoder and decoder) raises
+  `NotImplementedError`: `heads` supports one stack of numbered layers.
 - Raises `ValueError` for layers or heads the model lacks, or sizes that are not whole
   heads. Raises `NotImplementedError` for fused `qkv_proj` (Phi-3), `query_key_value`
   (GPT-NeoX, Falcon, Bloom), latent attention, a model with no attention block, and

@@ -2,7 +2,7 @@
 
 `lab.heads()` lists every attention head as slices of the model's own weights. `lab.head_weights(layer, head)` returns one head's matrices for offline analysis. Both read base weights only.
 
-Supported layouts: separate `q_proj`, `k_proj`, `v_proj` with `o_proj` or `out_proj` (Llama, Mistral, Qwen, Gemma, OLMo, OPT), gated queries (Qwen3.5, Qwen3-Next full attention), and GPT-2's fused `c_attn`. Linear-attention blocks are skipped. Fused `qkv_proj`, `query_key_value`, and latent attention raise `NotImplementedError`, and so does a LoRA model: export the merged model and start a session on it.
+Supported layouts: separate `q_proj`, `k_proj`, `v_proj` with `o_proj` or `out_proj` (Llama, Mistral, Qwen, Gemma, OLMo, OPT), gated queries (Qwen3.5, Qwen3-Next full attention), and GPT-2's fused `c_attn`. Linear-attention blocks are skipped. Fused `qkv_proj`, `query_key_value`, and latent attention raise `NotImplementedError`, and so does a LoRA model: export the merged model and start a session on it. A model with two attention stacks that reuse layer indexes, such as a vision tower plus a text decoder, also raises, because a layer number would be ambiguous.
 
 ## List heads
 

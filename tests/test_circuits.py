@@ -264,3 +264,28 @@ def test_head_weights_are_copies(gpt2_lab):
     before = gpt2_lab.model.transformer.h[0].attn.c_attn.weight.detach().clone()
     gpt2_lab.head_weights(0, 0)["q"].zero_()
     assert torch.equal(gpt2_lab.model.transformer.h[0].attn.c_attn.weight, before)
+
+
+class Attn(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.head_dim = 4
+        for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
+            setattr(self, name, nn.Linear(8, 8))
+
+
+class TwoStacks(nn.Module):
+    def __init__(self):
+        super().__init__()
+        for stack in ("vision", "text"):
+            holder = nn.Module()
+            holder.layers = nn.ModuleList([nn.Module()])
+            holder.layers[0].attn = Attn()
+            setattr(self, stack, holder)
+
+
+def test_two_stacks_with_the_same_layer_index_raise(tiny_tokenizer, make_lab):
+    lab = make_lab(TwoStacks(), tiny_tokenizer)
+    for call in (lambda: lab.heads(layers=[0]), lambda: lab.head_weights(0, 0)):
+        with pytest.raises(NotImplementedError, match="vision.layers.0.attn.*text.layers.0.attn"):
+            call()
