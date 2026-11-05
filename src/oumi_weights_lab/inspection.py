@@ -158,8 +158,17 @@ def _attention_weights(output):
     """The ``[batch, heads, queries, keys]`` weights in an eager attention module's output."""
     import torch
 
-    weights = output[1] if isinstance(output, (tuple, list)) and len(output) > 1 else None
-    if not isinstance(weights, torch.Tensor) or weights.ndim != 4:
+    pair = isinstance(output, (tuple, list)) and len(output) > 1
+    hidden, weights = (output[0], output[1]) if pair else (None, None)
+    # Batch and query counts must match the first output, or any 4-D tensor would pass.
+    if (
+        not isinstance(weights, torch.Tensor)
+        or weights.ndim != 4
+        or not isinstance(hidden, torch.Tensor)
+        or hidden.ndim < 2
+        or weights.shape[0] != hidden.shape[0]
+        or weights.shape[2] != hidden.shape[1]
+    ):
         raise ValueError(
             "attention capture needs a module whose output's second element is the attention "
             "weights; the lab loads eager attention, so check the module name points at an "

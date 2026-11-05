@@ -33,7 +33,7 @@ Patch a single-token boundary before trying full generation: generation changes 
 
 ```python
 projection = "model.layers.0.self_attn.o_proj"
-head, width = 1, 4  # width = hidden size / number of heads
+head, width = 1, 4  # width = the head dimension: config.head_dim when set, else hidden size / heads
 
 
 def zero_head(value):

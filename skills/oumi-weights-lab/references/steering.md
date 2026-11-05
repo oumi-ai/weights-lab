@@ -32,7 +32,7 @@ with lab.patch(layer, lambda value: value + scale * direction.to(value.device), 
 baseline_scores = lab.score("The movie was", [" good", " bad"])
 ```
 
-`"all"` means the patch applies on every forward call. With a KV cache, the first call covers the whole prompt and each later call covers one new token, so generated tokens are steered too. Greedy generation gives the same tokens with and without the cache. A patch at `positions=[-1]` would instead steer only the last token of each call, which during cached generation is every new token but not the prompt.
+`"all"` means the patch applies on every forward call. With a KV cache, the first call covers the whole prompt and each later call covers one new token, so generated tokens are steered too. Greedy generation gives the same tokens with and without the cache. A patch at `positions=[-1]` would instead steer only the last token of each call: the last prompt token on the first cached call, then every new token, but not the earlier prompt tokens.
 
 Check the direction before trusting it:
 
@@ -40,4 +40,4 @@ Check the direction before trusting it:
 - repeat with a random direction of the same norm;
 - keep held-out data out of the sweep.
 
-`"all"` is safe under `batch_size>1` in `lab.score` and `lab.evaluate`, because padding positions do not change which tokens it selects. The patch is not an edit: it does not appear in `lab.edits()`, and `lab.patches()` lists it while active.
+`"all"` is allowed under `batch_size>1` in `lab.score` and `lab.evaluate`, but it also hooks the pad positions. A `record` at `"all"` captures them in dimension 1, and a tensor replacement should be shaped `[hidden]` so it broadcasts over every token, padded or not. The patch is not an edit: it does not appear in `lab.edits()`, and `lab.patches()` lists it while active.

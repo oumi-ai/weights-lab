@@ -399,3 +399,34 @@ def test_patches_metadata_includes_at(lab, kind):
     assert (first["at"], second["at"]) == ("output", "input")
     assert second["positions"] == repr(slice(-2, None))
     assert lab.patches() == []
+
+
+class Lookalike(nn.Module):
+    """Returns (x, a 4-D tensor that is not attention over x)."""
+
+    def __init__(self, other):
+        super().__init__()
+        self.other = other
+
+    def forward(self, x):
+        return x, self.other
+
+
+@pytest.mark.parametrize("other_shape", [(2, 2, 3, 3), (1, 2, 5, 3), (1, 2, 3, 3)])
+def test_attention_capture_refuses_a_4d_output_that_is_not_attention(
+    make_lab, tiny_tokenizer, other_shape
+):
+    toy = Lookalike(torch.zeros(other_shape))
+    lab = make_lab(toy, tiny_tokenizer)
+    x = torch.zeros(1, 4, 3)
+    with pytest.raises(ValueError, match="attention weights"):
+        with lab.record("", at="attention"):
+            toy(x)
+
+
+def test_attention_capture_accepts_matching_batch_and_queries(make_lab, tiny_tokenizer):
+    toy = Lookalike(torch.zeros(1, 2, 4, 7))
+    lab = make_lab(toy, tiny_tokenizer)
+    with lab.record("", positions="all", at="attention") as captured:
+        toy(torch.zeros(1, 4, 3))
+    assert captured[""][0].shape == (1, 2, 4, 7)

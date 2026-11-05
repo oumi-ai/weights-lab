@@ -215,7 +215,9 @@ gradients = lab.gradient("hello world", parameters=[name], max_tokens=64)
   slice. `"all"` selects every token of each call, so under cached generation the first
   call has the whole prompt and later calls have one token each. A slice follows Python
   rules on each call's length; its step must be positive, and one that selects nothing
-  raises. Bad values raise `ValueError` when the context opens.
+  raises. Malformed values raise when the context opens; out-of-range ints and
+  selections that pick nothing raise at the forward, because they depend on each
+  call's length.
 - Batched `score` and `evaluate` left-pad. A position counted from the left (an int of 0
   or more, or a slice that does not end at the end of the sequence) is refused unless
   `batch_size=1`. `"all"`, negative ints, and slices like `slice(-2, None)` (negative
@@ -224,8 +226,10 @@ gradients = lab.gradient("hello world", parameters=[name], max_tokens=64)
   keys]` from an attention block such as `model.layers.0.self_attn` or
   `transformer.h.0.attn`; positions select queries. It needs eager attention, which the
   lab loads, and a module whose output's second element is the weights, so it refuses
-  layers, MLPs, and linear-attention blocks. Hybrid models give fewer captures than
-  layers. Attention cannot be patched. `lab.patches()` lists each patch's `at`.
+  layers, MLPs, and linear-attention blocks; in a hybrid model only the full-attention
+  layers can be captured. Some architectures return no weights on older Transformers
+  versions (OPT on 4.56, for example), and capture raises there. Attention cannot be
+  patched. `lab.patches()` lists each patch's `at`.
 - `gradient` returns per-row mean causal-loss gradients on CPU and leaves `.grad` and
   `requires_grad` unchanged. Pass `target` to score only the answer tokens.
 - `probe(features, labels, groups)` fits a ridge classifier, keeping each source
