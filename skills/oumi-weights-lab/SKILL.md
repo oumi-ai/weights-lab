@@ -86,7 +86,9 @@ Read only the one you need:
 - [Compare checkpoints](references/compare-checkpoints.md): parameter deltas without forward passes.
 - [Evaluation reports and screens](references/evaluation.md): paired statistics, regression suites, and pinned dev subsets.
 - [Save and resume edits](references/edit-bundles.md): save points that carry undo history and held-out reservations.
-- [Activation patching](references/activation-patching.md): replace hidden states at chosen tokens.
+- [Activation patching](references/activation-patching.md): replace hidden states or module inputs at chosen tokens, and capture attention weights.
+- [Steering vectors](references/steering.md): add a recorded direction to the residual stream.
+- [Logit lens](references/logit-lens.md): read each layer's output through the final norm and head.
 - [Short-row gradients](references/gradients.md): per-row gradients for selected parameters.
 - [Document-split probes](references/probes.md): linear probes that keep source documents apart.
 - [LoRA update diagnostics](references/lora-diagnostics.md): adapter update spectra and rank without forward passes.
