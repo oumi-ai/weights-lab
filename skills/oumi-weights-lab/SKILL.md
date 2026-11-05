@@ -10,7 +10,7 @@ Load one model into a persistent worker, then send it Python snippets. Snippets 
 
 ## Setup
 
-Run `oumi-weights-lab --help`. If it fails, ask the user to install the CLI with `uv tool install git+https://github.com/oumi-ai/weights-lab`, or `uv tool install 'oumi-weights-lab[adapters,datasets,multi-gpu] @ git+https://github.com/oumi-ai/weights-lab'` for LoRA adapters, Hugging Face datasets (`lab.hf_rows`), and multi-GPU loading. Under the Claude Code plugin, the first call builds an environment and downloads PyTorch; allow it several minutes.
+Run `oumi-weights-lab --help`. If it fails, ask the user to install the CLI with `uv tool install git+https://github.com/oumi-ai/weights-lab`, or `uv tool install 'oumi-weights-lab[adapters,datasets,multi-gpu,quantized] @ git+https://github.com/oumi-ai/weights-lab'` for LoRA adapters, Hugging Face datasets (`lab.hf_rows`), multi-GPU loading, and quantized loading. Under the Claude Code plugin, the first call builds an environment and downloads PyTorch; allow it several minutes.
 
 ## Session commands
 
@@ -25,6 +25,7 @@ Run `oumi-weights-lab --help`. If it fails, ask the user to install the CLI with
 - Use a new `--session` directory for every `start`; a stopped session cannot be restarted.
 - `start` returns while the model loads, and snippets queue until it is ready. `--device` defaults to CUDA, then Apple MPS, then CPU. `--dtype` defaults to the checkpoint's own.
 - For a model too big for one GPU, add `--device-map balanced` to spread it over every visible GPU (`sequential` fills GPU 0 first). `--max-memory 0=70GiB,1=70GiB` uses only the GPUs it names, up to that much on each; by default the model may use 90% of every GPU's free memory. A model that would need CPU or disk offload is refused before any weights load. `peek` reports GiB of parameters per device under `devices`.
+- Add `--quantize nf4` (or `fp4`, `int8`) to load the model with bitsandbytes, on a GPU or an Apple-silicon Mac. Quantized weights are read-only: reads, scoring, and activation work, edits to them are refused. Kernel code from the Hub is blocked unless you pass `--allow-hub-kernels`. Read [quantized models](references/quantized.md) first.
 - Stdout is JSON. `--follow` streams snippet output to stderr. `--snippet-timeout` stops a snippet that runs too long; `send --timeout` only limits how long the CLI waits.
 - Snippet files can live anywhere; `--file` sends their contents. Snippets run in the directory where `start` ran, so read inputs by absolute path and write outputs under `artifacts`.
 - Add `--adapter PATH_OR_ID` to load a LoRA adapter. For a cloud GPU or Slurm, read [remote workers](references/remote.md).
@@ -96,4 +97,5 @@ Read only the one you need:
 - [LoRA update diagnostics](references/lora-diagnostics.md): adapter update spectra and rank without forward passes.
 - [Written-working control](references/written-working.md): test a computation in text before editing weights.
 - [Hand-built parts](references/hand-built.md): temporary prompt transforms and logit adjustments.
+- [Quantized models](references/quantized.md): load nf4, fp4, or int8 and know what works read-only.
 - [Remote workers](references/remote.md): SkyPilot clouds and Slurm.

@@ -279,7 +279,7 @@ class PersistenceMixin:
             raise ValueError("duplicate edit IDs")
         if list(by_id) != [f"edit-{i + 1:06d}" for i in range(len(history))]:
             raise ValueError("invalid edit history order")
-        book = EditBook(self.model)
+        book = EditBook(self.model, getattr(self, "quantization", None))
         book._history = history
         book.revision = manifest["book_revision"]
         working, originals = {}, {}

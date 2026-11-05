@@ -72,6 +72,8 @@ def test_wrapper_runs_the_plugin_copy_with_its_lockfile(tmp_path):
         "datasets",
         "--extra",
         "multi-gpu",
+        "--extra",
+        "quantized",
     ]
     expected += ["--project"]
     expected += [str(plugin.resolve()), "python", "-m", "oumi_weights_lab"]
@@ -139,3 +141,41 @@ def test_wrapper_copies_without_uv_never_defer_to_each_other_forever(tmp_path, s
     result = run(plugin, f"{plugin / 'bin'}:{other}:{SYSTEM_PATH}", "--help")
     assert result.returncode == 127
     assert "uv tool install" in result.stderr
+
+
+def stub_system(directory, system, machine, product=None):
+    """Put stand-in ``uname`` and ``sw_vers`` commands on a path directory."""
+    directory.mkdir(parents=True, exist_ok=True)
+    uname = directory / "uname"
+    uname.write_text(f'#!/bin/sh\ncase "$1" in -m) echo {machine};; *) echo {system};; esac\n')
+    uname.chmod(0o755)
+    if product is not None:
+        sw_vers = directory / "sw_vers"
+        sw_vers.write_text(f'#!/bin/sh\n[ "$1" = -productVersion ] && echo {product}\n')
+        sw_vers.chmod(0o755)
+
+
+@pytest.mark.parametrize(
+    "system,machine,product,quantized",
+    [
+        ("Linux", "x86_64", None, True),
+        ("Linux", "aarch64", None, True),
+        ("Darwin", "arm64", "14.0", True),
+        ("Darwin", "arm64", "26.1", True),
+        ("Darwin", "arm64", "13.6.1", False),
+        ("Darwin", "x86_64", "15.0", False),
+    ],
+)
+def test_wrapper_installs_the_quantized_extra_only_where_bitsandbytes_has_a_wheel(
+    tmp_path, system, machine, product, quantized
+):
+    plugin = plugin_copy(tmp_path)
+    log = tmp_path / "uv-args"
+    tools = tmp_path / "tools"
+    recording_command(tools, "uv", log)
+    stub_system(tools, system, machine, product)
+    path = f"{plugin / 'bin'}:{tools}:{SYSTEM_PATH}"
+    assert run(plugin, path, "peek", "--session", "s").returncode == 0
+    arguments = log.read_text().splitlines()
+    assert ("quantized" in arguments) is quantized
+    assert {"adapters", "datasets", "multi-gpu"} <= set(arguments)

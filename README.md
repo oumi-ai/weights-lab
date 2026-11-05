@@ -63,10 +63,11 @@ uv tool install git+https://github.com/oumi-ai/weights-lab
 Then ask your agent, for example: "Use oumi-weights-lab to check whether zeroing
 layer 3's MLP in Qwen/Qwen3-0.6B changes its answers to the questions in caps.jsonl."
 
-To load LoRA adapters, Hugging Face datasets with `lab.hf_rows`, or one model across
-several GPUs (`start --device-map balanced`), install the CLI as
-`uv tool install 'oumi-weights-lab[adapters,datasets,multi-gpu] @ git+https://github.com/oumi-ai/weights-lab'`.
-The Claude Code plugin includes all three.
+To load LoRA adapters, Hugging Face datasets with `lab.hf_rows`, one model across
+several GPUs (`start --device-map balanced`), or a 4-bit or 8-bit model
+(`start --quantize nf4`, read-only), install the CLI as
+`uv tool install 'oumi-weights-lab[adapters,datasets,multi-gpu,quantized] @ git+https://github.com/oumi-ai/weights-lab'`.
+The Claude Code plugin includes all four.
 Append `@<tag>` to a `git+https://` URL to pin a release.
 
 ## Use the CLI directly

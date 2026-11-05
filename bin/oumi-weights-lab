@@ -16,10 +16,21 @@ if command -v uv >/dev/null 2>&1 && [ -f "$root/pyproject.toml" ] && [ -f "$root
         quiet=  # Show setup progress, on stderr, the first time.
         echo "oumi-weights-lab: creating the plugin's environment; the first run downloads PyTorch" >&2
     fi
+    # bitsandbytes has wheels for Linux, Windows, and Apple-silicon Macs on macOS 14 or
+    # later. Elsewhere the quantized extra would fail to install, so leave it out; a
+    # --quantize start there says why it cannot load.
+    quantized='--extra quantized'
+    if [ "$(uname -s)" = Darwin ]; then
+        major=$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)
+        case $major in '' | *[!0-9]*) major=0 ;; esac
+        if [ "$(uname -m)" != arm64 ] || [ "$major" -lt 14 ]; then
+            quantized=
+        fi
+    fi
     # Run the module, not the console script, so PATH lookup cannot find this wrapper.
     exec uv run ${quiet:+"$quiet"} --frozen --no-dev \
-        --extra adapters --extra datasets --extra multi-gpu --project "$root" \
-        python -m oumi_weights_lab "$@"
+        --extra adapters --extra datasets --extra multi-gpu $quantized \
+        --project "$root" python -m oumi_weights_lab "$@"
 fi
 
 # Without uv, defer once to a CLI installed some other way, such as from git. A

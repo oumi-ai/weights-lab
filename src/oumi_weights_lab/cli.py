@@ -134,6 +134,8 @@ def _start(args: argparse.Namespace) -> int:
         "dtype": args.dtype,
         "device_map": args.device_map,
         "max_memory": args.max_memory,
+        "quantize": args.quantize,
+        "allow_hub_kernels": args.allow_hub_kernels,
         "snippet_timeout": args.snippet_timeout,
         "poll_interval": session.DEFAULT_POLL_INTERVAL,
         "pass_limit": args.pass_limit,
@@ -372,9 +374,11 @@ def _remote_start(args):
     if args.resume is not None:
         # The launcher resolves a relative remote path as it does the session path.
         config["resume"] = str(args.resume)
-    for key in ("device_map", "max_memory", "idle_timeout", "max_lifetime"):
+    for key in ("device_map", "max_memory", "quantize", "idle_timeout", "max_lifetime"):
         if getattr(args, key) is not None:
             config[key] = getattr(args, key)
+    if args.allow_hub_kernels:
+        config["allow_hub_kernels"] = True
     if args.shutdown_grace is not None:
         config["shutdown_grace"] = args.shutdown_grace
     _configuration(args.model, config)  # Reject static errors before provisioning.
@@ -503,6 +507,17 @@ def _parser() -> argparse.ArgumentParser:
         type=_max_memory,
         help="with --device-map, use only these GPUs, up to this much memory on each, "
         "such as 0=70GiB,1=70GiB (default: 90%% of every GPU's free memory)",
+    )
+    start.add_argument(
+        "--quantize",
+        choices=session.QUANTIZE,
+        help="load the model with bitsandbytes in this format (needs the quantized extra); "
+        "quantized weights are read-only, and this cannot be combined with --device-map",
+    )
+    start.add_argument(
+        "--allow-hub-kernels",
+        action="store_true",
+        help="let kernel code downloaded from the Hugging Face Hub run (default: blocked)",
     )
     start.add_argument("--snippet-timeout", type=_positive, default=session.DEFAULT_SNIPPET_TIMEOUT)
     start.add_argument(

@@ -1,4 +1,17 @@
+import sys
+
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def restore_kernels_module():
+    """Loading a lab blocks the ``kernels`` package for the process; undo that per test."""
+    before = sys.modules.get("kernels", "absent")
+    yield
+    if before == "absent":
+        sys.modules.pop("kernels", None)
+    else:
+        sys.modules["kernels"] = before
 
 
 @pytest.fixture

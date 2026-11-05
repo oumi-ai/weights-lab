@@ -1,7 +1,7 @@
 # Contributing
 
 ```sh
-uv sync --python 3.12 --extra adapters
+uv sync --python 3.12 --all-extras
 uv run pytest -q
 uv run ruff check . && uv run ruff format --check .
 uv run python scripts/check_repo.py

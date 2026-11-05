@@ -184,3 +184,35 @@ def test_start_parser_defaults_use_shared_session_constants():
     assert args.shutdown_grace is None
     for dtype in session.DTYPES:
         assert parser.parse_args([*start, "--dtype", dtype]).dtype == dtype
+
+
+def test_start_puts_quantize_and_hub_kernels_in_the_config(tmp_path, monkeypatch):
+    seen = []
+    real = session.create_session
+
+    def create(path, config):
+        seen.append(config)
+        return real(path, config)
+
+    class Process:
+        pid = 1
+
+    monkeypatch.setattr(session, "create_session", create)
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda *args, **kwargs: Process())
+    base = ["start", "--model", "m"]
+    assert main([*base, "--session", str(tmp_path / "a")]) == 0
+    flags = ["--quantize", "fp4", "--allow-hub-kernels"]
+    assert main([*base, "--session", str(tmp_path / "b"), *flags]) == 0
+    assert (seen[0]["quantize"], seen[0]["allow_hub_kernels"]) == (None, False)
+    assert (seen[1]["quantize"], seen[1]["allow_hub_kernels"]) == ("fp4", True)
+    assert read_json(tmp_path / "b" / "config.json")["quantize"] == "fp4"
+
+
+def test_start_refuses_unknown_quantize_and_device_map_with_quantize(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        main(["start", "--session", str(tmp_path / "a"), "--model", "m", "--quantize", "nf8"])
+    capsys.readouterr()
+    arguments = ["start", "--session", str(tmp_path / "b"), "--model", "m", "--quantize", "nf4"]
+    assert main([*arguments, "--device-map", "balanced"]) != 0
+    assert "cannot be combined" in capsys.readouterr().err
+    assert not (tmp_path / "b").exists()

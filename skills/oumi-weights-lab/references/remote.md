@@ -5,7 +5,7 @@ the Claude Code plugin, or `uv tool install git+https://github.com/oumi-ai/weigh
 and upstream SkyPilot installed and authenticated for the chosen infrastructure.
 
 The remote worker installs the same code the CLI runs, with adapter, Hugging
-Face datasets, and multi-GPU support (gated datasets, like gated models, need
+Face datasets, multi-GPU, and quantized-loading (`--quantize`) support (gated datasets, like gated models, need
 credentials on the worker): the
 plugin's or checkout's sanitized package source, or the git commit the CLI was
 installed from. Pass `--source /path/to/weights-lab` to ship a different checkout.

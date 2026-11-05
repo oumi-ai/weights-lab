@@ -22,6 +22,8 @@ DIRECTORIES = ("inbox", "running", "completed", "outputs", "results", "artifacts
 DTYPES = ("auto", "float32", "float16", "bfloat16")
 # How --device-map spreads a model over GPUs, as Transformers names the strategies.
 DEVICE_MAPS = ("balanced", "sequential")
+# bitsandbytes formats for --quantize: two 4-bit codes and LLM.int8.
+QUANTIZE = ("nf4", "fp4", "int8")
 _MEMORY_SIZE = re.compile(r"[0-9]+(?:\.[0-9]+)?(?:[KMG]iB|[KMG]B)")
 _GPU_INDEX = re.compile(r"[0-9]+")
 _MAX_MEMORY_FORMAT = "--max-memory takes GPU=SIZE pairs, such as 0=70GiB,1=70GiB"
@@ -125,8 +127,15 @@ def _check_max_memory(limits: Any) -> None:
 
 
 def validate_placement(config: dict[str, Any]) -> None:
-    """Check ``device_map`` and ``max_memory`` before a session or cluster exists."""
+    """Check placement and quantization settings before a session or cluster exists."""
+    quantize = config.get("quantize")
+    if quantize is not None and (not isinstance(quantize, str) or quantize not in QUANTIZE):
+        raise ValueError(f"--quantize must be one of {', '.join(QUANTIZE)}")
+    if not isinstance(config.get("allow_hub_kernels", False), bool):
+        raise ValueError("allow_hub_kernels must be true or false")
     device_map, max_memory = config.get("device_map"), config.get("max_memory")
+    if quantize is not None and device_map is not None:
+        raise ValueError("--quantize cannot be combined with --device-map yet")
     if device_map is None:
         if max_memory is not None:
             raise ValueError("--max-memory needs --device-map")

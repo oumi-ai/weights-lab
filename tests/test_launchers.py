@@ -203,9 +203,9 @@ def test_sky_checkout_installs_its_source_with_adapter_support(tmp_path):
         "-m",
         "pip",
         "install",
-        ".[adapters,datasets,multi-gpu]",
+        ".[adapters,datasets,multi-gpu,quantized]",
     ]
-    assert result["package"] == ".[adapters,datasets,multi-gpu]"
+    assert result["package"] == ".[adapters,datasets,multi-gpu,quantized]"
 
 
 def installed_copy(tmp_path, monkeypatch, origin):
@@ -229,7 +229,7 @@ def test_sky_git_install_installs_the_same_commit_on_the_worker(tmp_path, monkey
     installed_copy(tmp_path, monkeypatch, origin)
     runner = Recorder()
     result = SkyPilotLauncher("weights-test", runner=runner).start("model", "/tmp/session")
-    requirement = f"oumi-weights-lab[adapters,datasets,multi-gpu] @ git+https://github.com/oumi-ai/weights-lab@{commit}"
+    requirement = f"oumi-weights-lab[adapters,datasets,multi-gpu,quantized] @ git+https://github.com/oumi-ai/weights-lab@{commit}"
     assert shlex.split(runner.task["setup"]) == ["python3", "-m", "pip", "install", requirement]
     assert "workdir" not in runner.task
     assert result["package"] == requirement
@@ -656,3 +656,18 @@ def test_launcher_commands_all_return_raw_bytes(tmp_path):
     launcher.teardown()
     # run(), stop(), and teardown() all return bytes; none request text decoding.
     assert all("text" not in kwargs for args, kwargs in runner.calls if args[:2] == ["sky", "down"])
+
+
+def test_sky_start_validates_quantize_like_dtype(tmp_path):
+    runner = Recorder()
+    launcher = SkyPilotLauncher("weights-test", python=sys.executable, runner=runner)
+    with pytest.raises(ValueError, match="nf4, fp4, int8"):
+        launcher.start("model", tmp_path / "bad", quantize="nf8")
+    assert runner.task is None
+    path = tmp_path / "session"
+    launcher.start(
+        "model", path, source=package_source(tmp_path), quantize="int8", allow_hub_kernels=True
+    )
+    run_session_bootstrap(shlex.split(runner.task["run"])[2])
+    config = read_json(path / "config.json")
+    assert config["quantize"] == "int8" and config["allow_hub_kernels"] is True

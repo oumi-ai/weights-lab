@@ -6,6 +6,8 @@ import math
 import random
 from contextlib import contextmanager
 
+from .quantized import lookup
+
 
 def _eager(model):
     for module in model.modules():
@@ -482,7 +484,12 @@ class InspectionMixin:
         if parameters is not None:
             names = list(parameters)
         elif modules is None:
-            names = [name for name, _ in self.model.named_parameters()]
+            # Quantized weights have no gradient to take; the float parameters keep theirs.
+            names = [
+                name
+                for name, _ in self.model.named_parameters()
+                if lookup(self.model, name) is None
+            ]
         else:
             names = []
         if parameters is not None or modules is None:
@@ -492,6 +499,13 @@ class InspectionMixin:
                 or any(name not in named for name in names)
             ):
                 raise ValueError("parameters must name distinct existing model parameters")
+        for name in names if parameters is not None else []:
+            packed = lookup(self.model, name)
+            if packed is not None:
+                raise ValueError(
+                    f"cannot take a gradient with respect to {name}: it is a "
+                    f"{packed.method} quantized weight"
+                )
         # Aliases of one tensor share one gradient, computed once.
         selected = list({id(named[name]): named[name] for name in names}.values())
         if any(not parameter.is_floating_point() for parameter in selected):

@@ -24,6 +24,10 @@ sky down my-lab
   GPUs it names, up to that much on each.
   A model that would need CPU or disk offload is refused before any weights load.
   With `--device-map`, the shutdown grace defaults to 300 seconds instead of 30.
+- `--quantize nf4` (or `fp4`, `int8`) loads the model with bitsandbytes on the worker's
+  GPU, which cuts the weights to about a quarter (4-bit) or half (int8) of 16-bit. The
+  worker installs the `quantized` extra, and `--quantize` cannot be combined with
+  `--device-map`. `--allow-hub-kernels` lets Hub kernel code run on the worker.
 - `--disk-size GB` sizes the cluster disk for a large checkpoint and its exports.
 - Use a new `--session` path for each `start`. Relative session and `--resume` paths
   resolve under `~/sky_workdir/`.

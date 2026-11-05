@@ -505,6 +505,8 @@ class ScoringMixin(EvaluationMixin):
             "adapter": adapter,
             "attention": getattr(config, "_attn_implementation", None),
             "device_map": getattr(self, "device_map", None) is not None,
+            "quantization": getattr(self, "quantization", None),
+            "allow_hub_kernels": bool(getattr(self, "allow_hub_kernels", False)),
             "model_id": getattr(self, "model_id", ""),
             "model_commit": getattr(self, "model_commit", None),
         }
