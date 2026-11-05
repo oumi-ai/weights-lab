@@ -154,6 +154,14 @@ def _with_input(args, kwargs, slot, updated):
     return args, {**kwargs, slot: updated}
 
 
+def _with_output(output, updated):
+    """``output`` with ``updated`` in place of the activation ``_activation`` read from it."""
+    if isinstance(output, tuple):
+        entries = (updated, *output[1:])
+        return type(output)(*entries) if hasattr(output, "_fields") else entries
+    return updated
+
+
 def _attention_weights(output):
     """The ``[batch, heads, queries, keys]`` weights in an eager attention module's output."""
     import torch
@@ -333,11 +341,7 @@ class InspectionMixin:
         target = self.model.get_submodule(module)
 
         def replace(hooked, inputs, output):
-            updated = _replaced(_activation(output), positions, values)
-            if isinstance(output, tuple):
-                entries = (updated, *output[1:])
-                return type(output)(*entries) if hasattr(output, "_fields") else entries
-            return updated
+            return _with_output(output, _replaced(_activation(output), positions, values))
 
         def replace_input(hooked, args, kwargs):
             value, slot = _input_activation(args, kwargs)
@@ -370,7 +374,17 @@ class InspectionMixin:
                     break
             self._patch_revision += 1
 
-    def gradient(self, prompt, target=None, parameters=None, max_tokens=512):
+    def gradient(
+        self,
+        prompt,
+        target=None,
+        parameters=None,
+        max_tokens=512,
+        *,
+        modules=None,
+        positions="all",
+        at="output",
+    ):
         """Return each row's mean causal loss gradient, stacked on dimension zero.
 
         A string target masks the prompt so only the answer contributes to loss.
@@ -381,11 +395,35 @@ class InspectionMixin:
         requested together share one returned tensor. parameters=None returns each
         tensor once, under its first name.
         Existing parameter gradients, train/eval flags, and requires_grad flags survive.
+
+        ``modules`` (a name or a nonempty list of distinct names) adds gradients of the same
+        loss with respect to those modules' activations. ``at`` is "output" or "input", as for
+        ``patch``. Each entry is ``[rows, selected tokens, ...]``, detached on CPU in the
+        activation's dtype. ``positions`` selects tokens as for ``record``, but defaults to
+        "all", not the last token: in a causal model the last position predicts nothing that
+        is scored, so its output gradient is zero. With ``modules`` given, ``parameters=None``
+        returns no parameter gradients; pass both to get both. A module that did not run, or
+        ran more than once in one forward, raises, because its gradient would be missing or
+        would mix calls. On a model whose activations carry no gradient (every parameter
+        frozen), the gradient is taken at a detached copy that replaces the activation, so
+        forward values are unchanged. ``positions`` and ``at`` need ``modules``; ``at``
+        "attention" is refused.
         """
         import torch
         import torch.nn.functional as functional
 
         _eager(self.model)
+        _check_at(at, _PATCH_AT)
+        if modules is None:
+            if not (isinstance(positions, str) and positions == "all") or at != "output":
+                raise ValueError("positions and at select activation gradients; pass modules")
+            module_names = []
+        else:
+            positions = _listed(positions)
+            module_names = [modules] if isinstance(modules, str) else list(modules)
+            if not module_names or len(set(module_names)) != len(module_names):
+                raise ValueError("choose a nonempty list of distinct module names")
+        targets = [(name, self.model.get_submodule(name)) for name in module_names]
         if not isinstance(max_tokens, int) or max_tokens < 2:
             raise ValueError("max_tokens must be an integer of at least two")
         if torch.is_inference_mode_enabled():
@@ -437,13 +475,21 @@ class InspectionMixin:
             raise ValueError("each row must have at least one scored token after its first token")
         # Tied weights have several names; parts() lists every alias.
         named = dict(self.model.named_parameters(remove_duplicate=False))
-        names = (
-            [name for name, _ in self.model.named_parameters()]
-            if parameters is None
-            else list(parameters)
-        )
-        if not names or len(set(names)) != len(names) or any(name not in named for name in names):
-            raise ValueError("parameters must name distinct existing model parameters")
+        if parameters is not None:
+            names = list(parameters)
+        elif modules is None:
+            names = [name for name, _ in self.model.named_parameters()]
+        else:
+            names = []
+        if parameters is not None or modules is None:
+            if (
+                not names
+                or len(set(names)) != len(names)
+                or any(name not in named for name in names)
+            ):
+                raise ValueError("parameters must name distinct existing model parameters")
+        if set(names) & set(module_names):
+            raise ValueError("a module name and a parameter name are both the same string")
         # Aliases of one tensor share one gradient, computed once.
         selected = list({id(named[name]): named[name] for name in names}.values())
         if any(not parameter.is_floating_point() for parameter in selected):
@@ -451,6 +497,7 @@ class InspectionMixin:
         flags = [parameter.requires_grad for parameter in selected]
         modes = [(module, module.training) for module in self.model.modules()]
         gradients = {id(parameter): [] for parameter in selected}
+        activation_gradients = {name: [] for name in module_names}
         try:
             for parameter in selected:
                 parameter.requires_grad_(True)
@@ -458,19 +505,42 @@ class InspectionMixin:
             with torch.enable_grad():
                 for row in range(ids.shape[0]):
                     row_inputs = {name: value[row : row + 1] for name, value in inputs.items()}
-                    output = self.model(**row_inputs)
+                    seen = {}
+                    hooks = []
+                    try:
+                        for name, module in targets:
+                            hooks.append(
+                                _TemporaryHook(
+                                    module, self._gradient_hook(name, at, seen), pre=at == "input"
+                                )
+                            )
+                            hooks[-1].register()
+                        output = self.model(**row_inputs)
+                    finally:
+                        for hook in hooks:
+                            hook.remove()
+                    for name in module_names:
+                        if name not in seen:
+                            raise ValueError(f"module {name!r} did not run in the forward")
                     logits = output.logits if hasattr(output, "logits") else output[0]
                     loss = functional.cross_entropy(
                         logits[:, :-1].float().reshape(-1, logits.shape[-1]),
                         labels[row : row + 1, 1:].reshape(-1),
                         ignore_index=-100,
                     )
+                    activations = [seen[name] for name in module_names]
                     values = (
-                        torch.autograd.grad(loss, selected, allow_unused=True)
+                        torch.autograd.grad(loss, activations + selected, allow_unused=True)
                         if loss.requires_grad
-                        else [None] * len(selected)
+                        else [None] * (len(activations) + len(selected))
                     )
-                    for parameter, value in zip(selected, values, strict=True):
+                    for name, activation, value in zip(
+                        module_names, activations, values[: len(activations)], strict=True
+                    ):
+                        value = torch.zeros_like(activation) if value is None else value
+                        chosen = _take(value, _positions(value, positions, 1), 1)
+                        activation_gradients[name].append(chosen[0].detach().cpu())
+                    for parameter, value in zip(selected, values[len(activations) :], strict=True):
                         gradients[id(parameter)].append(
                             torch.zeros_like(parameter, device="cpu")
                             if value is None
@@ -482,7 +552,37 @@ class InspectionMixin:
             for module, training in modes:
                 module.training = training
         stacked = {key: torch.stack(rows) for key, rows in gradients.items()}
-        return {name: stacked[id(named[name])] for name in names}
+        result = {name: torch.stack(rows) for name, rows in activation_gradients.items()}
+        result.update({name: stacked[id(named[name])] for name in names})
+        return result
+
+    @staticmethod
+    def _gradient_hook(name, at, seen):
+        """A hook that records one module's activation for a row, ready for autograd.grad."""
+
+        def keep(value):
+            if name in seen:
+                raise ValueError(
+                    f"module {name!r} ran more than once in one forward, "
+                    "so its gradient would mix calls"
+                )
+            if value.requires_grad:
+                seen[name] = value
+                return None
+            # Frozen models give activations no gradient path: grad at a detached stand-in.
+            seen[name] = value.detach().requires_grad_(True)
+            return seen[name]
+
+        def after(module, args, output):
+            leaf = keep(_activation(output))
+            return None if leaf is None else _with_output(output, leaf)
+
+        def before(module, args, kwargs):
+            value, slot = _input_activation(args, kwargs)
+            leaf = keep(value)
+            return None if leaf is None else _with_input(args, kwargs, slot, leaf)
+
+        return before if at == "input" else after
 
     def probe(
         self, features, labels, groups, train_groups=None, seed=0, test_fraction=0.25, ridge=1e-3
