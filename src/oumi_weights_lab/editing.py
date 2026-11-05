@@ -10,6 +10,7 @@ import copy
 import fnmatch
 import json
 import math
+import sys
 import tempfile
 import warnings
 from collections.abc import Mapping
@@ -81,6 +82,14 @@ def _parameter(model: Any, name: str) -> Any:
         return model.get_parameter(name)
     except (AttributeError, KeyError) as error:
         raise ValueError(f"Unknown parameter {name!r}") from error
+
+
+def _outside_package() -> int:
+    """The ``stacklevel`` of the first caller outside this package, seen from the caller of this."""
+    frame, level = sys._getframe(1), 1
+    while frame is not None and frame.f_globals.get("__name__", "").startswith(__package__):
+        frame, level = frame.f_back, level + 1
+    return level
 
 
 def _cpu_index(index: Any) -> Any:
@@ -388,6 +397,15 @@ class EditBook:
                 "_parameter": parameter,
                 "_state": state,
             }
+            if quantization["requested_delta_l2"] > 0 and quantization["realized_delta_l2"] == 0:
+                # Inside the try: a warning raised as an error rolls the edit back.
+                warnings.warn(
+                    f"{record['id']}: the change to {weight.name} was smaller than the "
+                    "quantization step, so no stored value changed; the edit is recorded and "
+                    "undo still works",
+                    UserWarning,
+                    stacklevel=_outside_package(),
+                )
             self._history.append(record)
             self._active.append(record)
             self.revision = previous_revision + 1
@@ -397,13 +415,6 @@ class EditBook:
             del self._active[active_size:]
             self.revision = previous_revision
             raise
-        if quantization["requested_delta_l2"] > 0 and quantization["realized_delta_l2"] == 0:
-            warnings.warn(
-                f"{record['id']}: the change to {weight.name} was smaller than the quantization "
-                "step, so no stored value changed; the edit is recorded and undo still works",
-                UserWarning,
-                stacklevel=3,
-            )
         return record["id"]
 
     def zero(self, name: str, index: Any = None, note: str = "") -> str:
@@ -572,6 +583,8 @@ class EditBook:
             or getattr(parameter, "quant_state", None) is not record["_state"]
             or parameter.data.dtype != snapshot["data"].dtype
             or parameter.data.shape != snapshot["data"].shape
+            or weight.parameter.quant_state.absmax.dtype != snapshot["absmax"].dtype
+            or weight.parameter.quant_state.absmax.shape != snapshot["absmax"].shape
             or weight.repacked
         ):
             raise RuntimeError("Parameter storage, dtype, or shape changed since the edit")

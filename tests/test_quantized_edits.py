@@ -519,3 +519,83 @@ def test_tensor_index_on_any_device_works(checkpoint, load, device):
     lab.undo()
     lab.undo()
     assert same_packed(state, packed(lab))
+
+
+@pytest.mark.parametrize("method", FOUR_BIT)
+def test_vanishing_edit_raised_as_an_error_changes_nothing(checkpoint, load, method):
+    lab = load(checkpoint("llama"), quantize=method)
+    before, revision = packed(lab), lab.revision
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(UserWarning, match="quantization step"):
+            lab.edit(Q_PROJ, lambda value: value + 1e-5, index=(1, 1))
+    assert lab.edits() == [] and lab.active_edit_ids == [] and lab.revision == revision
+    assert same_packed(before, packed(lab))
+
+
+@pytest.mark.parametrize("method", FOUR_BIT)
+def test_edit_of_tail_elements_keeps_the_rest_of_the_tail(partial_tail, method):
+    import bitsandbytes.functional as functional
+
+    model = partial_tail(method)
+    weight = model[0].weight
+    book = EditBook(model)
+    before = (weight.data.clone(), weight.quant_state.absmax.clone())
+    values = lookup(model, "0.weight").dequantize()
+    scale = before[1][1].item()  # The tail is block 1, elements 64..110 (row 1 col 27 on).
+    cells = [(2, 28), (2, 29), (2, 30)]  # flat 102..104, in the tail
+    intended = values.clone()
+    for row, column in cells:
+        assert values[row, column].abs() < scale
+        intended[row, column] = -0.6 * scale if values[row, column] > 0.3 * scale else 0.6 * scale
+    book.edit("0.weight", intended[2, 28:31].clone(), index=(2, slice(28, 31)))
+    after = (weight.data.clone(), weight.quant_state.absmax.clone())
+    assert torch.equal(after[1], before[1])
+    moved_bytes = (before[0] != after[0]).flatten().nonzero().flatten().tolist()
+    assert moved_bytes and set(moved_bytes) <= {51, 52}  # elements 102..104 live in bytes 51, 52
+    keep = [i for i in range(before[0].numel()) if i not in (51, 52)]
+    assert torch.equal(before[0].flatten()[keep], after[0].flatten()[keep])
+    landed = lookup(model, "0.weight").dequantize()
+    assert (landed.reshape(-1)[:102] == values.reshape(-1)[:102]).all()
+    state = weight.quant_state
+    data, whole = functional.quantize_4bit(intended, blocksize=BLOCK, quant_type=method)
+    if method == "nf4":
+        assert torch.equal(after[0].flatten(), data.flatten())
+    expected = functional.dequantize_4bit(data, whole).reshape(3, 37).float()
+    assert torch.equal(landed, expected) and state.blocksize == BLOCK
+    book.undo()
+    assert torch.equal(weight.data, before[0]) and torch.equal(weight.quant_state.absmax, before[1])
+
+
+@pytest.mark.parametrize("method", FOUR_BIT)
+def test_undo_refuses_changed_absmax_layout(checkpoint, load, method):
+    lab = load(checkpoint("llama"), quantize=method)
+    lab.zero(Q_PROJ, index=(0, slice(0, 8)))
+    state = lab.model.get_parameter(Q_PROJ).quant_state
+    current = packed(lab)
+    original = state.absmax
+    for replaced in (original.to(torch.float16), original[:-1].clone()):
+        state.absmax = replaced
+        with pytest.raises(RuntimeError, match="changed since the edit"):
+            lab.undo()
+        assert lab.active_edit_ids == ["edit-000001"]
+        assert torch.equal(lab.model.get_parameter(Q_PROJ).data, current[0])
+    state.absmax = original
+    lab.undo()
+
+
+def test_warning_points_at_the_caller(checkpoint, load):
+    lab = load(checkpoint("llama"), quantize="nf4")
+    source = logical(lab) + 1e-6
+    calls = (
+        lambda: lab.edit(Q_PROJ, lambda value: value + 1e-5, index=(1, 1)),
+        lambda: lab.swap(Q_PROJ, source, index=(1, slice(0, 1))),
+        lambda: lab.project_out(Q_PROJ, torch.eye(64)[0] + 1e-9, index=[1]),
+    )
+    for call in calls:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            call()
+        lab.undo()
+        ours = [w for w in caught if "quantization step" in str(w.message)]
+        assert [w.filename for w in ours] == [__file__]

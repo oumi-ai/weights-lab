@@ -25,7 +25,8 @@ then run `pytest -o addopts= -m integration tests/integration` with
 
 - Load models with eager attention, and remove temporary hooks on exit, including
   after failure.
-- Undo restores exact original-dtype snapshots, and for quantized weights the exact packed bytes and quantization state, in reverse order.
+- Undo restores exact original-dtype snapshots, and for quantized weights the exact packed
+  bytes and quantization state, in reverse order.
 - Count one pass per sequence for every base-model forward, including each generation
   step and failed calls, and reject calls over a cap before they run.
 - Dev data never becomes held-out data, and a failed held-out run keeps its
