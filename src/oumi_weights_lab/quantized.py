@@ -186,7 +186,8 @@ class FourBitCodec:
             for numbers, elements, offsets, data, absmax in pieces:
                 data = self._keep_unmoved(numbers, elements, offsets, data, absmax, moved)
                 device = self.parameter.device
-                self.parameter.data.view(-1).index_copy_(0, offsets.to(device), data.to(device))
+                # Index assignment, because MPS lacks index_copy before torch 2.8.
+                self.parameter.data.view(-1)[offsets.to(device)] = data.to(device)
                 self._store_absmax(numbers, absmax)
         return {"blocks_requantized": int(blocks.numel())}
 

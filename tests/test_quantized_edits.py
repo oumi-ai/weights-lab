@@ -599,3 +599,17 @@ def test_warning_points_at_the_caller(checkpoint, load):
         lab.undo()
         ours = [w for w in caught if "quantization step" in str(w.message)]
         assert [w.filename for w in ours] == [__file__]
+
+
+@pytest.mark.parametrize("method", FOUR_BIT)
+def test_edit_and_undo_on_mps(checkpoint, load, method):
+    if not torch.backends.mps.is_available():
+        pytest.skip("requires Apple MPS hardware")
+    if tuple(int(part) for part in torch.__version__.split("+")[0].split(".")[:2]) < (2, 5):
+        pytest.skip("quantized models on MPS need torch 2.5 or later")
+    lab = load(checkpoint("llama"), quantize=method, device="mps")
+    before = packed(lab)
+    lab.edit(Q_PROJ, lambda block: block * 0.5, index=(slice(0, 2), slice(None)))
+    assert not same_packed(before, packed(lab))
+    lab.undo()
+    assert same_packed(before, packed(lab))
