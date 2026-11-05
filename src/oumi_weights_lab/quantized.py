@@ -1,4 +1,4 @@
-"""Access to bitsandbytes-quantized weights: reads for every method, edits for nf4 and fp4.
+"""Access to bitsandbytes-quantized weights: reads and edits for nf4, fp4 and int8.
 
 Only package code uses this module. bitsandbytes is never imported here: a model can hold
 its layers only after the package has been imported, so the module looks for it in
@@ -72,26 +72,23 @@ class QuantizedWeight:
         """The logical weight as a float32 tensor on the CPU."""
         import torch
 
-        data = self.parameter.data.detach().cpu()
         if self.method == "int8":
-            scales = getattr(self.parameter, "SCB", None)
-            if scales is None:
-                scales = getattr(self.module.state, "SCB", None)
-            if scales is None:
-                raise RuntimeError(f"{self.name} has no int8 row scales to dequantize with")
-            return data.float() * scales.detach().cpu().float()[:, None] / 127
+            return Int8Codec(self.module, self.dtype).dequantize()
         import bitsandbytes.functional as functional
 
+        data = self.parameter.data.detach().cpu()
         values = functional.dequantize_4bit(data, _on_cpu(self.parameter.quant_state))
         return values.reshape(self.shape).to(torch.float32)
 
     def check_editable(self) -> None:
         """Raise ValueError unless an edit can change this weight block by block."""
         if self.method == "int8":
-            raise ValueError(
-                f"{self.name} is a int8 quantized weight; "
-                "editing quantized weights is not supported yet"
-            )
+            if self.parameter.has_fp16_weights:
+                raise ValueError(
+                    f"{self.name} keeps float weights (has_fp16_weights), so it has no int8 "
+                    "bytes to edit; edit the float parameter instead"
+                )
+            return
         if self.double_quant:
             raise ValueError(
                 f"{self.name} uses double quantization (bnb_4bit_use_double_quant), which shares "
@@ -110,13 +107,31 @@ class QuantizedWeight:
         state = getattr(self.parameter, "quant_state", None)
         return bool(getattr(state, "packing_format_for_cpu", False))
 
-    def _codec(self) -> FourBitCodec:
+    @property
+    def state(self) -> Any:
+        """The 4-bit quant state, which undo checks is the same object; int8 has none."""
+        return getattr(self.parameter, "quant_state", None)
+
+    @property
+    def blocksize(self) -> int:
+        """Weights per scale: the 4-bit block size, or the row length of an int8 weight."""
+        if self.method == "int8":
+            return int(self.shape[1])
+        return int(self.state.blocksize)
+
+    def _codec(self) -> FourBitCodec | Int8Codec:
         self.check_editable()
+        if self.method == "int8":
+            return Int8Codec(self.module, self.dtype)
         return FourBitCodec(self.parameter)
 
     def snapshot(self) -> dict[str, Any]:
         """CPU copies of the packed bytes and the scales, for ``restore``."""
         return self._codec().snapshot()
+
+    def live(self) -> dict[str, Any]:
+        """The tensors a snapshot copies, under the same part names, for undo to compare."""
+        return self._codec().live()
 
     def restore(self, snapshot: dict[str, Any]) -> None:
         """Write a ``snapshot`` back in place, bit for bit."""
@@ -125,7 +140,8 @@ class QuantizedWeight:
     def write(self, after: Any, before: Any) -> dict[str, Any]:
         """Requantize the blocks where ``after`` differs from ``before``, in place.
 
-        Both are float32 CPU tensors in the logical shape. Returns ``blocks_requantized``.
+        A block is 64 weights of a 4-bit weight, or one row of an int8 weight. Both tensors are
+        float32 CPU tensors in the logical shape. Returns ``blocks_requantized``.
         """
         return self._codec().write(after, before)
 
@@ -142,11 +158,11 @@ class FourBitCodec:
         self.parameter = parameter
         self.state = parameter.quant_state
 
+    def live(self) -> dict[str, Any]:
+        return {"data": self.parameter.data, "absmax": self.state.absmax}
+
     def snapshot(self) -> dict[str, Any]:
-        return {
-            "data": self.parameter.data.detach().cpu().clone(),
-            "absmax": self.state.absmax.detach().cpu().clone(),
-        }
+        return {name: part.detach().cpu().clone() for name, part in self.live().items()}
 
     def restore(self, snapshot: dict[str, Any]) -> None:
         import torch
@@ -221,6 +237,77 @@ class FourBitCodec:
         scales[blocks.to(scales.device)] = absmax.to(scales.device, scales.dtype)
 
 
+class Int8Codec:
+    """Row-local writes into an ``Int8Params``: LLM.int8 with one float32 scale per row.
+
+    A row quantizes on its own to exactly the bytes and scale the whole tensor gives it. The
+    scales sit on the weight until the first forward and on the layer's state after that, and
+    the bytes are shared by ``weight.data``, ``weight.CB`` and ``state.CB``, so every writer
+    and reader goes through the live copies listed here.
+    """
+
+    def __init__(self, module: Any, dtype: Any) -> None:
+        self.module = module
+        self.parameter = module.weight
+        self.dtype = dtype
+
+    def _tensors(self, name: str) -> list[Any]:
+        """The distinct live tensors that hold the bytes (``CB``) or the scales (``SCB``)."""
+        owners = (self.parameter, self.module.state)
+        if name == "CB":
+            found = [self.parameter.data] + [getattr(o, "CB", None) for o in owners]
+        else:
+            found = [getattr(o, "SCB", None) for o in owners]
+        unique: dict[Any, Any] = {}
+        for tensor in found:
+            if tensor is not None:
+                unique.setdefault((tensor.device, tensor.untyped_storage().data_ptr()), tensor)
+        return list(unique.values())
+
+    def _scales(self) -> Any:
+        scales = self._tensors("SCB")
+        if not scales:
+            raise RuntimeError("an int8 weight has no row scales to read")
+        return scales[0]
+
+    def dequantize(self) -> Any:
+        values = self.parameter.data.detach().cpu().float()
+        return values * self._scales().detach().cpu().float()[:, None] / 127
+
+    def live(self) -> dict[str, Any]:
+        return {"data": self.parameter.data, "scales": self._scales()}
+
+    def snapshot(self) -> dict[str, Any]:
+        return {name: part.detach().cpu().clone() for name, part in self.live().items()}
+
+    def restore(self, snapshot: dict[str, Any]) -> None:
+        import torch
+
+        with torch.no_grad():
+            for data in self._tensors("CB"):
+                data.copy_(snapshot["data"])
+            for scales in self._tensors("SCB"):
+                scales.copy_(snapshot["scales"])
+
+    def write(self, after: Any, before: Any) -> dict[str, Any]:
+        import bitsandbytes.functional as functional
+        import torch
+
+        rows = (after.detach() != before.detach()).any(dim=1).nonzero().flatten()
+        if rows.numel():
+            values = after.detach()[rows].to(self.dtype)
+            data, scales, _ = functional.int8_vectorwise_quant(values, threshold=0.0)
+            with torch.no_grad():
+                for target in self._tensors("CB"):
+                    target.index_copy_(0, rows.to(target.device), data.to(target.device))
+                self._store_scales(rows, scales)
+        return {"blocks_requantized": int(rows.numel())}
+
+    def _store_scales(self, rows: Any, scales: Any) -> None:
+        for target in self._tensors("SCB"):
+            target[rows.to(target.device)] = scales.to(target.device, target.dtype)
+
+
 def lookup(model: Any, name: str, dtype: Any = None) -> QuantizedWeight | None:
     """The quantized weight called ``name``, or None for ordinary parameters and unknown names.
 
@@ -276,13 +363,13 @@ def has_quantized_layers(model: Any) -> bool:
     return any(is_quantized(module) for module in model.modules())
 
 
-def editable(model: Any, name: str) -> QuantizedWeight | None:
+def editable(model: Any, name: str, dtype: Any = None) -> QuantizedWeight | None:
     """The quantized weight called ``name`` after checking an edit can change it, or None.
 
-    Raises ValueError for int8 weights, double-quantized weights, and weights bitsandbytes has
-    repacked for CPU kernels.
+    Raises ValueError for int8 layers that keep float weights, double-quantized weights, and
+    weights bitsandbytes has repacked for CPU kernels.
     """
-    weight = lookup(model, name)
+    weight = lookup(model, name, dtype)
     if weight is not None:
         weight.check_editable()
     return weight

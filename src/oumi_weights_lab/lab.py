@@ -128,7 +128,8 @@ def load_lab(config: dict[str, Any], session_path: Path) -> Lab:
     (nf4, fp4 or int8) loads the model with bitsandbytes on one cpu, mps or cuda device;
     it needs the ``quantized`` extra and refuses ``device_map`` and a checkpoint that
     another method already quantized. A checkpoint that bitsandbytes already quantized
-    loads as it is. Quantized weights are read-only. ``allow_hub_kernels`` lets kernel
+    loads as it is. Quantized weights can be edited with exact undo, except
+    double-quantized ones. ``allow_hub_kernels`` lets kernel
     code from the Hub run; without it none can. The worker creates the session and
     artifact directories first. Custom model code from the Hub is never enabled.
     """

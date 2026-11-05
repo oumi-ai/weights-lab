@@ -1,6 +1,6 @@
 # Quantized models
 
-`--quantize` loads the model with bitsandbytes so a large checkpoint fits in less memory. You can read, score, record, patch, and take activation gradients on the packed weights. nf4 and fp4 weights also edit, zero, swap, and project out, and undo restores them byte for byte. int8 weights are read-only.
+`--quantize` loads the model with bitsandbytes so a large checkpoint fits in less memory. You can read, score, record, patch, and take activation gradients on the packed weights. nf4, fp4, and int8 weights also edit, zero, swap, and project out, and undo restores them byte for byte.
 
 ## Choose a format
 
@@ -33,7 +33,7 @@ print([p for p in lab.parts("*layers.0.self_attn.q_proj*")])
 - `lab.parts` and `lab.measure` report the logical shape and dtype, and add a `quantization` block with the packed layout. `measure` and `lab.compare` use the dequantized values, so a quantized model compares against its float original. Layers that are `Conv1D` in the float model, such as GPT-2's, are stored `[out, in]` once quantized, so those show the transposed shape and comparing them with the float model raises a shape mismatch.
 - `lab.evaluate`, `lab.score`, generation, `lab.record`, `lab.patch`, `lab.heads`, and `lab.head_weights` work. `lab.gradient` skips quantized weights and returns the float ones; asking for a quantized weight by name is refused. Activation gradients with `modules=` work through quantized layers.
 - Edits to the float parameters (embeddings, norms, biases, `lm_head`) work and undo exactly.
-- `lab.edit`, `lab.zero`, `lab.swap`, and `lab.project_out` work on nf4 and fp4 weights; see Editing 4-bit weights below. On int8 weights they raise `ValueError` and change nothing.
+- `lab.edit`, `lab.zero`, `lab.swap`, and `lab.project_out` work on nf4, fp4, and int8 weights; see Editing 4-bit weights and Editing int8 weights below.
 - `lab.export` is refused; export from a float session.
 - `lab.save_edits` and `--resume` work for float-parameter edits, and `save_edits` refuses while an edit to a packed weight is active. Resume with the same `--quantize`, because the saved fingerprint covers the packed weights.
 
@@ -55,6 +55,16 @@ lab.undo(edit_id)
 - `lab.undo()` restores the packed bytes and scales exactly, newest edit first, so logits return bit for bit.
 
 Edits are refused, and nothing changes, for a checkpoint that was saved with double quantization (`bnb_4bit_use_double_quant`): its scales are shared across the whole tensor, so no edit can stay inside a block. Reload the float checkpoint with `--quantize nf4` instead. A weight that bitsandbytes repacked for CPU kernels is refused too; sessions turn that repack off when they load a model.
+
+## Editing int8 weights
+
+int8 edits take the same arguments and return the same record, and undo is exact in the same way. The differences:
+
+- An int8 weight keeps one scale per row, so a row is the block. An edit rewrites only the rows that hold a changed value, and `blocks_requantized` counts rows. In the record's `quantization` block, `blocksize` is the row length.
+- A row's scale is its largest magnitude divided into 127 steps. If your edit changes the row's largest value, the scale changes and every other value in that row is rounded again. That shows up in `collateral_l2`.
+- Zeroing a whole row gives it scale 0, and it stays finite.
+- Undo restores the bytes and the scales, before or after the first forward pass, even though bitsandbytes moves the scales from the weight to the layer on that pass.
+- A layer that keeps float weights (`has_fp16_weights`) is refused. The lab does not load layers that way.
 
 ## Prequantized checkpoints
 
