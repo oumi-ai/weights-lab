@@ -41,7 +41,7 @@ lab.edit(name, rank_one, note="rank-one update")
 
 ## Tied embeddings
 
-Editing the input embedding changes a tied output head too, because both names point at one tensor. Check `lab.parts()` for the aliased names before you edit, and decide whether you want both changed.
+Editing the input embedding changes a tied output head too, because both names point at one tensor. `lab.parts()` lists every alias but does not mark them. Check whether two names share storage with `lab.model.get_parameter(a) is lab.model.get_parameter(b)`, and decide whether you want both changed.
 
 ```python
 rows = lab.project_out("model.embed_tokens.weight", direction, index=[2, 3])
@@ -53,17 +53,19 @@ A PEFT `lora.Linear` wrapper is not a `Linear`, so `project_out` refuses it. Edi
 
 ## Check, then undo
 
-Record the module output before and after, and compare the component along the direction.
+Record the module output before and after, and compare the component along the direction. The module has a bias, so project both the weight and the bias, then undo both.
 
 ```python
-unit = direction / direction.norm()
+unit = direction.float() / direction.float().norm()
 with lab.record(module) as before, torch.no_grad():
     lab.model(**inputs)
 lab.project_out(f"{module}.weight", direction)
+lab.project_out(f"{module}.bias", direction)
 with lab.record(module) as after, torch.no_grad():
     lab.model(**inputs)
 print((before[module][0] @ unit).abs().max(), (after[module][0] @ unit).abs().max())
 lab.undo()
+lab.undo()
 ```
 
-The component should fall to about zero. Undo restores the original dtype exactly.
+The component falls to about zero only because both were projected. Each undo restores the original dtype exactly.

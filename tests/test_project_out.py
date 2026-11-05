@@ -213,3 +213,35 @@ def test_peft_base_layer_and_lora_b(tmp_path):
         lab.project_out(f"{owner}.weight", d)
     with pytest.raises(ValueError, match="Unknown parameter"):
         lab.project_out(f"{owner}.nothing", d)
+
+
+@pytest.mark.parametrize("magnitude", [1e30, 1e-30])
+def test_extreme_direction_scales_still_project(tmp_path, magnitude):
+    lab = llama(tmp_path)
+    d = torch.randn(8)
+    lab.project_out(DOWN, d * magnitude)
+    after = lab.model.get_parameter(DOWN).detach()
+    assert (d / d.norm() @ after).norm() < 1e-5
+
+
+def test_empty_slice_is_refused_without_an_edit(tmp_path):
+    lab = llama(tmp_path)
+    for index in (slice(5, 2), slice(100, 200)):
+        with pytest.raises(ValueError):
+            lab.project_out(DOWN, torch.ones(8), index=index)
+    assert lab.edits() == []
+
+
+def test_float64_parameter_keeps_precision(tmp_path):
+    lab = llama(tmp_path, dtype=torch.float64)
+    d = torch.randn(8, dtype=torch.float64)
+    lab.project_out(DOWN, d)
+    after = lab.model.get_parameter(DOWN).detach()
+    assert (d / d.norm() @ after).norm() < 1e-12
+
+
+def test_integer_direction_is_accepted(tmp_path):
+    lab = llama(tmp_path)
+    lab.project_out(DOWN, torch.arange(1, 9))
+    d = torch.arange(1, 9).float()
+    assert (d / d.norm() @ lab.model.get_parameter(DOWN)).norm() < 1e-5

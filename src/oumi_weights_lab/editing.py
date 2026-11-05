@@ -117,6 +117,8 @@ def _projection_index(index: Any, size: int) -> Any:
             for part in parts
         ):
             raise ValueError("A slice index needs integer bounds and a step of 1")
+        if len(range(size)[index.start : index.stop]) == 0:
+            raise ValueError(f"The slice selects nothing on an axis of length {size}")
         return slice(index.start, index.stop)
     if (
         isinstance(index, list)
@@ -284,13 +286,16 @@ class EditBook:
         vector = torch.as_tensor(direction)
         if vector.ndim != 1 or vector.shape[0] != length:
             raise ValueError(f"direction must be 1-D with length {length}")
-        vector = vector.detach().to(torch.float32)
+        vector = vector.detach().to(torch.promote_types(vector.dtype, torch.float32))
         if not bool(torch.isfinite(vector).all()):
             raise ValueError("direction must be finite")
-        norm = vector.norm()
-        if norm == 0:
+        largest = vector.abs().max()
+        if largest == 0:
             raise ValueError("direction must not be zero")
-        unit = vector / norm
+        # Scaling by the largest entry first keeps huge or tiny vectors from
+        # overflowing or underflowing in the norm.
+        vector = vector / largest
+        unit = vector / vector.norm()
         if parameter.ndim == 1:
             if index is not None:
                 raise ValueError("A bias takes no index")
@@ -298,13 +303,11 @@ class EditBook:
         else:
             other = parameter.shape[1 - axis]
             selected = _projection_index(index, other)
-            if isinstance(index, int) and not isinstance(index, bool):
-                selected = [index]
             full = (slice(None), selected) if axis == 0 else (selected, slice(None))
 
         def project(block: Any) -> Any:
-            work = block.to(torch.float32)
-            direction_ = unit.to(work.device)
+            work = block.to(torch.promote_types(block.dtype, torch.float32))
+            direction_ = unit.to(work.device, work.dtype)
             if work.ndim == 1:
                 work = work - scale * direction_ * (direction_ @ work)
             elif axis == 0:
