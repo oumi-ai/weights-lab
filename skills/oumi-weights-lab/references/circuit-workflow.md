@@ -1,6 +1,6 @@
 # Find and test a circuit
 
-A circuit claim says a small set of components carries a behavior. This recipe chains the other recipes in the order that tests such a claim. Each step names the recipe that does the work.
+A circuit claim says a set of components carries a behavior. This recipe is the protocol for making one: locate candidates, state a hypothesis, test it causally, measure how much of the behavior it explains, try to prove it wrong, and report what failed along with what held. Each step names the recipe that does the work; [Choose a method](method-map.md) says what each method can and cannot show. [What a finished circuit looks like](worked-circuits.md) shows the result on public models.
 
 ## 1. Pick a behavior and a contrast pair
 
@@ -15,38 +15,47 @@ def margin(prompt):
 baseline = {"clean": margin(clean_text), "corrupt": margin(corrupt_text)}
 ```
 
-If the two baselines are close, the pair does not isolate the behavior. Pick another pair.
+If the two baselines are close, the pair does not isolate the behavior. Pick another pair. Build a set of pairs from templates as well, because step 6 needs prompts the search did not use.
 
 ## 2. Locate candidates
 
 - [Logit lens](logit-lens.md): find the layer where the answer first becomes the top token.
-- [Attribution patching](attribution-patching.md): rank module and token sites. The ranking is an estimate.
-- [Attention heads](heads.md): list heads and capture their attention with `record(..., at="attention")`.
-- [Circuit analyses](circuit-analyses.md): `logit_attribution` shows which heads and MLPs write the answer, and `edge_attribution` and `find_circuit` propose a circuit from the same contrast pair.
+- `logit_attribution` ([Circuit analyses](circuit-analyses.md)): find the heads and MLPs that write the answer directly.
+- [Attribution patching](attribution-patching.md) and `edge_attribution`: rank sites and edges. The ranking is an estimate.
+- [Attention heads](heads.md): capture attention with `record(..., at="attention")`.
+- [Sparse autoencoder features](saes.md) and [Attribution graphs](attribution-graphs.md): find features and how they connect on one prompt.
 
-Take a short list. These steps produce leads, not results.
+These steps produce leads, not results. Keep going past the first strong lead: list every candidate that could matter, not just the one that fits your first idea.
 
-## 3. Name a hypothesis before intervening
+## 3. State the hypothesis and its rivals
 
-Write down which components you think carry the behavior. For each intervention below, write what you expect if you are right and what would show you are wrong. Do this before running anything, so the result cannot choose its own story.
+Write down which components you think carry the behavior and what each one does. Then write at least one rival hypothesis that fits the leads as well, such as "a different head with the same attention pattern does the copying", or "the direction the probe found is decodable but unused". For each intervention below, write what you expect under each hypothesis. Do this before running anything, so the result cannot choose its own story.
 
-## 4. Intervene
+## 4. Test it causally
 
-- Sufficient: [patch](activation-patching.md) the clean activations into the corrupt run at the named sites. If the margin moves toward the clean one, and further than it does under the control patch, those sites are enough to produce the behavior in this pair.
-- Necessary: in the clean run, ablate the same components with [zero or swap](zero-swap.md), `patch`, or [project_out](direction-edits.md). For a head, see [Attention heads](heads.md). If the clean margin falls well below its baseline, and falls more than it does under the control ablation, they are needed. The answer rarely flips, so look at the margin, not the winning token.
-- Paths: to ask whether one component's effect reaches another, use `path_patch` ([Circuit analyses](circuit-analyses.md)) instead of patching whole sites by hand. `find_circuit` runs the patch test for a whole proposed circuit and reports its faithfulness.
-- Control: repeat each intervention at an unrelated site of the same kind, such as another head in the same layer or another token position. Compare the effect sizes.
-- Undo: remove every edit newest first, then score again. The restored scores must equal the baseline.
+- **Sufficient:** [patch](activation-patching.md) the clean activations into the corrupt run at the named sites. If the margin moves toward the clean one, and further than under a control patch, those sites are enough in this pair.
+- **Necessary:** in the clean run, ablate the same components with [zero or swap](zero-swap.md), `patch`, or [project_out](direction-edits.md). If the clean margin falls well below its baseline, and further than under a control ablation, they are needed. Look at the margin, not the winning token.
+- **Routes:** where the hypothesis says A feeds B, test that route with `path_patch` ([Circuit analyses](circuit-analyses.md)).
+- **Controls:** repeat each intervention at an unrelated site of the same kind, such as another head in the same layer.
+- **Undo:** remove every edit newest first, then score again. The restored scores must equal the baseline.
 
-## 5. Validate beyond the pair
+## 5. Measure how faithful and complete it is
 
-Run the same interventions on new prompts and controlled variants, such as other names or other templates. A mechanism that works on one pair may only fit that pair. Report how many variants moved the way the hypothesis predicts and how many did not.
+- **Faithfulness:** run the model with everything outside your components set to its corrupt value, and see how much of the clean-minus-corrupt margin remains. `find_circuit` reports this for a set of edges. A claim that carries 30% of the behavior is a partial claim; say so.
+- **Completeness:** for a few subsets of your components, remove them from the circuit-only run and from the full model. If the full model barely moves while the circuit collapses, something outside your set compensates.
+- **Minimality:** remove each component from the circuit-only run. One whose removal changes nothing does not belong in the claim.
 
-If you chose among many sites or settings, set aside held-out rows first and run one final evaluation on them, as [Evaluation reports and screens](evaluation.md) describes. A single pre-planned set of sites needs no split.
+## 6. Try to prove it wrong
 
-## 6. Caveats
+- Run the interventions that separate your hypothesis from its rivals.
+- **Look-alikes:** check every component that matches your lead, such as all heads with the same attention pattern and every direction a probe finds. Ablate each alone. Only the ones whose ablation matters belong in the claim.
+- **Redundancy:** when one ablation changes little, ablate pairs and groups. Backup components hide each other.
+- **Opposition:** look for parts that push against the answer; they change what faithfulness means.
+- **New prompts:** rerun the tests on prompts and templates the search did not use, and count how many moved as predicted.
+- If you chose among many sites or settings, run one final evaluation on held-out rows, as [Evaluation reports and screens](evaluation.md) describes.
 
-- Representations can be distributed and overlapping. An ablation that changes nothing does not show a part is unused, because other parts can compensate. Ablate groups, such as all heads in a layer.
-- An ablation that breaks the behavior does not show the part is the whole mechanism. Patch only the named components into the corrupt run and check that they restore the behavior by themselves.
-- An attention pattern, a probe score ([Document-split probes](probes.md)) or a plot is a lead, not evidence. Confirm it with an intervention.
-- Report the pair, the sites, the baseline, each intervention and its control, the restored result, the new prompts, forward passes, and what the evidence does not show. See the report item in [Worked example](worked-example.md).
+## 7. Report what held and what failed
+
+Report the behavior and metric, the prompt sets, each component's role with its causal test, control and effect size, faithfulness and completeness, the redundancy search, the rival hypotheses and the tests that ruled them out, the restored result, forward passes, and what the evidence does not show. A failed hypothesis is a result; list it. See the report item in [Worked example](worked-example.md).
+
+If no method answers a step's question, don't drop the step: see [When current methods fall short](new-methods.md).
