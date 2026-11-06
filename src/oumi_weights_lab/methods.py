@@ -2,14 +2,19 @@
 
 ``run_with`` runs the model once with activations or weights replaced, ``jacobian``, ``jvp``
 and ``vjp`` differentiate between two recordable points, and ``sweep`` tries many
-interventions in one batched pass. All three reuse the hooks of ``inspection``, count passes
+interventions in one batched pass. ``ablation_scan`` zeroes each head or MLP in turn and
+scores a set of rows. All of them reuse the hooks of ``inspection``, count passes
 through the lab's normal counter, and leave nothing attached afterward.
 """
 
 from __future__ import annotations
 
-from contextlib import ExitStack
+import math
+from contextlib import ExitStack, contextmanager
 
+from .budget import BudgetExceeded, PassBudget
+from .directions import _decoder_layers
+from .evaluation_data import _tasks
 from .inspection import (
     _PATCH_AT,
     _RECORD_AT,
@@ -24,7 +29,7 @@ from .inspection import (
     _site_hook,
 )
 from .quantized import lookup
-from .scoring import _pad_token
+from .scoring import _check_batch_size, _pad_token
 
 _INTERVENTION_KEYS = {"module", "at", "positions", "value"}
 _RECORD_KEYS = {"module", "at", "positions"}
@@ -618,3 +623,227 @@ class MethodsMixin:
             }
             for row in range(count)
         ]
+
+    # Ablation scan -------------------------------------------------------------------
+
+    def ablation_scan(
+        self, rows, parts=None, *, metric="accuracy", groups=None, batch_size=8, max_passes=None
+    ):
+        """Zero each attention head and MLP in turn and score ``rows`` with each one removed.
+
+        This is the first sweep most analyses start with, run in batched forwards with no
+        run directory per part. ``rows`` are in the format of ``evaluate``'s likelihood mode
+        (prompt, options, answer) and are scored as it scores them: the same left padding,
+        position ids, prefix attachments and pass budget. The baseline is the model as it
+        stands, so active edits count as part of it.
+
+        ``parts`` is None for every attention head and every MLP, or a list whose entries
+        are ``("head", layer, head)``, ``("mlp", layer)``, or a list of those, which are
+        ablated together as one group. ``groups="layers"`` makes one group per layer from
+        the given heads (every head when ``parts`` is None; MLP parts are refused).
+        ``groups="pairs"`` ablates every pair of the given entries together. A head is
+        ablated by zeroing its slice of the attention output projection's input through a
+        temporary hook, which matches ``lab.zero`` on the head's ``o`` part. An MLP is
+        ablated by zeroing its output. Nothing is written into the weights and nothing
+        stays attached, even after an error. Train/eval modes and RNG state are restored.
+
+        ``metric`` is "accuracy" (a tie for the best option is incorrect, as in
+        ``evaluate``), "margin" (the mean over rows of the answer's log probability minus
+        the best other option's; every row needs two options), or a callable. A callable
+        takes a list with one ``{option label: log probability}`` dict per row, in row
+        order, and returns a finite number where higher is better.
+
+        Passes are rows x options x (1 + parts), one per sequence. The whole scan is checked
+        against the session budget and ``max_passes`` before anything runs, and a scan that
+        does not fit raises BudgetExceeded naming the passes it needs. Refuses unknown
+        layers or heads, duplicate parts, an unknown metric or grouping, a pass count over
+        the cap, and LoRA models and attention layouts that ``heads`` refuses.
+
+        Returns ``{"baseline": value, "parts": [{"part", "value", "delta"}, ...],
+        "passes": n}``, sorted by ``delta`` (value minus baseline) from the largest drop
+        up. A single part is a tuple and a group is a list of tuples.
+
+        What a scan cannot show. A part whose ablation changes nothing may have a backup
+        that takes over, so scan groups as well. A part whose ablation breaks the behavior
+        may be one of several that matter, or may only feed what comes after it, so it is
+        not the whole mechanism. For the next step, ``find_circuit`` searches for the parts
+        that carry the behavior together, and ``path_patch`` tests which connections between
+        them matter.
+        """
+        _eager(self.model)
+        if not callable(metric) and metric not in ("accuracy", "margin"):
+            raise ValueError("metric must be 'accuracy', 'margin' or a callable")
+        if groups not in (None, "layers", "pairs"):
+            raise ValueError("groups must be None, 'layers' or 'pairs'")
+        _check_batch_size(batch_size)
+        self._check_batching(batch_size)
+        PassBudget(max_passes)
+        tasks, _ = _tasks(rows, "likelihood")
+        if metric == "margin" and any(len(task["options"]) < 2 for task in tasks):
+            raise ValueError("the margin metric needs two options in every row")
+        with self._prompts_prepared_once():
+            self._check_inputs(tasks, "likelihood", {})
+        targets = self._scan_targets(parts, groups)
+        total = sum(len(task["options"]) for task in tasks) * (1 + len(targets))
+        with self.limit_passes(max_passes):
+            try:
+                self._check_budget(total)
+            except BudgetExceeded as error:
+                raise BudgetExceeded(f"the scan needs {total} passes: {error}") from None
+            before = self._forward_passes
+            results = []
+            with self._evaluation_mode(), self._prompts_prepared_once():
+                # Tokenize once; every part scores the same sequences.
+                encoded = self._encoded_rows(tasks)
+                baseline = self._scan_value(tasks, encoded, metric, batch_size)
+                for item, sites in targets:
+                    with self._ablated(sites):
+                        value = self._scan_value(tasks, encoded, metric, batch_size)
+                    results.append({"part": item, "value": value, "delta": value - baseline})
+            passes = self._forward_passes - before
+        results.sort(key=lambda entry: entry["delta"])
+        return {"baseline": baseline, "parts": results, "passes": passes}
+
+    def _scan_targets(self, parts, groups):
+        """The scan's targets as ``(reported part, sites)``; sites map (module, at) to ranges."""
+        found = {}
+
+        def heads():
+            if not found:
+                found.update({(entry["layer"], entry["head"]): entry for entry in self.heads()})
+            return found
+
+        blocks = {}
+
+        def mlp_module(layer):
+            if not blocks:
+                blocks.update(_decoder_layers(self.model))
+            if layer not in blocks:
+                raise ValueError(f"layer {layer} not found; layers are {sorted(blocks)}")
+            name = f"{blocks[layer]}.mlp"
+            if name not in dict(self.model.named_modules()):
+                raise ValueError(f"layer {layer} has no module named {name!r}")
+            return name
+
+        def one(part):
+            kind = part[0] if isinstance(part, (list, tuple)) and part else None
+            if kind == "head" and len(part) == 3:
+                layer, head = part[1:]
+                if not _is_index(layer) or not _is_index(head):
+                    raise ValueError(f"{part!r}: layer and head must be integers")
+                layers = sorted({key[0] for key in heads()})
+                if layer not in layers:
+                    raise ValueError(f"layer {layer} not found; layers are {layers}")
+                if (layer, head) not in found:
+                    count = sum(key[0] == layer for key in found)
+                    raise ValueError(f"layer {layer} has heads 0 to {count - 1}, not head {head}")
+                return ("head", layer, head)
+            if kind == "mlp" and len(part) == 2:
+                if not _is_index(part[1]):
+                    raise ValueError(f"{part!r}: layer must be an integer")
+                mlp_module(part[1])
+                return ("mlp", part[1])
+            raise ValueError(
+                f"{part!r} is not a part: use ('head', layer, head), ('mlp', layer), or a list "
+                "of those as one group"
+            )
+
+        if parts is None:
+            items = [("head", *key) for key in heads()]
+            if groups != "layers":
+                items += [("mlp", layer) for layer in sorted({key[0] for key in found})]
+            items = [one(item) for item in items]
+        else:
+            if not isinstance(parts, (list, tuple)) or not parts:
+                raise ValueError("parts must be None or a nonempty list")
+            items = [
+                [one(member) for member in entry]
+                if isinstance(entry, (list, tuple))
+                and entry
+                and isinstance(entry[0], (list, tuple))
+                else one(entry)
+                for entry in parts
+            ]
+        members = [m for item in items for m in ([item] if isinstance(item, tuple) else item)]
+        if len(set(members)) != len(members):
+            raise ValueError("a part appears more than once in parts")
+        if groups == "layers":
+            if any(not (isinstance(item, tuple) and item[0] == "head") for item in items):
+                raise ValueError("groups='layers' groups heads by layer; give only head parts")
+            by_layer = {}
+            for item in items:
+                by_layer.setdefault(item[1], []).append(item)
+            items = list(by_layer.values())
+        elif groups == "pairs":
+
+            def listed(item):
+                return [item] if isinstance(item, tuple) else item
+
+            items = [
+                [*listed(left), *listed(right)]
+                for index, left in enumerate(items)
+                for right in items[index + 1 :]
+            ]
+        if not items:
+            raise ValueError("there are no parts to ablate")
+        return [(item, self._scan_sites(item, heads, mlp_module)) for item in items]
+
+    @staticmethod
+    def _scan_sites(item, heads, mlp_module):
+        sites = {}
+        for member in [item] if isinstance(item, tuple) else item:
+            if member[0] == "head":
+                o_input = heads()[member[1:]]["o_input"]
+                sites.setdefault((o_input["module"], "input"), []).append(
+                    tuple(o_input["features"])
+                )
+            else:
+                sites[(mlp_module(member[1]), "output")] = None
+        return sites
+
+    @contextmanager
+    def _ablated(self, sites):
+        """Zero feature ranges of module inputs, or whole module outputs, for the duration."""
+        import torch
+
+        def zero_features(ranges):
+            def apply(value):
+                value = value.clone()
+                for low, high in ranges:
+                    value[..., low:high] = 0
+                return value
+
+            return apply
+
+        hooks = []
+        try:
+            for (name, at), ranges in sites.items():
+                transform = torch.zeros_like if ranges is None else zero_features(ranges)
+                hooks.append(_site_hook(self.model.get_submodule(name), at, transform))
+                hooks[-1].register()
+            yield
+        finally:
+            for hook in hooks:
+                hook.remove()
+
+    def _scan_value(self, tasks, encoded, metric, batch_size):
+        """The metric over all rows, scored through the batched path ``evaluate`` uses."""
+        scores = [row for _, row in self._score_encoded(encoded, batch_size)]
+        if callable(metric):
+            value = metric([dict(row) for row in scores])
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("a metric callable must return a number")
+            if not math.isfinite(value):
+                raise ValueError("a metric callable must return a finite number")
+            return float(value)
+        total = 0.0
+        for task, row in zip(tasks, scores, strict=True):
+            gold = row[task["answer"]]
+            others = [value for label, value in row.items() if label != task["answer"]]
+            # A tie for the best option names no prediction, so it is never correct.
+            total += gold - max(others) if metric == "margin" else float(gold > max(others))
+        return total / len(tasks)
+
+
+def _is_index(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0

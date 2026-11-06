@@ -53,7 +53,7 @@ with lab.patch(head["o_input"]["module"], drop, positions="all", at="input"), to
     logits = model(**inputs).logits
 ```
 
-The two give the same logits. With grouped-query attention, zeroing `k` or `v` parts changes every head in `head["group"]`, because they share those rows. Zero `o` to ablate one head.
+The two give the same logits. To ablate every head and MLP in turn and score a set of rows, don't loop over these: `lab.ablation_scan(rows)` does it in batched passes, with the patch form and nothing written to the weights. It is a first sweep, so scan groups too (`groups="layers"`) and follow it with `find_circuit`. With grouped-query attention, zeroing `k` or `v` parts changes every head in `head["group"]`, because they share those rows. Zero `o` to ablate one head.
 
 ## Search for induction heads
 

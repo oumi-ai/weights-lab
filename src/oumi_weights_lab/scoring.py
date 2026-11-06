@@ -553,12 +553,22 @@ class ScoringMixin(EvaluationMixin):
         Batches are never reordered, so the same rows and batch size always run
         the same forwards.
         """
+        yield from self._score_encoded(self._encoded_rows(tasks), batch_size)
+
+    def _encoded_rows(self, tasks: list[dict[str, Any]]) -> list[list[tuple]]:
+        """Each row's sequences as ``(row, label, prompt tokens, answer tokens)``."""
         sequences = []
         for index, task in enumerate(tasks):
             prompt_ids, answers = self._encode(task["prompt"], task["options"])
             sequences.append(
                 [(index, label, prompt_ids, answer_ids) for label, answer_ids in answers.items()]
             )
+        return sequences
+
+    def _score_encoded(
+        self, sequences: list[list[tuple]], batch_size: int
+    ) -> Iterator[tuple[int, dict[str, float]]]:
+        """``_score_rows`` for rows already encoded, so a caller can score them repeatedly."""
         pending: dict[int, dict[str, float]] = {}
         remaining = {index: len(row) for index, row in enumerate(sequences)}
         next_row = 0
