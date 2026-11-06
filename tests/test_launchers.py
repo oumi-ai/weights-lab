@@ -203,9 +203,9 @@ def test_sky_checkout_installs_its_source_with_adapter_support(tmp_path):
         "-m",
         "pip",
         "install",
-        ".[adapters,datasets,multi-gpu,quantized]",
+        ".[adapters,datasets,multi-gpu,quantized,saes]",
     ]
-    assert result["package"] == ".[adapters,datasets,multi-gpu,quantized]"
+    assert result["package"] == ".[adapters,datasets,multi-gpu,quantized,saes]"
 
 
 def installed_copy(tmp_path, monkeypatch, origin):
@@ -229,7 +229,7 @@ def test_sky_git_install_installs_the_same_commit_on_the_worker(tmp_path, monkey
     installed_copy(tmp_path, monkeypatch, origin)
     runner = Recorder()
     result = SkyPilotLauncher("weights-test", runner=runner).start("model", "/tmp/session")
-    requirement = f"oumi-weights-lab[adapters,datasets,multi-gpu,quantized] @ git+https://github.com/oumi-ai/weights-lab@{commit}"
+    requirement = f"oumi-weights-lab[adapters,datasets,multi-gpu,quantized,saes] @ git+https://github.com/oumi-ai/weights-lab@{commit}"
     assert shlex.split(runner.task["setup"]) == ["python3", "-m", "pip", "install", requirement]
     assert "workdir" not in runner.task
     assert result["package"] == requirement

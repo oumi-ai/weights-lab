@@ -27,9 +27,12 @@ if command -v uv >/dev/null 2>&1 && [ -f "$root/pyproject.toml" ] && [ -f "$root
             quantized=
         fi
     fi
+    # The saes extra needs no gate: every package it adds ships a wheel on the platforms
+    # this wrapper handles (checked in uv.lock), apart from two pure-Python ones that uv
+    # builds from source.
     # Run the module, not the console script, so PATH lookup cannot find this wrapper.
     exec uv run ${quiet:+"$quiet"} --frozen --no-dev \
-        --extra adapters --extra datasets --extra multi-gpu $quantized \
+        --extra adapters --extra datasets --extra multi-gpu --extra saes $quantized \
         --project "$root" python -m oumi_weights_lab "$@"
 fi
 

@@ -29,6 +29,7 @@ adapters = ["peft>=0.13"]
 datasets = ["datasets>=4"]
 multi-gpu = ["accelerate>=1.0"]
 quantized = ["accelerate>=1.0", "bitsandbytes>=0.50"]
+saes = ["sae-lens>=6.55"]
 
 [project.scripts]
 oumi-weights-lab = "oumi_weights_lab.cli:main"

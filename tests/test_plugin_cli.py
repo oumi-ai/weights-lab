@@ -73,6 +73,8 @@ def test_wrapper_runs_the_plugin_copy_with_its_lockfile(tmp_path):
         "--extra",
         "multi-gpu",
         "--extra",
+        "saes",
+        "--extra",
         "quantized",
     ]
     expected += ["--project"]
@@ -178,4 +180,4 @@ def test_wrapper_installs_the_quantized_extra_only_where_bitsandbytes_has_a_whee
     assert run(plugin, path, "peek", "--session", "s").returncode == 0
     arguments = log.read_text().splitlines()
     assert ("quantized" in arguments) is quantized
-    assert {"adapters", "datasets", "multi-gpu"} <= set(arguments)
+    assert {"adapters", "datasets", "multi-gpu", "saes"} <= set(arguments)

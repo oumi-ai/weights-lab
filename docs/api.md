@@ -576,6 +576,76 @@ full circuit equals the clean metric) hold to the precision of the model's dtype
   stream, attention output, or logits (a residual multiplier, a logit softcap). The call
   refuses rather than return approximate numbers.
 
+## Sparse autoencoders
+
+Needs the `saes` extra (SAELens), which the plugin and remote workers include. `lab.load_sae` reads a public sparse autoencoder or
+transcoder; the returned `LabSAE` reads, patches, and steers its features through
+`lab.record` and `lab.patch`, so pass counting, positions, and cleanup on error behave
+as they do there.
+
+```python
+sae = lab.load_sae("gpt2-small-res-jb", "blocks.8.hook_resid_pre")
+result = sae.features(["The capital of France is"], positions="all")
+print(result["fvu"], result["l0"])  # check these before reading features
+with sae.patch({1234: 0.0}, positions="all"):
+    ablated = lab.score("The capital of France is", [" Paris", " Rome"])
+```
+
+- `load_sae(release=None, sae_id=None, *, path=None, device=None,
+  allow_model_mismatch=False, model_kwargs=None)` loads by SAELens release and id, or from
+  a local directory in SAELens's format, onto `device` (default the session's). It
+  refuses, before any forward pass: a hook name that `hook_site` does not map; a site
+  whose width is not `d_in` (a transcoder's output not `d_out`); a model mismatch where
+  the SAE's model name is known (a small table covers `gpt2`, `gpt2-small`, and
+  `gemma-2-*`; a name it does not know loads with a warning and `model_check` saying it
+  was not checked; `allow_model_mismatch=True` accepts a fine-tune); an architecture
+  without an affine decoder (standard, gated, JumpReLU, top-k, and the transcoder
+  variants are supported); `normalize_activations` other than `none`, `layer_norm`, and
+  `constant_norm_rescale`; and an adapter (PEFT) session. Quantized sessions work, since
+  only activations are read. Raises `ImportError` naming the extra when SAELens is
+  missing.
+- `hook_site(lab, hook_name, model_kwargs=None)` maps a TransformerLens hook name to a
+  `Site` with `module`, `at`, `width`, and the transform that makes a Hugging Face
+  activation match the dictionary's training data. Mapped: `blocks.L.` followed by
+  `hook_resid_pre` (block input), `hook_resid_post` (block output), `hook_resid_mid`,
+  `hook_mlp_in`, `hook_attn_out`, `hook_mlp_out`, `attn.hook_z` (the output projection's
+  input), `ln2.hook_normalized`, and `mlp.hook_in`. Gemma 2's attention and MLP outputs
+  are read after their post-norms. Anything else raises `ValueError`.
+- SAELens loads a model without TransformerLens's weight processing, then applies the
+  SAE's recorded `model_from_pretrained_kwargs`. `hook_site` applies the same: with
+  `center_writing_weights` (`gpt2-small-res-jb` records it) the residual stream,
+  attention output, and MLP output of a LayerNorm model lose their mean over the hidden
+  dimension; with `fold_value_biases` (and `fold_ln`) `hook_z` loses the value bias and
+  the norm's bias. Where a release records nothing, pass `model_kwargs` to say what it
+  was trained under, and check `fvu`. Normalized sites and `hook_resid_mid` can be read
+  but not edited: `patch` and `steer` raise `ValueError`.
+- `LabSAE` has `module`, `at`, `hook_name`, `d_in`, `d_sae`, `kind` (`"sae"` or
+  `"transcoder"`), `output_module` and `output_at` (transcoders), `model_check`,
+  `neuronpedia_id`, `prepend_bos`, and the SAELens object as `sae`.
+- `encode(activations)` takes an activation as the lab records it and applies the site
+  transform; `decode(features)` returns the reconstruction in the dictionary's
+  coordinates. SAELens subtracts and adds `b_dec` inside these, so the lab does not.
+  `transform(x)` is the site transform alone. `decoder_rows(indices)` returns the vectors
+  a unit rise in each feature adds. They are not unit norm, except for a top-k SAE that
+  rescales by decoder norm.
+- `features(inputs, positions=None)` runs the model once per sequence and returns
+  `features` (`[rows, d_sae]`, CPU float32), `sequence`, `position`, `rows`, and `mse`,
+  `fvu` (fraction of variance unexplained across the rows), and `l0`. `inputs` is text, a
+  list of texts, or a dict with `input_ids`. Text gets the BOS token when the SAE was
+  trained with one. Positions are as for `record`; padding in `attention_mask` is left
+  out. A transcoder is scored on the output it predicts.
+- `patch(edits, positions=None)` is a context manager. `edits` maps a feature index to a
+  value or to a callable of its current value. The site changes by
+  `(f_new - f_old)[changed] @ W_dec[changed]`, so the reconstruction error is kept, and
+  an edit that changes nothing leaves the activation unchanged to the bit. A transcoder
+  changes its output from features read at its input.
+- `steer(features, positions=None)` adds `scale * decoder row` for each `{index:
+  scale}`. For `layer_norm` and `constant_norm_rescale` SAEs the push is scaled by each
+  token's own normalization.
+- `labels(indices, timeout=5.0)` returns Neuronpedia's explanation for each index, or
+  `None` when there is no id, no label, or the network does not answer in time. Found
+  labels are cached under `artifacts/saes`. A label is a lead, not evidence.
+
 ## Attachments (experimental)
 
 `lab.attach(component, mode="prefix")` transforms prompts for `generate`, `score`,

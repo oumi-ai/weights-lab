@@ -14,6 +14,7 @@ from .hf_data import hf_rows
 from .inspection import InspectionMixin
 from .methods import MethodsMixin
 from .persistence import PersistenceMixin
+from .saes import SAEMixin
 from .scoring import ScoringMixin
 from .session import DTYPES, QUANTIZE
 
@@ -28,6 +29,7 @@ class Lab(
     AttachmentMixin,
     PersistenceMixin,
     AnalysesMixin,
+    SAEMixin,
 ):
     """A loaded model, tokenizer, and the session's artifact directory.
 

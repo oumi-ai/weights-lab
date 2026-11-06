@@ -67,8 +67,11 @@ layer 3's MLP in Qwen/Qwen3-0.6B changes its answers to the questions in caps.js
 To load LoRA adapters, Hugging Face datasets with `lab.hf_rows`, one model across
 several GPUs (`start --device-map balanced`), or a 4-bit or 8-bit model
 (`start --quantize nf4`), install the CLI as
-`uv tool install 'oumi-weights-lab[adapters,datasets,multi-gpu,quantized] @ git+https://github.com/oumi-ai/weights-lab'`.
-The Claude Code plugin includes all four.
+`uv tool install 'oumi-weights-lab[adapters,datasets,multi-gpu,quantized,saes] @ git+https://github.com/oumi-ai/weights-lab'`.
+The `saes` extra adds sparse autoencoders and transcoders (`lab.load_sae`) through
+SAELens and TransformerLens, and is a larger install. The Claude Code plugin and remote
+workers include it. To install only that one:
+`uv tool install 'oumi-weights-lab[saes] @ git+https://github.com/oumi-ai/weights-lab'`.
 Append `@<tag>` to a `git+https://` URL to pin a release.
 
 ## Use the CLI directly

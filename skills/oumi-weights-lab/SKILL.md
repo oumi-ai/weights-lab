@@ -10,7 +10,7 @@ Load one model into a persistent worker, then send it Python snippets. Snippets 
 
 ## Setup
 
-Run `oumi-weights-lab --help`. If it fails, ask the user to install the CLI with `uv tool install git+https://github.com/oumi-ai/weights-lab`, or `uv tool install 'oumi-weights-lab[adapters,datasets,multi-gpu,quantized] @ git+https://github.com/oumi-ai/weights-lab'` for LoRA adapters, Hugging Face datasets (`lab.hf_rows`), multi-GPU loading, and quantized loading. Under the Claude Code plugin, the first call builds an environment and downloads PyTorch; allow it several minutes.
+Run `oumi-weights-lab --help`. If it fails, ask the user to install the CLI with `uv tool install git+https://github.com/oumi-ai/weights-lab`, or `uv tool install 'oumi-weights-lab[adapters,datasets,multi-gpu,quantized,saes] @ git+https://github.com/oumi-ai/weights-lab'` for LoRA adapters, Hugging Face datasets (`lab.hf_rows`), multi-GPU loading, quantized loading, and sparse autoencoders (`lab.load_sae`). Under the Claude Code plugin, the first call builds an environment and downloads PyTorch; allow it several minutes.
 
 ## Session commands
 
@@ -96,6 +96,7 @@ Read only the one you need:
 - [Test a method on known answers](references/proving-ground.md): build tasks with known mechanisms, grade a claim against the key, and compare methods.
 - [Building blocks for new methods](references/building-blocks.md): run with anything replaced, take derivatives between two points, and sweep interventions in one batch.
 - [Steering vectors](references/steering.md): compute a direction from contrasting prompts, check it on held-out pairs, and add it to the residual stream.
+- [Sparse autoencoder features](references/saes.md): load a public SAE or transcoder, check its reconstruction error, then read, patch, and steer features.
 - [Logit lens](references/logit-lens.md): read each layer's output through the final norm and head.
 - [Short-row gradients](references/gradients.md): per-row gradients for selected parameters.
 - [Document-split probes](references/probes.md): linear probes that keep source documents apart.
