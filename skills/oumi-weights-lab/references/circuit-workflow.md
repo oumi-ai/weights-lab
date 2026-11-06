@@ -22,6 +22,7 @@ If the two baselines are close, the pair does not isolate the behavior. Pick ano
 - [Logit lens](logit-lens.md): find the layer where the answer first becomes the top token.
 - [Attribution patching](attribution-patching.md): rank module and token sites. The ranking is an estimate.
 - [Attention heads](heads.md): list heads and capture their attention with `record(..., at="attention")`.
+- [Circuit analyses](circuit-analyses.md): `logit_attribution` shows which heads and MLPs write the answer, and `edge_attribution` and `find_circuit` propose a circuit from the same contrast pair.
 
 Take a short list. These steps produce leads, not results.
 
@@ -33,6 +34,7 @@ Write down which components you think carry the behavior. For each intervention 
 
 - Sufficient: [patch](activation-patching.md) the clean activations into the corrupt run at the named sites. If the margin moves toward the clean one, and further than it does under the control patch, those sites are enough to produce the behavior in this pair.
 - Necessary: in the clean run, ablate the same components with [zero or swap](zero-swap.md), `patch`, or [project_out](direction-edits.md). For a head, see [Attention heads](heads.md). If the clean margin falls well below its baseline, and falls more than it does under the control ablation, they are needed. The answer rarely flips, so look at the margin, not the winning token.
+- Paths: to ask whether one component's effect reaches another, use `path_patch` ([Circuit analyses](circuit-analyses.md)) instead of patching whole sites by hand. `find_circuit` runs the patch test for a whole proposed circuit and reports its faithfulness.
 - Control: repeat each intervention at an unrelated site of the same kind, such as another head in the same layer or another token position. Compare the effect sizes.
 - Undo: remove every edit newest first, then score again. The restored scores must equal the baseline.
 

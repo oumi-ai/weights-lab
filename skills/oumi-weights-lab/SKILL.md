@@ -91,6 +91,7 @@ Read only the one you need:
 - [Activation patching](references/activation-patching.md): replace hidden states or module inputs at chosen tokens, and capture attention weights.
 - [Attention heads](references/heads.md): list heads as weight slices, ablate one, and screen for induction heads.
 - [Attribution patching](references/attribution-patching.md): rank module and token sites with activation gradients, then confirm with real patches.
+- [Circuit analyses](references/circuit-analyses.md): direct logit attribution, path patching, and edge attribution patching as calls.
 - [Find and test a circuit](references/circuit-workflow.md): chain the logit lens, attribution patching, patches, and ablations into one tested claim.
 - [Test a method on known answers](references/proving-ground.md): build tasks with known mechanisms, grade a claim against the key, and compare methods.
 - [Building blocks for new methods](references/building-blocks.md): run with anything replaced, take derivatives between two points, and sweep interventions in one batch.

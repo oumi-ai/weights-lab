@@ -503,6 +503,79 @@ Tasks with a planted mechanism and a hidden answer key, a scorer, and a paired c
 - `compare(left, right, split=None)` pairs two lists of result records by task, averages repeats, and returns both means, the difference (right minus left), its 95% interval, the permutation p, the solve rates and each side's setup. Put the baseline on the left. It raises `ValueError` when no task pairs or a side mixes image ids, agent commands, agent labels or timeouts. `beats(report)` is true when the interval is above zero, meaning the right side won.
 - The command line wraps these as `oumi-weights-lab proving-ground build|run|grade|compare`. `run` needs Docker and refuses a keys directory inside the tasks directory.
 
+## Circuit analyses
+
+```python
+margin = ("yes", "no")  # or any callable: metric(last_position_logits) -> scalar tensor
+attribution = lab.logit_attribution(
+    "hello world yes no hello", margin, by=("component", "position")
+)
+patched = lab.path_patch(clean, corrupt, [(0, 1)], [(1, 0, "v"), "logits"], metric=margin)
+edges = lab.edge_attribution(clean, corrupt, metric=margin, steps=5)
+circuit = lab.find_circuit(clean, corrupt, metric=margin, top=50)
+```
+
+These work on the layouts `heads` supports, where each layer adds an attention output and
+an MLP output to the residual stream unchanged. A layer whose attention is not split into
+heads (Qwen3.5's linear attention) is one node, `("attn", layer)`. A **metric** is a
+callable over the batch's last-position logits (`[batch, vocab]`, float32) that returns a
+scalar tensor, or an `(answer, counterfactual)` pair of strings: the mean logit difference
+between the first token of each. The identities below (attributions sum to the logit, the
+full circuit equals the clean metric) hold to the precision of the model's dtype: about
+1e-4 in float32, and a few percent of the value in bf16 and fp16.
+
+- `logit_attribution(prompt, target, *, by=("component",), positions=-1)` splits one logit
+  (`target` an answer string) or a logit difference (`target` an `(answer,
+  counterfactual)` pair; no callable here) at one token position into the embeddings, each
+  head, each MLP, and the output-projection biases. The final norm's scale is frozen at
+  this pass's value (LayerNorm also subtracts each node's mean), so the contributions plus
+  the norm and head biases sum to the model's own value. The result carries both as
+  `total` and `actual`. `by=("component", "position")` also splits each head over source
+  tokens by attention weight times value (times the query gate for gated heads). Returns
+  `{"total", "actual", "tokens", "embeddings", "heads": [{"layer", "head", "value",
+  "positions"}], "mlps": [{"layer", "value"}], "mixers": [...], "biases":
+  {"attention_output", "final_norm", "output_head"}}`. One forward pass. An MLP's value
+  includes the bias of its own output layer.
+- `path_patch(clean, corrupt, senders, receivers, *, metric, freeze_mlps=False)` follows
+  Wang et al. (2022). `clean` and `corrupt` are paired lists of prompts with equal token
+  counts per pair. Senders are `(layer, head)`, `("mlp", layer)`, `("attn", layer)`, and
+  `"embed"`. Receivers are `(layer, head, "q"|"k"|"v")`, `("mlp", layer)`, `("attn",
+  layer)`, and `"logits"` (the residual entering the final norm). Senders go to their
+  corrupt output at every position, every other head is frozen at its clean output (every
+  MLP too with `freeze_mlps=True`), and only the receivers' inputs are then replaced in a
+  clean run. A `k` or `v` receiver is the key/value head that `head` reads. Returns
+  `{"clean", "corrupt", "patched", "fraction"}`, with `fraction = (patched - clean) /
+  (corrupt - clean)`, or None when those two are equal. With every head, MLP and `"embed"`
+  as senders and `"logits"` as the receiver, `patched` equals `corrupt`; with no senders
+  it equals `clean`. Four forward passes per prompt pair.
+- `edge_attribution(clean, corrupt, *, metric, steps=5)` scores every edge from an
+  upstream node (`"embed"`, a head, an MLP, an attention block) to a later reader: a
+  head's `(layer, head, "q")`, a key/value head's `(layer, kv_head, "k")` or `"v"`,
+  `("mlp", layer)`, `("attn", layer)`, or `"logits"`. The score is the sender's
+  corrupt-minus-clean output dotted with the metric's gradient at the residual the reader
+  sees, summed over positions and averaged over `steps` points that move the input
+  embeddings from clean to corrupt. One backward pass per step gives every edge's
+  gradient, through each reader's own norm and projection slice. With `steps=1` it is
+  plain attribution patching. Returns a list of `{"sender", "receiver", "score"}` sorted
+  by absolute score. `2 + steps` forward passes per prompt pair.
+- `find_circuit(clean, corrupt, *, metric, edges=None, top=50, steps=5)` keeps the `top`
+  edges by absolute score (or tests the `edges` you give, as `edge_attribution` returns
+  them; `[]` is the empty circuit), drops edges that are not on a path from the embeddings
+  to the logits, and confirms the circuit by patching: a clean run where every edge
+  outside the circuit carries its corrupt value. Returns `{"clean", "corrupt", "circuit",
+  "faithfulness", "edges", "total_edges"}`, with `faithfulness = (circuit - corrupt) /
+  (clean - corrupt)`. Keeping every edge gives the clean metric and keeping none gives the
+  corrupt one. `3 + steps` forward passes per prompt pair, or 3 with `edges`.
+- Prompt pairs with equal lengths run together as one batch; the results average over
+  pairs. A call that would pass the pass limit is rejected before anything runs. Hooks are
+  removed on exit, and train/eval modes are restored.
+- Raises `ValueError` for unequal token counts, unknown senders or receivers, and a bad
+  metric. Raises `NotImplementedError`, naming the module, for norms on a sublayer's
+  output (Gemma 2, OLMo 2), parallel attention and MLP blocks, LoRA models, bitsandbytes
+  models, and any model where the recomputation does not match the model's own residual
+  stream, attention output, or logits (a residual multiplier, a logit softcap). The call
+  refuses rather than return approximate numbers.
+
 ## Attachments (experimental)
 
 `lab.attach(component, mode="prefix")` transforms prompts for `generate`, `score`,
