@@ -238,6 +238,46 @@ class _TemporaryHook:
             self.handle.remove()
 
 
+def _site_hook(target, at, transform):
+    """An unregistered hook that replaces the activation at ``at`` with ``transform(value)``.
+
+    "output" hooks the module's output and "input" its first tensor argument (or
+    ``hidden_states=``), before the module runs.
+    """
+
+    def after(hooked, inputs, output):
+        return _with_output(output, transform(_activation(output)))
+
+    def before(hooked, args, kwargs):
+        value, slot = _input_activation(args, kwargs)
+        return _with_input(args, kwargs, slot, transform(value))
+
+    return _TemporaryHook(target, before if at == "input" else after, pre=at == "input")
+
+
+def _patch_hook(target, at, positions, values):
+    """An unregistered hook that replaces the selected positions, as ``patch`` does."""
+    return _site_hook(target, at, lambda value: _replaced(value, positions, values))
+
+
+def _record_hook(target, at, positions, sink, keep):
+    """An unregistered hook that appends ``keep(selected activation)`` to ``sink`` per call.
+
+    ``at`` is "output", "input" or "attention", as for ``record``.
+    """
+
+    def capture(module, args, last):
+        if at == "input":
+            value, dim = _input_activation(args, last)[0], 1
+        elif at == "attention":
+            value, dim = _attention_weights(last), 2
+        else:
+            value, dim = _activation(last), 1
+        sink.append(keep(_take(value, _positions(value, positions, dim), dim)))
+
+    return _TemporaryHook(target, capture, pre=at == "input")
+
+
 def _accepts(model, name):
     """Whether the base model's forward takes a keyword argument called ``name``."""
     import inspect
@@ -301,23 +341,18 @@ class InspectionMixin:
         captured = {name: [] for name in names}
         hooks = []
 
-        def read(args, last):
-            if at == "input":
-                return _input_activation(args, last)[0], 1
-            if at == "attention":
-                return _attention_weights(last), 2
-            return _activation(last), 1
-
         try:
             for name, target in targets:
-
-                def capture(module, args, last, name=name):
-                    value, dim = read(args, last)
-                    chosen = _take(value, _positions(value, positions, dim), dim)
-                    captured[name].append(chosen.detach().cpu().clone())
-
                 # Track before registering so an interrupt cannot orphan the hook.
-                hooks.append(_TemporaryHook(target, capture, pre=at == "input"))
+                hooks.append(
+                    _record_hook(
+                        target,
+                        at,
+                        positions,
+                        captured[name],
+                        lambda chosen: chosen.detach().cpu().clone(),
+                    )
+                )
                 hooks[-1].register()
             with self._track_positions(positions):
                 yield captured
@@ -342,13 +377,6 @@ class InspectionMixin:
         positions = _listed(positions)
         target = self.model.get_submodule(module)
 
-        def replace(hooked, inputs, output):
-            return _with_output(output, _replaced(_activation(output), positions, values))
-
-        def replace_input(hooked, args, kwargs):
-            value, slot = _input_activation(args, kwargs)
-            return _with_input(args, kwargs, slot, _replaced(value, positions, values))
-
         self._patch_revision = getattr(self, "_patch_revision", 0) + 1
         if not hasattr(self, "_patches"):
             self._patches = []
@@ -359,9 +387,7 @@ class InspectionMixin:
             "at": at,
             "kind": "callable" if callable(values) else "tensor",
         }
-        hook = _TemporaryHook(
-            target, replace_input if at == "input" else replace, pre=at == "input"
-        )
+        hook = _patch_hook(target, at, positions, values)
         # Worker timeouts raise BaseException anywhere, so register inside cleanup.
         try:
             hook.register()
