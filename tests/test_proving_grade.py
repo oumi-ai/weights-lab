@@ -70,12 +70,14 @@ def test_the_key_written_as_a_claim_scores_one_and_is_solved(family, proving_tas
     else:
         assert "neuron_precision" not in result
     if key.get("directions"):
-        assert result["direction_alignment"] == pytest.approx(1.0)
+        assert result["direction_recall"] == pytest.approx(1.0)
+        assert result["direction_precision"] == pytest.approx(1.0)
+        assert result["direction_score"] == pytest.approx(1.0)
         assert result["direction_ablation_reproduced"] == 1
         assert measured["direction_ablated_accuracy"] <= 0.65
         assert result["decoy_direction_alignment"] < 0.2
     else:
-        assert "direction_alignment" not in result
+        assert "direction_recall" not in result
 
 
 @pytest.mark.parametrize("family", FAMILIES)
@@ -102,7 +104,7 @@ def test_the_decoy_alone_scores_low_is_not_faithful_and_is_reported(
     assert result["solved"] is False and result["identification"] == pytest.approx(0.0, abs=1e-6)
     assert result["score"] == pytest.approx(0.0, abs=1e-6)
     if key.get("directions"):
-        assert result["direction_alignment"] < 0.2
+        assert result["direction_recall"] < 0.2
         assert result["decoy_direction_alignment"] == pytest.approx(1.0)
 
 
@@ -190,22 +192,23 @@ def test_direction_alignment_uses_the_best_claimed_direction_at_or_after_the_lay
         )
 
     flipped = {"after_layer": layer, "vector": [-x for x in target["vector"]]}
-    assert run([flipped])["direction_alignment"] == pytest.approx(1.0)
+    assert run([flipped])["direction_recall"] == pytest.approx(1.0)
     later = {"after_layer": 3, "vector": target["vector"]}
-    assert run([later])["direction_alignment"] == pytest.approx(1.0)
+    assert run([later])["direction_recall"] == pytest.approx(1.0)
     if layer > 0:
         earlier = {"after_layer": layer - 1, "vector": target["vector"]}
-        assert run([earlier])["direction_alignment"] == 0.0
+        assert run([earlier])["direction_recall"] == 0.0
     mixed = run([decoy, target])
-    assert mixed["direction_alignment"] == pytest.approx(1.0)
+    assert mixed["direction_recall"] == pytest.approx(1.0)
     bad = run([{"after_layer": layer, "vector": decoy["vector"]}])
-    assert bad["direction_alignment"] < 0.2
+    assert bad["direction_recall"] < 0.2
     assert bad["solved"] is False and bad["score"] < 0.6
-    assert bad["identification"] == pytest.approx(0.5 * (1 + bad["direction_alignment"]))
+    assert bad["identification"] == pytest.approx(0.5 * (1 + bad["direction_score"]))
     # A direction that is half the key plus half noise aligns partially, so it is not solved.
     half = [a + b for a, b in zip(target["vector"], decoy["vector"], strict=True)]
     partial = run([{"after_layer": layer, "vector": half}])
-    assert partial["direction_alignment"] == pytest.approx(1 / math.sqrt(2), abs=0.01)
+    assert partial["direction_recall"] == pytest.approx(1 / math.sqrt(2), abs=0.01)
+    assert partial["direction_precision"] == pytest.approx(1 / math.sqrt(2), abs=0.01)
     assert partial["solved"] is False
 
 
@@ -401,3 +404,71 @@ def test_grade_bundle_applies_the_bundle_to_a_fresh_lab_and_runs_the_check(tmp_p
         grade_bundle(task, key, empty, tmp_path / "work", lambda lab, key: {"score": 2})
     with pytest.raises(ValueError, match="score from 0 to 1"):
         grade_bundle(task, key, empty, tmp_path / "work", lambda lab, key: 1.0)
+
+
+def test_one_wrong_neuron_in_the_key_layer_with_honest_numbers_is_not_solved(
+    proving_tasks, tmp_path
+):
+    key = proving_tasks["lookup-mlp"]["key"]
+    wrong = {"kind": "neurons", "layer": key["neurons"][0]["layer"], "indices": [255]}
+    base = key["validation"]["baseline_accuracy"]
+    claim = claim_of(key, components=[wrong], ablation=effect(base, base))
+    result = grade(proving_tasks, "lookup-mlp", claim, tmp_path)
+    assert result["component_f1"] == 1.0 and result["ablation_reproduced"] == 1
+    assert result["faithful"] is False
+    assert result["solved"] is False
+    assert result["score"] == pytest.approx(0.5)
+
+
+def test_the_key_direction_plus_the_decoy_direction_is_not_solved(proving_tasks, tmp_path):
+    key = proving_tasks["feature-direction"]["key"]
+    both = [*key["directions"], *key["decoy_directions"]]
+    result = grade(
+        proving_tasks,
+        "feature-direction",
+        claim_of(key, directions=both),
+        tmp_path,
+    )
+    assert result["direction_recall"] == pytest.approx(1.0)
+    assert result["direction_precision"] == pytest.approx(0.5, abs=0.1)
+    assert result["direction_score"] < 0.9
+    assert result["solved"] is False and result["score"] < 1.0
+
+
+def test_a_calibration_style_key_has_no_faithful_factor(proving_tasks, tmp_path):
+    import copy
+
+    key = copy.deepcopy(proving_tasks["copy-head"]["key"])
+    key["split"] = "calibration"
+    built = proving_tasks["copy-head"]
+    result = grade_claim(built["dir"], key, claim_of(key), tmp_path / "work")
+    assert "faithful" not in result and result["score"] == pytest.approx(1.0)
+
+
+def test_grading_restores_the_callers_rng_and_kernels_entry(proving_tasks, tmp_path):
+    import random
+    import sys
+
+    import numpy as np
+    import torch
+
+    key = proving_tasks["copy-head"]["key"]
+    random.seed(11)
+    np.random.seed(11)
+    torch.manual_seed(11)
+    expected = (random.getstate(), np.random.get_state()[1].copy(), torch.get_rng_state().clone())
+    had = "kernels" in sys.modules
+    before = sys.modules.get("kernels")
+    grade(proving_tasks, "copy-head", claim_of(key), tmp_path)
+    assert random.getstate() == expected[0]
+    assert (np.random.get_state()[1] == expected[1]).all()
+    assert torch.equal(torch.get_rng_state(), expected[2])
+    assert ("kernels" in sys.modules) == had and sys.modules.get("kernels") is before
+
+
+def test_a_huge_integer_or_deeply_nested_claim_is_invalid_not_a_crash(proving_tasks, tmp_path):
+    key = proving_tasks["copy-head"]["key"]
+    huge = claim_of(key)
+    huge["ablation"]["accuracy_after"] = 10**400
+    result = grade(proving_tasks, "copy-head", huge, tmp_path)
+    assert result["valid"] is False and result["score"] == 0.0 and result["problems"]

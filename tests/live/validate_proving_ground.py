@@ -1,16 +1,22 @@
-"""Run both arms of the proving ground on one dev task per planted family, with a real agent.
+"""Run both arms of the proving ground on one task per planted family, with a real agent.
+
+With ``--secret-file`` the tasks are held out: built from your secret, so nothing public can
+reproduce them, and the comparison is a measurement. Without it the tasks are dev tasks,
+which an agent with network access could rebuild from the public package, so the run is a
+smoke test of the plumbing and its scores say nothing about the skill.
 
 Needs Docker running, the two images built (see docs/proving-ground.md) and an API key in the
 environment. The owner runs it:
 
     python tests/live/validate_proving_ground.py \\
         --image weights-lab-proving:skill --control-image weights-lab-proving:control \\
-        --agent-cmd "claude -p --dangerously-skip-permissions --model sonnet" \\
+        --agent-cmd "claude -p {prompt} --dangerously-skip-permissions --model sonnet" \\
         --agent-label claude-sonnet --env ANTHROPIC_API_KEY --repeats 1
 
-It builds the tasks in a temporary directory, runs the skill arm and the control arm, prints
-each run's score and the paired comparison, and deletes everything afterwards unless
-``--keep`` is given. Dev tasks only: nothing held out is touched.
+Put ``{prompt}`` in the agent command before any flag that takes several values. It builds
+the tasks in a temporary directory, runs the skill arm and the control arm, prints each
+run's score and the paired comparison (control on the left), and deletes everything
+afterwards unless ``--keep`` is given.
 """
 
 import argparse
@@ -32,13 +38,24 @@ def main() -> int:
     parser.add_argument("--env", action="append", default=[], help="environment variable names")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=1800)
+    parser.add_argument("--secret-file", type=Path, help="use held-out tasks from this secret")
     parser.add_argument("--keep", action="store_true", help="keep the working directory")
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory(prefix="proving-live-") as scratch:
         root = Path(scratch)
+        split = "heldout" if args.secret_file else "dev"
         for family in PLANTED_FAMILIES:
-            build_task(family, "dev", 0, root / "tasks", root / "keys")
+            build_task(
+                family, split, 0, root / "tasks", root / "keys", secret_file=args.secret_file
+            )
+        if args.secret_file:
+            print("HELD-OUT TASKS: this run measures the skill.")
+        else:
+            print(
+                "SMOKE TEST ONLY: dev tasks can be rebuilt from the public package, so these "
+                "scores do not measure the skill. Pass --secret-file for a measurement."
+            )
         results = root / "results.jsonl"
         for arm, image in (("skill", args.image), ("control", args.control_image)):
             run(

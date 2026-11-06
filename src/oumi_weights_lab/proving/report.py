@@ -7,6 +7,7 @@ Importing this module does not import torch or transformers.
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from typing import Any
 
@@ -29,6 +30,23 @@ def _per_task(records: list[dict[str, Any]], split: str | None) -> dict[str, dic
     }
 
 
+SETUP_FIELDS = ("image_id", "agent_cmd", "agent_label", "timeout")
+
+
+def _setup(records: list[dict[str, Any]], side: str) -> dict[str, Any]:
+    """The one setup a side's records share; ValueError when they mix setups."""
+    setup = {}
+    for field in SETUP_FIELDS:
+        values = {json.dumps(record.get(field)) for record in records}
+        if len(values) > 1:
+            raise ValueError(
+                f"the {side} side mixes records with different {field} values "
+                f"({', '.join(sorted(values))}); compare one setup at a time"
+            )
+        setup[field] = records[0].get(field) if records else None
+    return setup
+
+
 def compare(
     left_results: list[dict[str, Any]],
     right_results: list[dict[str, Any]],
@@ -40,10 +58,15 @@ def compare(
     reports the unpaired ones. Raises ValueError when no task pairs. Uses the lab's own
     paired statistics, one observation per task with each task its own cluster, 10,000
     resamples and seed 0: the mean scores, the delta, its 95% interval and the sign-flip
-    permutation p. ``split`` keeps only that split's records.
+    permutation p. ``split`` keeps only that split's records. Raises ValueError when a
+    side mixes records with different ``image_id``, ``agent_cmd``, ``agent_label`` or
+    ``timeout`` values; the report gives each side's ``left_setup`` and ``right_setup``.
     """
     from ..evaluation import _paired_report
 
+    kept_left = [r for r in left_results if split is None or r["split"] == split]
+    kept_right = [r for r in right_results if split is None or r["split"] == split]
+    left_setup, right_setup = _setup(kept_left, "left"), _setup(kept_right, "right")
     left, right = _per_task(left_results, split), _per_task(right_results, split)
     tasks = sorted(left.keys() & right.keys())
     if not tasks:
@@ -67,6 +90,8 @@ def compare(
         "permutation_p": paired["permutation_p"],
         "left_solve_rate": sum(left[t]["solved"] for t in tasks) / len(tasks),
         "right_solve_rate": sum(right[t]["solved"] for t in tasks) / len(tasks),
+        "left_setup": left_setup,
+        "right_setup": right_setup,
         "samples": SAMPLES,
         "seed": SEED,
     }

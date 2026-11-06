@@ -9,6 +9,8 @@ not import torch or transformers.
 from __future__ import annotations
 
 import math
+import random
+import sys
 import tempfile
 from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
@@ -66,6 +68,55 @@ def _best_alignment(target: dict[str, Any], claimed: list[dict[str, Any]]) -> fl
     return best
 
 
+@contextmanager
+def _caller_state():
+    """Keep the caller's RNG states and ``sys.modules['kernels']`` entry across grading.
+
+    ``load_lab`` seeds Python, NumPy and torch and may block the ``kernels`` module; the
+    grader must not leave either change behind.
+    """
+    import torch
+
+    python_state = random.getstate()
+    torch_state = torch.get_rng_state()
+    cuda_state = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
+    try:
+        import numpy
+
+        numpy_state = numpy.random.get_state()
+    except ImportError:
+        numpy = numpy_state = None
+    present = "kernels" in sys.modules
+    entry = sys.modules.get("kernels")
+    try:
+        yield
+    finally:
+        random.setstate(python_state)
+        torch.set_rng_state(torch_state)
+        if cuda_state is not None:
+            torch.cuda.set_rng_state_all(cuda_state)
+        if numpy is not None:
+            numpy.random.set_state(numpy_state)
+        if present:
+            sys.modules["kernels"] = entry
+        else:
+            sys.modules.pop("kernels", None)
+
+
+def _precision_of_claimed(claimed: list[dict[str, Any]], wanted: list[dict[str, Any]]) -> float:
+    """Mean over claimed directions of the best ``|cos|`` with a key direction at or before
+    the claimed direction's layer; 0 when nothing is claimed."""
+    if not claimed:
+        return 0.0
+    scores = []
+    for item in claimed:
+        earlier = [t for t in wanted if t["after_layer"] <= item["after_layer"]]
+        scores.append(
+            max((_best_alignment(t, [item]) for t in earlier), default=0.0) if earlier else 0.0
+        )
+    return sum(scores) / len(scores)
+
+
 def _open_lab(task_dir: Path, work_dir: Path):
     from ..lab import load_lab
 
@@ -119,11 +170,11 @@ def grade_claim(
     """Score a claim against the key. Returns the result dict; the headline is ``score``.
 
     An invalid claim (see ``validate_claim``) scores 0 with its problems listed and
-    nothing is run. Otherwise the result holds component precision, recall and F1 over
-    heads and MLP layers (a ``neurons`` entry counts as its MLP layer), the decoys the
-    claim named, neuron precision and recall when the key has neurons, and
-    ``direction_alignment`` (the best ``|cos|`` per key direction, among claimed
-    directions at or after its layer, averaged) when the key has directions.
+    nothing is run. The caller's Python, NumPy and torch RNG states and any ``kernels``
+    module entry are restored afterwards. Otherwise the result holds component precision,
+    recall and F1 over heads and MLP layers (a ``neurons`` entry counts as its MLP
+    layer), the decoys the claim named, neuron precision and recall when the key has
+    neurons, and the direction scores below when the key has directions.
 
     The claimed ablation is rerun in a ``Lab`` on the task's model (CPU, a session under
     ``work_dir``) on 400 rows drawn from the key's ``eval_seed``, using ``lab.zero`` and
@@ -133,11 +184,20 @@ def grade_claim(
     tasks only) means the measured accuracy with the claimed components ablated is at
     most chance + 0.15.
 
+    ``direction_recall`` is the best ``|cos|`` per key direction among claimed directions at
+    or after its layer, averaged; ``direction_precision`` is the mean over claimed
+    directions of the best ``|cos|`` with a key direction at or before the claimed layer
+    (0 when none is claimed); ``direction_score`` is their F1, so a decoy direction named
+    beside the real one costs precision. They appear when the key has directions.
+
     ``identification`` is ``component_f1``, or the mean of ``component_f1`` and
-    ``direction_alignment`` when the key has directions. ``score`` is ``identification``
-    times 1.0 when the ablation is reproduced and 0.5 when it is not, so honesty scales
-    the score but cannot earn one: a claim that names only a decoy scores 0. ``solved``
-    needs F1 of 1, alignment of at least 0.9 where it applies, and the ablation reproduced.
+    ``direction_score`` when the key has directions. ``score`` is ``identification`` times
+    1.0 when the ablation is reproduced and 0.5 when not, times 1.0 when the claim is
+    faithful and 0.5 when not (calibration tasks have no faithful factor). Honesty scales
+    the score but cannot earn one: a claim that names only a decoy scores 0, and a claim
+    whose own parts leave the behavior intact is halved. ``solved`` needs F1 of 1,
+    ``direction_score`` of at least 0.9 where it applies, the ablation reproduced, and
+    ``faithful`` on planted tasks.
     """
     task_dir = Path(task_dir)
     key = key if isinstance(key, dict) else load_key(key)
@@ -164,40 +224,54 @@ def grade_claim(
         result["neuron_precision"] = _ratio(len(claimed_n & wanted_n), len(claimed_n))
         result["neuron_recall"] = _ratio(len(claimed_n & wanted_n), len(wanted_n))
     claimed_directions = claim.get("directions", [])
-    alignment = None
+    direction_score = None
     if key.get("directions"):
         scores = [_best_alignment(t, claimed_directions) for t in key["directions"]]
-        alignment = sum(scores) / len(scores)
-        result["direction_alignment"] = alignment
+        recall = sum(scores) / len(scores)
+        precision = _precision_of_claimed(claimed_directions, key["directions"])
+        direction_score = _f1(precision, recall)
+        result.update(
+            direction_recall=recall, direction_precision=precision, direction_score=direction_score
+        )
     if key.get("decoy_directions"):
         scores = [_best_alignment(t, claimed_directions) for t in key["decoy_directions"]]
         result["decoy_direction_alignment"] = sum(scores) / len(scores)
 
-    lab = _open_lab(task_dir, Path(work_dir))
-    rows = make_rows(
-        key["family"], ROWS, key["eval_seed"], row_spec=key.get("row_spec"), tokenizer=lab.tokenizer
-    )
-    baseline = _accuracy(lab, rows, "baseline")
-    with _ablated(lab, claim["components"], shape):
-        after = _accuracy(lab, rows, "ablated")
-    measured = {"rows": ROWS, "baseline_accuracy": baseline, "ablated_accuracy": after}
-    if claimed_directions and claim.get("direction_ablation"):
-        with _directions_out(lab, claimed_directions):
-            projected = _accuracy(lab, rows, "projected")
-        measured["direction_ablated_accuracy"] = projected
-        result["direction_ablation_reproduced"] = _reproduced(
-            claim["direction_ablation"], baseline, projected
+    with _caller_state():
+        lab = _open_lab(task_dir, Path(work_dir))
+        rows = make_rows(
+            key["family"],
+            ROWS,
+            key["eval_seed"],
+            row_spec=key.get("row_spec"),
+            tokenizer=lab.tokenizer,
         )
+        baseline = _accuracy(lab, rows, "baseline")
+        with _ablated(lab, claim["components"], shape):
+            after = _accuracy(lab, rows, "ablated")
+        measured = {"rows": ROWS, "baseline_accuracy": baseline, "ablated_accuracy": after}
+        if claimed_directions and claim.get("direction_ablation"):
+            with _directions_out(lab, claimed_directions):
+                projected = _accuracy(lab, rows, "projected")
+            measured["direction_ablated_accuracy"] = projected
+            result["direction_ablation_reproduced"] = _reproduced(
+                claim["direction_ablation"], baseline, projected
+            )
     result["measured"] = measured
     reproduced = _reproduced(claim["ablation"], baseline, after)
     result["ablation_reproduced"] = reproduced
+    faithful = True
     if key["split"] != "calibration":
-        result["faithful"] = after <= key["chance"] + FAITHFUL_MARGIN
-    identification = f1 if alignment is None else (f1 + alignment) / 2
+        faithful = after <= key["chance"] + FAITHFUL_MARGIN
+        result["faithful"] = faithful
+    identification = f1 if direction_score is None else (f1 + direction_score) / 2
     result["identification"] = identification
-    result["score"] = identification * (1.0 if reproduced else 0.5)
+    result["score"] = identification * (1.0 if reproduced else 0.5) * (1.0 if faithful else 0.5)
     result["solved"] = bool(
-        f1 == 1.0 and reproduced == 1 and (alignment is None or alignment >= ALIGNED)
+        f1 == 1.0
+        and reproduced == 1
+        and faithful
+        and (direction_score is None or direction_score >= ALIGNED)
     )
     return result
 
@@ -219,12 +293,17 @@ def grade_bundle(
     """
     task_dir = Path(task_dir)
     key = key if isinstance(key, dict) else load_key(key)
-    lab = _open_lab(task_dir, Path(work_dir))
-    try:
-        lab.load_edits(Path(bundle_dir))
-    except (ValueError, KeyError, OSError, RuntimeError) as error:
-        return {"valid": False, "problems": [f"the bundle did not load: {error}"], "score": 0.0}
-    result = check(lab, key)
+    with _caller_state():
+        lab = _open_lab(task_dir, Path(work_dir))
+        try:
+            lab.load_edits(Path(bundle_dir))
+        except (ValueError, KeyError, OSError, RuntimeError) as error:
+            return {
+                "valid": False,
+                "problems": [f"the bundle did not load: {error}"],
+                "score": 0.0,
+            }
+        result = check(lab, key)
     score = result.get("score") if isinstance(result, dict) else None
     if isinstance(score, bool) or not isinstance(score, (int, float)) or not 0 <= score <= 1:
         raise ValueError("a check must return a dict with a score from 0 to 1")

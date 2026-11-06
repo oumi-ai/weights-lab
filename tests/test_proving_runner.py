@@ -5,6 +5,7 @@ The isolation checks here are the point: the agent's container may see the task 
 nothing else. No Docker runs; ``launch`` and ``probe`` are fakes.
 """
 
+import copy
 import json
 import os
 import re
@@ -206,6 +207,7 @@ def test_every_task_and_repeat_is_run_and_an_honest_claim_scores_one(tasks, tmp_
         assert record["image_id"] == "sha256:feed"
         assert record["lab_version"] == "9.9.9" and record["revision"] == "abc123"
         assert record["exit_code"] == 0 and record["timed_out"] is False
+        assert record["timeout"] == 600
         assert record["claim_valid"] is True and record["problems"] == []
         assert record["score"]["score"] == pytest.approx(1.0)
         assert record["score"]["solved"] is True
@@ -730,3 +732,77 @@ def test_the_main_cli_holds_only_a_hook_for_the_proving_command():
     mentions = [line for line in text.splitlines() if "proving" in line.lower()]
     assert len(mentions) <= 5, mentions
     assert not re.search(r"decoy|heldout|held-out|family|secret", " ".join(mentions), re.I)
+
+
+def test_a_huge_integer_or_deeply_nested_claim_scores_zero_and_the_run_goes_on(tasks, tmp_path):
+    def huge(out, task):
+        claim = copy.deepcopy(honest_claim(tasks[2][task]))
+        claim["ablation"]["accuracy_after"] = 10**400
+        claim["components"][0]["layer"] = 10**400
+        (out / "claim.json").write_text(json.dumps(claim))
+
+    def nested(out, task):
+        (out / "claim.json").write_text("[" * 200_000 + "]" * 200_000)
+
+    for behaviour in (huge, nested):
+        path = tmp_path / f"{behaviour.__name__}.jsonl"
+        records = run_all(tasks, tmp_path, Fake(tasks[2], behaviour=behaviour), results=path)
+        assert len(records) == len(PLANTED_FAMILIES)
+        assert all(r["score"]["score"] == 0.0 and r["problems"] for r in records)
+
+
+@pytest.mark.parametrize(
+    "change,named",
+    [
+        ({"agent_cmd": "other-agent -p"}, "agent_cmd"),
+        ({"agent_label": "other-model"}, "agent_label"),
+        ({"timeout": 60}, "timeout"),
+    ],
+)
+def test_resuming_with_a_different_setup_is_refused_and_names_the_difference(
+    tasks, tmp_path, change, named
+):
+    run_all(tasks, tmp_path, Fake(tasks[2]))
+    fake = Fake(tasks[2])
+    with pytest.raises(ValueError, match=named):
+        run_all(tasks, tmp_path, fake, repeats=2, **change)
+    assert fake.invocations == []
+
+
+def test_resuming_with_a_new_image_is_refused_even_when_nothing_is_left_to_run(tasks, tmp_path):
+    run_all(tasks, tmp_path, Fake(tasks[2]))
+
+    def new_image(image, agent):
+        return {**probe(image, agent), "image_id": "sha256:other"}
+
+    with pytest.raises(ValueError, match="image id"):
+        run_all(tasks, tmp_path, Fake(tasks[2]), probe=new_image)
+
+
+def test_the_other_arms_records_do_not_block_a_different_setup(tasks, tmp_path):
+    run_all(tasks, tmp_path, Fake(tasks[2]))
+    labels = dict(LABELS, **{"org.oumi.weights-lab.arm": "control"})
+    records = run_all(
+        tasks,
+        tmp_path,
+        Fake(tasks[2]),
+        arm="control",
+        probe=lambda i, a: {"labels": labels, "image_id": "sha256:control"},
+    )
+    assert len(records) == len(PLANTED_FAMILIES)
+
+
+def test_every_documented_agent_command_places_the_prompt_before_variadic_flags(tmp_path):
+    texts = [
+        (ROOT / "docs" / "proving-ground.md").read_text(),
+        (ROOT / "tests" / "live" / "validate_proving_ground.py").read_text(),
+    ]
+    found = [m for text in texts for m in re.findall(r'--agent-cmd "([^"]*)"', text)]
+    assert len(found) == 2
+    for number, command in enumerate(found):
+        words = shlex.split(command)
+        assert "{prompt}" in words
+        if "--disallowedTools" in words:
+            assert words.index("{prompt}") < words.index("--disallowedTools")
+        (argv, _), _, _ = argv_for(tmp_path / str(number), command=words)
+        assert argv[-len(words) :].count("PROMPT TEXT") == 1

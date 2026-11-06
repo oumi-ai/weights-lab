@@ -60,7 +60,7 @@ docker run --rm weights-lab-proving:skill oumi-weights-lab --help
 
 `AGENT_INSTALL` is the shell command that installs the agent; it defaults to `npm install -g @anthropic-ai/claude-code`. Any agent that takes a prompt on its command line works. The image runs as a non-root user `agent`, because Claude Code refuses to skip permission prompts as root. Each image carries labels for its arm, the package version and the git revision, and `run` refuses an image whose arm label differs from `--arm`.
 
-What the image holds is part of the test. The proving package (task builders, planted constructions, the scorer), this page, the tests, keys and secrets are left out of the image and the build context, and the proving-ground recipe is replaced by a short stub (`docker/proving-ground-stub.md`) so links to it from other recipes still land, so a skill-arm agent cannot read how the families are built. `oumi-weights-lab proving-ground` is therefore absent inside the skill image. Network access stays on, because the agent needs its model API. Add the agent's own flags to block web tools, for example `--disallowedTools WebFetch WebSearch` for Claude Code.
+What the image holds is part of the test. The proving package (task builders, planted constructions, the scorer), this page, the tests, keys and secrets are left out of the image and the build context, and the proving-ground recipe is replaced by a short stub (`docker/proving-ground-stub.md`) so links to it from other recipes still land, so a skill-arm agent cannot read how the families are built. `oumi-weights-lab proving-ground` is therefore absent inside the skill image. Network access stays on, because the agent needs its model API, and that limits what the proving ground can promise. An agent with network access can install the public package and rebuild any dev task and its key, so dev tasks are a smoke test and a place to tune recipes, never a measurement of the skill. Only held-out tasks measure it: their seeds and ids come from your secret, so nothing public can reproduce them. Block the agent's web tools as well, but treat that as hygiene and not as isolation.
 
 ## Running both arms
 
@@ -69,15 +69,17 @@ export ANTHROPIC_API_KEY=...
 for arm in skill control; do
   oumi-weights-lab proving-ground run --tasks ~/proving/tasks --keys ~/proving/keys \
     --arm $arm --image weights-lab-proving:$arm \
-    --agent-cmd "claude -p --dangerously-skip-permissions --model sonnet --disallowedTools WebFetch WebSearch" \
+    --agent-cmd "claude -p {prompt} --dangerously-skip-permissions --model sonnet --disallowedTools WebFetch WebSearch" \
     --agent-label claude-sonnet --repeats 3 --timeout 3600 \
     --env ANTHROPIC_API_KEY --results ~/proving/results.jsonl
 done
 ```
 
+Put `{prompt}` where the prompt goes. Without it the runner appends the prompt as the last argument, and a flag that takes any number of values, such as Claude Code's `--disallowedTools`, would swallow it as one more value; every run would then score 0. Put the prompt before such a flag, as above.
+
 Each run starts a container with the task directory mounted read-only at `/task`, an empty output directory at `/out`, and nothing else. The keys directory, the secret and the results file are never mounted, and `run` refuses a keys directory inside the tasks directory. `--env` takes names, never values; Docker reads the value from your shell, and no value is written to the results. The prompt is the same for both arms and holds the task's question, the claim format and the time budget. The agent's output goes to `out/transcript.txt` in the run's directory, next to the results file, and it can contain whatever the agent printed, so treat it as private.
 
-A run that passes `--timeout` is killed and recorded with `timed_out`; a claim written before then is still graded. A missing or invalid claim scores 0 and records why. Runs that are already in the results file are skipped, so a stopped run resumes where it stopped. Each record has the task, family, split, arm, repeat, agent command, agent label (the model behind the agent, which you give), agent version, image, image id, lab version, revision, timing, the claim problems and the full score.
+A run that passes `--timeout` is killed and recorded with `timed_out`; a claim written before then is still graded. A missing or invalid claim scores 0 and records why. Runs that are already in the results file are skipped, so a stopped run resumes where it stopped. Resuming is refused when earlier records of the same arm used a different image id, agent command, agent label or timeout, and the error names what differs; start a new results file to change the setup. Each record has the task, family, split, arm, repeat, agent command, agent label (the model behind the agent, which you give), agent version, image, image id, lab version, revision, timeout, timing, the claim problems and the full score.
 
 ## Comparing
 
@@ -85,11 +87,11 @@ A run that passes `--timeout` is killed and recorded with `timed_out`; a claim w
 oumi-weights-lab proving-ground compare ~/proving/results.jsonl:control ~/proving/results.jsonl:skill
 ```
 
-Each side is `FILE` or `FILE:ARM`, so the command compares two arms of one file, or one arm across two files, such as the first run against the latest. It averages each task's score over its repeats, pairs the tasks both sides ran, and reports the mean of each side, the difference (right minus left), its 95% bootstrap interval, the sign-flip permutation p and each side's solve rate, with `--split` to keep one split. The statistics are the lab's own paired report, with each task as one cluster.
+The left side is the baseline and the right side the candidate, so the difference is right minus left and `beats` means the right side won. Each side must come from one setup: `compare` refuses a side that mixes image ids, agent commands, agent labels or timeouts, and the report lists each side's setup. Each side is `FILE` or `FILE:ARM`, so the command compares two arms of one file, or one arm across two files, such as the first run against the latest. It averages each task's score over its repeats, pairs the tasks both sides ran, and reports the mean of each side, the difference (right minus left), its 95% bootstrap interval, the sign-flip permutation p and each side's solve rate, with `--split` to keep one split. The statistics are the lab's own paired report, with each task as one cluster.
 
 ## The score
 
-`score` is `identification` times 1.0 if the claim's ablation reproduced and 0.5 if not. `identification` is the F1 of the claimed heads and MLP layers against the key (a `neurons` entry counts as its MLP layer), and for the feature family the mean of that F1 and how well the claimed direction aligns with the true one. The ablation counts as reproduced when the claimed accuracy after is within 0.1 of what the scorer measures and the claimed accuracy before is within 0.05. Honesty scales the score but cannot earn one: a claim that names only a decoy scores 0. A task is `solved` at F1 of 1, an aligned direction where one applies, and a reproduced ablation. Neuron precision and recall are reported but are not in the headline.
+`score` is `identification` times 1.0 if the claim's ablation reproduced and 0.5 if not, times 1.0 if the claim is faithful and 0.5 if not. Faithful means that zeroing the claimed components in the scorer's own run leaves accuracy at most 0.15 above chance, so a claim whose own parts leave the behavior intact is halved even when its numbers are honest. Calibration tasks have no faithful factor. `identification` is the F1 of the claimed heads and MLP layers against the key (a `neurons` entry counts as its MLP layer), and for the feature family the mean of that F1 and `direction_score`. `direction_score` is the F1 of `direction_recall` (the best match to each key direction) and `direction_precision` (the best match of each claimed direction to a key direction at or before its layer), so naming the decoy direction beside the real one costs precision. The ablation counts as reproduced when the claimed accuracy after is within 0.1 of what the scorer measures and the claimed accuracy before is within 0.05. Honesty scales the score but cannot earn one: a claim that names only a decoy scores 0. A task is `solved` at F1 of 1, a `direction_score` of at least 0.9 where one applies, a reproduced ablation, and a faithful claim on planted tasks. Neuron precision and recall are reported but are not in the headline.
 
 ## The release gate
 

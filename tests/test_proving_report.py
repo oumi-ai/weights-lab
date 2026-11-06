@@ -117,3 +117,33 @@ def test_compare_uses_the_labs_own_paired_statistics(monkeypatch):
         {"correct": 0.1, "failed": False, "fractional": True},
         {"correct": 0.3, "failed": False, "fractional": True},
     )
+
+
+def setup_record(task, **setup):
+    base = {"image_id": "sha256:a", "agent_cmd": "agent -p", "agent_label": "m", "timeout": 600}
+    return {**record(task, 0.5), **base, **setup}
+
+
+def test_each_sides_setup_is_reported():
+    left = [setup_record(f"t{i}") for i in range(4)]
+    right = [setup_record(f"t{i}", image_id="sha256:b") for i in range(4)]
+    report = compare(left, right)
+    assert report["left_setup"]["image_id"] == "sha256:a"
+    assert report["right_setup"] == {
+        "image_id": "sha256:b",
+        "agent_cmd": "agent -p",
+        "agent_label": "m",
+        "timeout": 600,
+    }
+
+
+@pytest.mark.parametrize(
+    "field,other",
+    [("image_id", "sha256:z"), ("agent_cmd", "x"), ("agent_label", "n"), ("timeout", 60)],
+)
+def test_a_side_that_mixes_setups_is_refused(field, other):
+    mixed = [setup_record("t0"), setup_record("t1", **{field: other})]
+    with pytest.raises(ValueError, match=field):
+        compare(mixed, [setup_record("t0"), setup_record("t1")])
+    with pytest.raises(ValueError, match=field):
+        compare([setup_record("t0"), setup_record("t1")], mixed)

@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .claims import CLAIM_FORMAT, load_claim
+from .claims import CLAIM_FORMAT, load_claim, task_shape, validate_claim
 from .tasks import load_key
 
 ARMS = ("skill", "control")
@@ -270,6 +270,25 @@ def read_results(path: str | Path) -> list[dict[str, Any]]:
     return records
 
 
+SETUP = (
+    ("image_id", "image id"),
+    ("agent_cmd", "agent_cmd"),
+    ("agent_label", "agent_label"),
+    ("timeout", "timeout"),
+)
+
+
+def _check_setup(earlier: list[dict[str, Any]], now: dict[str, Any]) -> None:
+    """Refuse to add runs to a results file whose earlier runs of this arm used another setup."""
+    for field, name in SETUP:
+        seen = {json.dumps(record.get(field)) for record in earlier}
+        if seen and seen != {json.dumps(now[field])}:
+            raise ValueError(
+                f"earlier runs of this arm used a different {name} ({', '.join(sorted(seen))}; "
+                f"now {json.dumps(now[field])}); use a new results file to change the setup"
+            )
+
+
 def _discover(tasks_dir: Path, task_ids: list[str] | None) -> list[str]:
     found = sorted(p.name for p in tasks_dir.iterdir() if (p / "task.json").is_file())
     if task_ids is None:
@@ -294,10 +313,12 @@ def _grade_claim(task_dir: Path, key: dict[str, Any], out_dir: Path, work_dir: P
     else:
         try:
             claim = load_claim(claim_path)
-        except (ValueError, OSError) as error:
+            problems += validate_claim(claim, task_shape(task_dir))
+        except (ValueError, OSError, OverflowError, RecursionError) as error:
             problems.append(f"{CLAIM_NAME} could not be read: {error}")
         else:
-            return grade_claim(task_dir, key, claim, work_dir)
+            if not problems:
+                return grade_claim(task_dir, key, claim, work_dir)
     return {"valid": False, "problems": problems, "score": 0.0, "solved": False}
 
 
@@ -329,7 +350,9 @@ def run(
     Refuses: an arm other than skill or control; a keys directory inside the tasks
     directory (or the reverse), or a results file inside the tasks directory; a task
     directory with files beyond what ``build_task`` writes; a task without a key; an
-    image whose arm label differs from ``arm``; an environment name that is not set in the
+    image whose arm label differs from ``arm``; earlier records of this arm in
+    ``results`` that used another image id, agent command, agent label or timeout (the
+    error names what differs); an environment name that is not set in the
     caller's environment. ``timeout`` is seconds per run; a run that overruns is killed,
     recorded with ``timed_out`` and graded on any claim written before. ``launch`` and
     ``probe`` replace Docker, for tests.
@@ -362,12 +385,25 @@ def run(
         if not key_path.is_file():
             raise ValueError(f"no key for task {ident} in {keys_root}")
         keys[ident] = load_key(key_path)
-    done = {(r["task"], r["arm"], r["repeat"]) for r in read_results(results_path)}
+    existing = read_results(results_path)
+    earlier = [r for r in existing if r["arm"] == arm]
+    done = {(r["task"], r["arm"], r["repeat"]) for r in existing}
     todo = [(i, n) for i in ids for n in range(repeats) if (i, arm, n) not in done]
-    if not todo:
+    if not todo and not earlier:
         return []
 
     facts = (probe or docker_probe)(image, shlex.split(agent_cmd)[0])
+    _check_setup(
+        earlier,
+        {
+            "image_id": facts.get("image_id"),
+            "agent_cmd": agent_cmd,
+            "agent_label": agent_label,
+            "timeout": timeout,
+        },
+    )
+    if not todo:
+        return []
     labels = facts.get("labels") or {}
     if labels.get(LABEL_PREFIX + "arm") != arm:
         raise ValueError(
@@ -425,6 +461,7 @@ def run(
             "lab_version": labels.get(LABEL_PREFIX + "version"),
             "revision": labels.get(LABEL_PREFIX + "revision"),
             "started": started.isoformat(),
+            "timeout": timeout,
             "seconds": round(seconds, 1),
             "exit_code": outcome.get("exit_code"),
             "timed_out": bool(outcome.get("timed_out")),

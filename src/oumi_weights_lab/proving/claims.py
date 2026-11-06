@@ -53,7 +53,8 @@ Rules:
 
 
 def load_claim(path: str | Path) -> Any:
-    """Read a claim file as data. Refuses files over 1 MB, invalid JSON, and NaN or Infinity."""
+    """Read a claim file as data. Refuses files over 1 MB, invalid JSON, JSON nested too deeply,
+    and NaN or Infinity."""
     path = Path(path)
     if path.stat().st_size > MAX_CLAIM_BYTES:
         raise ValueError(f"claim file is larger than {MAX_CLAIM_BYTES} bytes")
@@ -61,8 +62,11 @@ def load_claim(path: str | Path) -> Any:
     def refuse(constant: str) -> Any:
         raise ValueError(f"claim contains {constant}, which is not valid JSON")
 
-    with path.open(encoding="utf-8") as stream:
-        return json.load(stream, parse_constant=refuse)
+    try:
+        with path.open(encoding="utf-8") as stream:
+            return json.load(stream, parse_constant=refuse)
+    except RecursionError as error:
+        raise ValueError("claim is nested too deeply") from error
 
 
 def task_shape(task: Any) -> dict[str, Any]:
@@ -91,7 +95,12 @@ def _index(value: Any, upper: int) -> bool:
 
 
 def _number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # an integer too large for a float
+        return False
 
 
 def _check_component(i: int, part: Any, shape: dict[str, Any]) -> list[str]:

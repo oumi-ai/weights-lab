@@ -40,7 +40,7 @@ A claim is one JSON file of data. Layers and heads count from 0.
 oumi-weights-lab proving-ground grade --task tasks/<id> --key keys/<id>.json --claim claim.json
 ```
 
-The result has `score`, which is `identification` times 1.0 if your ablation numbers reproduced and 0.5 if not. `identification` comes from how well your components match the key, and a claim that names only a decoy scores 0. It also has `component_precision`, `component_recall`, `decoys_named`, `measured` and `solved`.
+The result has `score`, which is `identification` times 1.0 if your ablation numbers reproduced and 0.5 if not, times 1.0 if your claimed parts really break the behavior (`faithful`) and 0.5 if not. `identification` comes from how well your components, and any directions, match the key; naming a direction that is not used costs precision. A claim that names only a decoy scores 0. It also has `component_precision`, `component_recall`, `decoys_named`, `measured` and `solved`, which needs an exact match, reproduced numbers and a faithful claim.
 
 ## 5. Compare methods
 
