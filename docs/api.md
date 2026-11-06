@@ -592,7 +592,7 @@ with sae.patch({1234: 0.0}, positions="all"):
 ```
 
 - `load_sae(release=None, sae_id=None, *, path=None, device=None,
-  allow_model_mismatch=False, model_kwargs=None)` loads by SAELens release and id, or from
+  allow_model_mismatch=False, model_kwargs=None, hook_name=None)` loads by SAELens release and id, or from
   a local directory in SAELens's format, onto `device` (default the session's). It
   refuses, before any forward pass: a hook name that `hook_site` does not map; a site
   whose width is not `d_in` (a transcoder's output not `d_out`); a model mismatch where
@@ -604,6 +604,13 @@ with sae.patch({1234: 0.0}, positions="all"):
   `constant_norm_rescale`; and an adapter (PEFT) session. Quantized sessions work, since
   only activations are read. Raises `ImportError` naming the extra when SAELens is
   missing.
+- `hook_name` replaces the input hook the SAE records, for a release whose recorded hook is
+  not where it reads (Gemma Scope 2 transcoders record `blocks.L.hook_mlp_in` but read the
+  MLP's own input: pass `blocks.L.mlp.hook_in`). The override gets the same refusals as any
+  hook name: unmapped, a layer the model lacks, or a width that is not `d_in`. A
+  transcoder's output site still comes from its recorded `hook_name_out`. `LabSAE.hook_name`
+  is the name used and `recorded_hook_name` the one in the config; the repr shows both when
+  they differ.
 - `hook_site(lab, hook_name, model_kwargs=None)` maps a TransformerLens hook name to a
   `Site` with `module`, `at`, `width`, and the transform that makes a Hugging Face
   activation match the dictionary's training data. Mapped: `blocks.L.` followed by
@@ -620,7 +627,7 @@ with sae.patch({1234: 0.0}, positions="all"):
   was trained under, and check `fvu`. Normalized sites and `hook_resid_mid` can be read
   but not edited: `patch` and `steer` raise `ValueError`.
 - `LabSAE` has `module`, `at`, `hook_name`, `d_in`, `d_sae`, `kind` (`"sae"` or
-  `"transcoder"`), `output_module` and `output_at` (transcoders), `model_check`,
+  `"transcoder"`), `recorded_hook_name`, `output_module` and `output_at` (transcoders), `model_check`,
   `neuronpedia_id`, `prepend_bos`, and the SAELens object as `sae`.
 - `encode(activations)` takes an activation as the lab records it and applies the site
   transform; `decode(features)` returns the reconstruction in the dictionary's
@@ -644,7 +651,106 @@ with sae.patch({1234: 0.0}, positions="all"):
   token's own normalization.
 - `labels(indices, timeout=5.0)` returns Neuronpedia's explanation for each index, or
   `None` when there is no id, no label, or the network does not answer in time. Found
-  labels are cached under `artifacts/saes`. A label is a lead, not evidence.
+  labels are cached under `artifacts/saes`, and a feature with no label is not asked about
+  again by the same object. A label is a lead, not evidence.
+
+## Attribution graphs
+
+Needs the `saes` extra. `lab.attribution_graph` builds a feature-level graph of how the model
+produced its answer on one prompt, from one transcoder per MLP layer (see
+[Sparse autoencoders](#sparse-autoencoders)). The graph is JSON an agent can read, and
+`measure` tests a node in the real model through `LabSAE.patch`.
+
+```python
+transcoders = [lab.load_sae(release, sae_id) for sae_id in ids]  # one per layer
+graph = lab.attribution_graph("The capital of France is", transcoders)
+print(graph.metadata["replacement_score"], len(graph.nodes), len(graph.edges))
+graph.to_json("graph.json")
+top = next(n["id"] for n in graph.nodes if n["kind"] == "logit")
+print(graph.top_paths(top, 3))
+feature = "feat.12.4.317"  # a node id from graph.nodes
+result = graph.measure([feature])  # set the feature to 0 in the real model, on graph.inputs
+print(result["effect"][top])  # the change in the top logit node's value
+```
+
+- `attribution_graph(prompt, transcoders, *, max_logits=10, logit_probability=0.95,
+  max_features=10_000, node_threshold=0.8, edge_threshold=0.98, batch_size=16,
+  max_memory_gb=8, labels=False)` returns an `AttributionGraph`. `transcoders` is a list of transcoders or a dict from layer to
+  transcoder. It follows Ameisen et al., 2025, "Circuit Tracing".
+- The graph describes a replacement model: the session's model with each MLP's output
+  written as its transcoder's features times their decoder rows plus an error term,
+  attention patterns held at their real values, and each norm's denominator held fixed.
+  Every forward value is the real model's; only the gradients change. A skip transcoder's
+  skip connection is a linear path from the MLP's input, so it carries edges like any other;
+  the error term is what remains after the features and the skip. Only the `max_features`
+  features with the largest activations are nodes (`None` keeps all); the rest are absorbed
+  into the error terms.
+- Costs 3 forward passes, whatever the prompt or the feature count: one to record, one to run
+  the replacement model, and one with every leaf at zero to find each target's constant part.
+  Backward passes do not count. The budget is checked for all 3 first.
+- The adjacency work holds two dense float32 matrices of targets by sources, so memory grows
+  with the square of the node count. After the recording pass the peak is estimated, and a
+  graph over `max_memory_gb` (default 8: room on a 16 GB machine for the model and buffers,
+  about 30,000 nodes) is refused with a message naming `max_features`, which defaults to
+  10,000, the cap circuit-tracer uses. That refusal costs 1 pass.
+- `labels=True` asks Neuronpedia for each kept feature's label, one request per feature
+  without a cached label; it is off by default and nothing uses the network without it.
+- The call checks and raises `ValueError` rather than return a graph that fails: the
+  replacement model's logits equal the model's, each feature's encoder pre-activation equals
+  its activation, and each target's incoming edges plus its `bias` equal its `activation`,
+  each to 1e-4 of the size of the terms added. The numbers are in `metadata["checks"]`.
+- Refuses: a model that is not float32; a quantized or adapter session; an architecture
+  `heads` does not support, or one with an MLP layer that has no softmax attention (a hybrid
+  with linear attention); transcoders that are not one per MLP layer, are plain SAEs, belong
+  to another session, or do not read the MLP's input and write its output; a transcoder with
+  run-time input normalization; a norm other than LayerNorm or RMSNorm; an encoder that is not
+  ReLU, JumpReLU or top-k; and settings out of range. Hooks, the attention setting, train and
+  eval modes, and RNG state are restored on exit, even after an error.
+- Nodes are dicts with `id`, `kind`, `layer`, `position`, `token`, `token_id`, `feature`,
+  `activation`, and `influence`, plus `label` when the transcoder's `labels` give one, and
+  `bias` on feature and logit nodes. The ids are `emb.P`, `err.L.P`, `feat.L.P.F` and
+  `logit.TOKEN_ID`. `activation` is the feature's value, the L2 norm of an embedding or error
+  vector, or a logit minus the mean logit. `influence` is the node's share of the unpruned
+  graph's total influence on the logit nodes. Logit nodes also have `probability`.
+- Edges are `{source, target, weight}`. A target is a feature's pre-activation or a logit
+  minus the mean logit. The weight is the source's value times the gradient of the target
+  with respect to it. Pruning follows the paper and circuit-tracer's `prune_graph`: nodes are kept
+  up to `node_threshold` of the total influence, edges are rescored on the pruned graph
+  (renormalized, influence recomputed) and kept up to `edge_threshold`, and features and
+  errors with no outgoing edge, and features with no incoming one, are dropped until none
+  remain. Tokens and logit nodes are never pruned. A threshold of 1.0 for both keeps every
+  node and every nonzero edge. It differs from circuit-tracer in three ways: each logit also
+  keeps its strongest parent and that edge, so no logit is left without a cause; `influence`
+  is not recomputed after pruning; and the edge cutoff is found by bisection, so ties at the
+  cutoff are all kept. Pruned edges are missing from the sum above, so check the sum on a
+  graph built with both thresholds at 1.0.
+- `metadata` holds `prompt`, `tokens`, `input_ids` (including a BOS token the transcoders
+  asked for), `model_id`, `transcoders`, `settings`, `replacement_score` (the share of
+  backward paths from the logits to the tokens that never cross an error node),
+  `forward_passes`, and `checks`.
+- `AttributionGraph` has `nodes`, `edges`, `metadata`, `to_dict()`, `to_json(path)`,
+  `from_dict(data)`, `from_json(path)`, `node(id)`, `top_paths(node, k=5)`, and
+  `inputs`, `measure(node_ids, value=0.0)`, and `intervene(node_ids, value=0.0)`. A graph
+  read from a file cannot `measure` or `intervene`.
+- `inputs` are the exact model inputs the graph ran on (`input_ids` and, if the tokenizer
+  made one, `attention_mask`), including a BOS token the transcoders asked for. Graph
+  positions index these tokens. `lab.score` and `lab.evaluate` tokenize without that BOS
+  token, so their positions are off by one and must not be paired with `intervene`.
+- `measure(node_ids, value=0.0)` runs the real model on `graph.inputs` with those feature
+  nodes set to `value` through `LabSAE.patch`, and returns `baseline`, `intervened`, and
+  `effect`: each logit node's id mapped to its logit minus the mean logit, before and after,
+  and the difference. It costs 2 forward passes, checked against the budget first.
+- `top_paths` returns the `k` strongest paths into a node, each with `nodes` (source first),
+  `weights`, and `score`: the product of each edge's share of its target's incoming absolute
+  weight.
+- `intervene` is a context manager that sets feature nodes to `value` at their positions
+  through `LabSAE.patch`, keeping the reconstruction error. Run the model on `graph.inputs`
+  inside it, for example `lab.model(**graph.inputs)`. A forward pass in the context on any
+  other tokens, which includes `lab.score` and `lab.evaluate`, raises `ValueError` naming
+  `graph.measure`. It raises `ValueError`, before adding a hook, for an unknown node and for
+  a node that is not a feature.
+- Edges describe the replacement model. They cannot show an effect that moves through
+  attention patterns, and a large error node marks what the transcoders do not explain.
 
 ## Attachments (experimental)
 

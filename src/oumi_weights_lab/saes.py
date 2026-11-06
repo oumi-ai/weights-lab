@@ -338,6 +338,7 @@ class LabSAE:
         release: str | None,
         sae_id: str | None,
         model_check: str,
+        hook_name: str | None = None,
     ) -> None:
         metadata = sae.cfg.metadata
         self.lab = lab
@@ -345,7 +346,9 @@ class LabSAE:
         self.site = site
         self.output_site = output_site
         self.release, self.sae_id, self.model_check = release, sae_id, model_check
-        self.hook_name = metadata.hook_name
+        self.recorded_hook_name = metadata.hook_name
+        self._label_misses: set[int] = set()
+        self.hook_name = hook_name or metadata.hook_name
         self.module, self.at = site.module, site.at
         self.d_in, self.d_sae = int(sae.cfg.d_in), int(sae.cfg.d_sae)
         self.kind = "transcoder" if output_site is not None else "sae"
@@ -358,9 +361,14 @@ class LabSAE:
         self.dtype = sae.dtype
 
     def __repr__(self) -> str:
+        recorded = (
+            f" (recorded {self.recorded_hook_name})"
+            if self.hook_name != self.recorded_hook_name
+            else ""
+        )
         return (
-            f"LabSAE({self.kind}, {self.hook_name}, d_in={self.d_in}, d_sae={self.d_sae}, "
-            f"architecture={self.sae.cfg.architecture()})"
+            f"LabSAE({self.kind}, {self.hook_name}{recorded}, d_in={self.d_in}, "
+            f"d_sae={self.d_sae}, architecture={self.sae.cfg.architecture()})"
         )
 
     # Tensors
@@ -683,7 +691,8 @@ class LabSAE:
         not answer within ``timeout`` seconds; nothing is raised. After the first network
         failure the rest are not requested; an HTTP error or unreadable reply for one
         feature leaves only that feature as None. Found labels are cached under the session's
-        ``artifacts/saes`` directory. A label is a machine-written lead, not a fact: read
+        ``artifacts/saes`` directory, and a feature Neuronpedia has no label for is not
+        asked about again by this object. A label is a machine-written lead, not a fact: read
         the feature's top activating text before relying on it.
         """
         values = list(indices)
@@ -704,13 +713,17 @@ class LabSAE:
             if isinstance(cache.get(str(index)), str):
                 found[index] = cache[str(index)]
                 continue
+            if index in self._label_misses:
+                continue
             try:
                 label = _fetch_label(self.neuronpedia_id, index, timeout)
             except (urllib.error.HTTPError, ValueError):
                 continue  # this feature has no usable answer; the next may
             except Exception:
                 break  # the network did not answer; the rest would wait too
-            if label is not None:
+            if label is None:
+                self._label_misses.add(index)
+            else:
                 found[index] = cache[str(index)] = label
                 fresh = True
         if fresh:
@@ -734,6 +747,7 @@ class SAEMixin:
         device: Any = None,
         allow_model_mismatch: bool = False,
         model_kwargs: Mapping | None = None,
+        hook_name: str | None = None,
     ) -> LabSAE:
         """Load a SAELens sparse autoencoder or transcoder for this session's model.
 
@@ -745,6 +759,13 @@ class SAEMixin:
         processing it was trained under (see ``hook_site``). Many releases record nothing;
         ``model_kwargs`` replaces what is recorded, for example
         ``{"center_writing_weights": True}``. Check ``fvu`` from ``features`` either way.
+
+        ``hook_name`` replaces the input hook the SAE records, for a release whose recorded
+        hook is not where it reads (Gemma Scope 2 transcoders record ``blocks.L.hook_mlp_in``
+        but read the MLP's own input, ``blocks.L.mlp.hook_in``). The override is mapped and
+        its width checked like any hook name. A transcoder's output site still comes from its
+        recorded ``hook_name_out``. The LabSAE keeps both names: ``hook_name`` is the one used
+        and ``recorded_hook_name`` the one in the config.
 
         Raises ValueError, before any forward pass, for a hook name the mapping does not
         cover, a site whose width is not ``d_in`` (or a transcoder's output width not
@@ -790,14 +811,17 @@ class SAEMixin:
                 "or covariance whitening)"
             )
         metadata = sae.cfg.metadata
-        if not metadata.hook_name:
-            raise ValueError("the SAE records no hook name, so its site is unknown")
+        if hook_name is not None and not isinstance(hook_name, str):
+            raise ValueError("hook_name must be a string")
+        used = hook_name or metadata.hook_name
+        if not used:
+            raise ValueError("the SAE records no hook name, so its site is unknown; pass hook_name")
         if metadata.hook_head_index is not None:
             raise ValueError("a per-head SAE (hook_head_index) is not supported")
         kwargs = dict(metadata.model_from_pretrained_kwargs or {})
         if model_kwargs is not None:
             kwargs = dict(model_kwargs)
-        site = hook_site(self, metadata.hook_name, kwargs)
+        site = hook_site(self, used, kwargs)
         output_site = None
         if "transcoder" in architecture:
             if not metadata.hook_name_out:
@@ -805,8 +829,7 @@ class SAEMixin:
             output_site = hook_site(self, metadata.hook_name_out, kwargs)
         if site.width != sae.cfg.d_in:
             raise ValueError(
-                f"{metadata.hook_name} has width {site.width} in this model but the SAE has "
-                f"d_in {sae.cfg.d_in}"
+                f"{used} has width {site.width} in this model but the SAE has d_in {sae.cfg.d_in}"
             )
         if output_site is not None and output_site.width != sae.cfg.d_out:
             raise ValueError(
@@ -828,5 +851,12 @@ class SAEMixin:
             sae.turn_off_forward_pass_hook_z_reshaping()
         sae.eval().requires_grad_(False)
         return LabSAE(
-            self, sae, site, output_site, release=release, sae_id=sae_id, model_check=check
+            self,
+            sae,
+            site,
+            output_site,
+            release=release,
+            sae_id=sae_id,
+            model_check=check,
+            hook_name=used,
         )
