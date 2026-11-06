@@ -6,7 +6,35 @@ compatibility: Requires the oumi-weights-lab CLI (Python 3.11+ on Linux or macOS
 
 # Oumi Weights Lab
 
-Load one model into a persistent worker, then send it Python snippets. Snippets share state, so an edit made in one snippet is measured in the next. The worker saves every snippet's source, output, and forward-pass count in the session directory. Snippets are trusted Python with the user's filesystem and network access.
+Run Python against a live model with tested calls for finding mechanisms, editing weights with exact undo, and measuring what changed. There are two ways to run it, with the same `lab` object:
+
+- **A script**, for a model that loads in seconds, such as one under a billion parameters on CPU. Write a file that calls `open_lab` and run it with `oumi-weights-lab script analysis.py`, which runs it in the lab's own environment.
+- **A persistent worker**, for a large model or a long session. Load the model once, then send Python snippets (see Session commands). Snippets share state, so an edit made in one is measured in the next, and the worker saves every snippet's source, output, and forward-pass count in the session directory.
+
+Scripts and snippets are trusted Python with the user's filesystem and network access.
+
+## Understand a model: start here
+
+Don't write your own ablation loops and hooks. These calls do it, tested, and leave the model as they found it:
+
+```python
+from oumi_weights_lab import open_lab
+
+lab = open_lab(
+    "/abs/path/to/model", device="cpu"
+)  # or a Hub id; a worker snippet already has `lab`
+clean = ["When Mary and John went to the store, John gave a drink to"]
+corrupt = ["When Mary and John went to the store, Anna gave a drink to"]
+direct = lab.logit_attribution(clean[0], (" Mary", " John"))  # who writes the answer
+edges = lab.edge_attribution(clean, corrupt, metric=(" Mary", " John"))  # candidate circuit
+circuit = lab.find_circuit(
+    clean, corrupt, metric=(" Mary", " John"), top=50
+)  # tested by real patching
+print(circuit["faithfulness"])
+```
+
+- [Choose a method](references/method-map.md) says which call answers which question and what each cannot show. That covers heads, directions (`contrast_directions`), sparse features (`load_sae`), and attribution graphs.
+- [Find and test a circuit](references/circuit-workflow.md) is the protocol for a claim: rival hypotheses, faithfulness and completeness, look-alikes, redundancy, and a report of what failed. A single ablation sweep misses backup parts and parts that only work together.
 
 ## Setup
 

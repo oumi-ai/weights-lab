@@ -5,6 +5,27 @@ Snippets share one namespace with `lab`, `model`, `tokenizer`, `Path`, and
 when gradients are unnecessary. `export`, `save_edits`, and `load_edits` resolve
 relative paths under `artifacts/`; other paths resolve from where `start` ran.
 
+## Scripts
+
+```python
+from oumi_weights_lab import open_lab
+
+lab = open_lab("/abs/path/to/model", device="cpu", pass_limit=5000)
+```
+
+`open_lab(model, *, session=None, device="auto", dtype="auto", adapter=None, quantize=None,
+seed=0, pass_limit=None, allow_hub_kernels=False)` loads a model into a `Lab` in the calling
+process. It is the same `lab` a worker gives its snippets, for a script on a model that loads
+in seconds. The model is gone when the script ends, so keep a large model in a worker instead.
+`session` is a new or empty directory for run records and artifacts (by default a new one under
+`./sessions/`), and an existing directory with files in it is refused. The other arguments mean
+what the `start` options of the same names mean.
+
+`oumi-weights-lab script FILE [ARGS...]` runs a Python file as `__main__` in the lab's own
+environment, with `ARGS` in `sys.argv`, so the import works under the Claude Code plugin and a
+`uv tool` install, where a plain `python` cannot import the lab. The script's exit code is the
+command's exit code, and an error prints the script's own traceback.
+
 ## Weights
 
 | Call | Effect |

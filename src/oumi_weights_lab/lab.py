@@ -135,6 +135,53 @@ def block_hub_kernels(allow: bool) -> None:
     sys.modules["kernels"] = None
 
 
+def open_lab(
+    model: str | Path,
+    *,
+    session: str | Path | None = None,
+    device: str = "auto",
+    dtype: str = "auto",
+    adapter: str | Path | None = None,
+    quantize: str | None = None,
+    seed: int = 0,
+    pass_limit: int | None = None,
+    allow_hub_kernels: bool = False,
+) -> Lab:
+    """Load a model into a ``Lab`` in this process, for a script on a model that loads quickly.
+
+    It is the same ``lab`` a worker session gives its snippets, without the worker: the model
+    is loaded when the script starts and is gone when it ends, so a model that takes long to
+    load is better kept in a worker (``oumi-weights-lab start`` and ``send``). ``session`` is
+    the directory for run records and artifacts; it must be new or empty, and by default is a
+    new directory under ``./sessions/``. The other arguments mean what the ``start`` options
+    of the same names mean, and the pass limit covers everything this lab runs.
+
+    Refuses a session directory that already holds files, so runs from different scripts
+    never mix. Custom model code from the Hub is never enabled.
+    """
+    import secrets
+    import time
+
+    if session is None:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        session = Path.cwd() / "sessions" / f"script-{stamp}-{secrets.token_hex(3)}"
+    session = Path(session)
+    if session.exists() and any(session.iterdir()):
+        raise ValueError(f"open_lab needs a new session directory; {session} is not empty")
+    session.mkdir(parents=True, exist_ok=True)
+    config = {
+        "model": str(model),
+        "adapter": None if adapter is None else str(adapter),
+        "device": device,
+        "dtype": dtype,
+        "quantize": quantize,
+        "seed": seed,
+        "pass_limit": pass_limit,
+        "allow_hub_kernels": allow_hub_kernels,
+    }
+    return load_lab({key: value for key, value in config.items() if value is not None}, session)
+
+
 def load_lab(config: dict[str, Any], session_path: Path) -> Lab:
     """Load one eager Hugging Face causal language model, optionally with PEFT.
 

@@ -314,6 +314,33 @@ def _stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def _script(args: argparse.Namespace) -> int:
+    """Run a file as __main__ in this interpreter, where ``oumi_weights_lab`` imports."""
+    import runpy
+    import traceback
+
+    path = args.file.expanduser()
+    if not path.is_file():
+        raise ValueError(f"no such script: {path}")
+    saved = sys.argv
+    sys.argv = [str(path), *args.arguments]
+    try:
+        runpy.run_path(str(path), run_name="__main__")
+    except SystemExit as exc:
+        code = exc.code
+        if code is None or isinstance(code, int):
+            return code or 0
+        print(code, file=sys.stderr)
+        return 1
+    except Exception:
+        # Keep the script's own traceback; main() would reduce it to one line.
+        traceback.print_exc()
+        return 1
+    finally:
+        sys.argv = saved
+    return 0
+
+
 def _backup(args: argparse.Namespace) -> int:
     path = args.session.expanduser().resolve()
     output = args.output.expanduser().resolve()
@@ -644,6 +671,13 @@ def _parser() -> argparse.ArgumentParser:
         "--overwrite", action="store_true", help="replace the output file if it exists"
     )
     promote.set_defaults(handler=_methods_promote)
+    script = commands.add_parser(
+        "script",
+        help="run a Python file in the lab's environment, for scripts that call open_lab",
+    )
+    script.add_argument("file", type=Path)
+    script.add_argument("arguments", nargs=argparse.REMAINDER)
+    script.set_defaults(handler=_script)
     worker = commands.add_parser("_worker")
     worker.add_argument("--session", required=True, type=Path)
     for command in (start, send, peek, stop, backup):
