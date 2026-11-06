@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -138,3 +139,19 @@ def tiny_lab(tmp_path, tiny_tokenizer):
         )
     ).eval()
     return Lab(model, tiny_tokenizer, tmp_path / "lab", model_id="test-model")
+
+
+@pytest.fixture(scope="session")
+def proving_tasks(tmp_path_factory):
+    """Each planted family's dev task 0, built once: ``{family: {"dir", "key"}}``."""
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    from oumi_weights_lab.proving import build_task, load_key
+    from oumi_weights_lab.proving.planted import PLANTED_FAMILIES
+
+    root = tmp_path_factory.mktemp("proving")
+    built = {}
+    for family in PLANTED_FAMILIES:
+        info = build_task(family, "dev", 0, root / "tasks", root / "keys")
+        built[family] = {"dir": Path(info["task_dir"]), "key": load_key(info["key_path"])}
+    return built
