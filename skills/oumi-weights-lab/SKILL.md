@@ -1,6 +1,6 @@
 ---
 name: oumi-weights-lab
-description: Use when asked to ablate, zero, edit, swap, or compare an open-weights language model's parameters, including LoRA adapters; when measuring how a weight change affects a model's answers; or when recording, patching, or probing a Hugging Face causal model's activations or gradients.
+description: Use when asked to find out how an open-weights language model does something (which heads, MLPs, neurons, features, or directions carry a behavior) or to test such a claim; when asked to ablate, zero, edit, swap, or compare a model's parameters, including LoRA adapters; when measuring how a weight change affects a model's answers; or when recording, patching, or probing a Hugging Face causal model's activations or gradients.
 compatibility: Requires the oumi-weights-lab CLI (Python 3.11+ on Linux or macOS), provided by the Claude Code plugin when uv is installed or by uv tool install git+https://github.com/oumi-ai/weights-lab, and network access to download models. Remote workers also need an authenticated SkyPilot CLI.
 ---
 
