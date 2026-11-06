@@ -60,7 +60,7 @@ docker run --rm weights-lab-proving:skill oumi-weights-lab --help
 
 `AGENT_INSTALL` is the shell command that installs the agent; it defaults to `npm install -g @anthropic-ai/claude-code`. Any agent that takes a prompt on its command line works. The image runs as a non-root user `agent`, because Claude Code refuses to skip permission prompts as root. Each image carries labels for its arm, the package version and the git revision, and `run` refuses an image whose arm label differs from `--arm`.
 
-What the image holds is part of the test. The proving package (task builders, planted constructions, the scorer), its recipe, this page, the tests, keys and secrets are left out of the image and the build context, so a skill-arm agent cannot read how the families are built. `oumi-weights-lab proving-ground` is therefore absent inside the skill image. Network access stays on, because the agent needs its model API. Add the agent's own flags to block web tools, for example `--disallowedTools WebFetch WebSearch` for Claude Code.
+What the image holds is part of the test. The proving package (task builders, planted constructions, the scorer), this page, the tests, keys and secrets are left out of the image and the build context, and the proving-ground recipe is replaced by a short stub (`docker/proving-ground-stub.md`) so links to it from other recipes still land, so a skill-arm agent cannot read how the families are built. `oumi-weights-lab proving-ground` is therefore absent inside the skill image. Network access stays on, because the agent needs its model API. Add the agent's own flags to block web tools, for example `--disallowedTools WebFetch WebSearch` for Claude Code.
 
 ## Running both arms
 

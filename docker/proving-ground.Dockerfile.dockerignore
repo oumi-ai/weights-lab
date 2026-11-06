@@ -7,6 +7,8 @@
 !src
 !src/oumi_weights_lab
 !src/oumi_weights_lab/**
+!docker
+!docker/proving-ground-stub.md
 !skills
 !skills/oumi-weights-lab
 !skills/oumi-weights-lab/**

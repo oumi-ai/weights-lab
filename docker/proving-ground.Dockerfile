@@ -11,16 +11,18 @@
 #
 # What the agent can see is the point of this file. The image never holds the proving
 # package (task builders, planted constructions, the scorer), its documentation or its
-# skill recipe, tests, keys or secrets. The source stage below removes them from the
-# lab it installs, and the .dockerignore keeps them out of the build context too.
+# skill recipe, tests, keys or secrets. The source stage below removes the package from
+# the lab it installs and replaces the recipe with a short stub, so links to the recipe
+# from other recipes still land somewhere. The .dockerignore keeps the real recipe out of
+# the build context too.
 
 ARG UV_VERSION=0.10.12
 ARG ARM=skill
 
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
-# The lab's source with the proving package and its recipe taken out. Only this stage
-# touches the build context; the arms copy from it.
+# The lab's source with the proving package taken out and its recipe replaced by a stub.
+# Only this stage touches the build context; the arms copy from it.
 FROM node:22-bookworm-slim AS source
 ARG VERSION
 ARG REVISION
@@ -28,12 +30,12 @@ WORKDIR /src
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src ./src
 COPY skills ./skills
+COPY docker/proving-ground-stub.md /stub.md
 RUN test -n "$REVISION" \
     && grep -q "^version = \"$VERSION\"\$" pyproject.toml \
     && rm -rf src/oumi_weights_lab/proving \
-    && rm -f skills/oumi-weights-lab/references/proving-ground.md \
-    && sed -i '/proving-ground/d' skills/oumi-weights-lab/SKILL.md \
-    && ! grep -rqi 'proving-ground' skills \
+    && cp /stub.md skills/oumi-weights-lab/references/proving-ground.md \
+    && cmp /stub.md skills/oumi-weights-lab/references/proving-ground.md \
     && test ! -e src/oumi_weights_lab/proving
 
 FROM node:22-bookworm-slim AS base

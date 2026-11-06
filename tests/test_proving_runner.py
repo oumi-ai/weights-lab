@@ -664,6 +664,7 @@ def test_the_build_context_keeps_answers_secrets_and_the_proving_package_out(ima
         "src/oumi_weights_lab/lab.py",
         "skills/oumi-weights-lab/SKILL.md",
         "skills/oumi-weights-lab/references/heads.md",
+        "docker/proving-ground-stub.md",
     ):
         assert not ignored(patterns, path), path
 
@@ -683,8 +684,16 @@ def test_the_dockerfile_copies_only_whitelisted_paths(image_files):
 def test_the_skill_image_strips_the_proving_package_and_its_recipe(image_files):
     dockerfile, _ = image_files
     assert "rm -rf src/oumi_weights_lab/proving" in dockerfile
-    assert "rm -f skills/oumi-weights-lab/references/proving-ground.md" in dockerfile
-    assert "sed -i '/proving-ground/d' skills/oumi-weights-lab/SKILL.md" in dockerfile
+    # the recipe becomes the stub; SKILL.md is left alone so links to it still land
+    assert "cp /stub.md skills/oumi-weights-lab/references/proving-ground.md" in dockerfile
+    assert "cmp /stub.md skills/oumi-weights-lab/references/proving-ground.md" in dockerfile
+    assert "test ! -e src/oumi_weights_lab/proving" in dockerfile
+    assert "sed -i" not in dockerfile and "grep -r" not in dockerfile
+    stub = (ROOT / "docker" / "proving-ground-stub.md").read_text()
+    recipe = (ROOT / "skills/oumi-weights-lab/references/proving-ground.md").read_text()
+    assert stub.splitlines()[0] == recipe.splitlines()[0] == "# Test a method on known answers"
+    assert "The proving ground is not installed in this environment." in stub
+    assert len(stub.splitlines()) <= 5 and "oumi-weights-lab proving-ground" not in stub
     # the lab and the skill reach the image only through the stripped source stage
     for line in re.findall(r"^COPY --from=(\S+) .*$", dockerfile, re.M):
         assert line in {"uv", "source", "pins"}
