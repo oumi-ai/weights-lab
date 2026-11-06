@@ -92,6 +92,7 @@ Read only the one you need:
 - [Attention heads](references/heads.md): list heads as weight slices, ablate one, and screen for induction heads.
 - [Attribution patching](references/attribution-patching.md): rank module and token sites with activation gradients, then confirm with real patches.
 - [Find and test a circuit](references/circuit-workflow.md): chain the logit lens, attribution patching, patches, and ablations into one tested claim.
+- [Test a method on known answers](references/proving-ground.md): build tasks with known mechanisms, grade a claim against the key, and compare methods.
 - [Steering vectors](references/steering.md): add a recorded direction to the residual stream.
 - [Logit lens](references/logit-lens.md): read each layer's output through the final norm and head.
 - [Short-row gradients](references/gradients.md): per-row gradients for selected parameters.

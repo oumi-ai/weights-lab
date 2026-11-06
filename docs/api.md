@@ -390,6 +390,23 @@ weights = lab.head_weights(0, 1)  # q, k, v, o as float32 CPU tensors, plus bias
 - On a quantized model the weights are dequantized for the read; see
   [Quantized models](#quantized-models).
 
+## Proving ground
+
+```python
+from oumi_weights_lab import proving
+
+info = proving.build_task("copy-head", "dev", 0, "tasks", "keys")
+result = proving.grade_claim(info["task_dir"], proving.load_key(info["key_path"]), claim, "work")
+report = proving.compare(skill_records, control_records, split="heldout")
+```
+
+Tasks with a planted mechanism and a hidden answer key, a scorer, and a paired comparison. They measure whether an agent that has the skill understands models better than one that does not. See [Proving ground](proving-ground.md) for the families, splits, images and how to run them. Importing `proving` does not import torch.
+
+- `build_task(family, split, index, out_dir, keys_dir, *, secret_file=None)` writes `out_dir/<task id>/` (`task.json`, `model/`, `rows.jsonl`) and `keys_dir/<task id>.json`, and returns `{"task", "task_dir", "key_path"}`. Task ids are opaque, `{split}-{10 hex digits}`. A held-out build needs a secret file of at least 32 bytes, and a dev or calibration build refuses one. Raises `ValueError` for a keys directory inside the task directory, an existing task directory, or a family in the wrong split, and `RuntimeError` when no valid model comes out of 20 draws.
+- `grade_claim(task_dir, key, claim, work_dir)` returns the score dict: component precision, recall and F1, `identification`, `ablation_reproduced`, `score` and `solved`. It reruns the claim's ablation on 400 rows of its own in a fresh lab. An invalid claim scores 0 with `problems`; `validate_claim(claim, task_dir)` lists them. `CLAIM_FORMAT` describes the claim to give an agent.
+- `compare(left, right, split=None)` pairs two lists of result records by task, averages repeats, and returns both means, the difference, its 95% interval, the permutation p and the solve rates. It raises `ValueError` when no task pairs. `beats(report)` is true when the interval is above zero.
+- The command line wraps these as `oumi-weights-lab proving-ground build|run|grade|compare`. `run` needs Docker and refuses a keys directory inside the tasks directory.
+
 ## Attachments (experimental)
 
 `lab.attach(component, mode="prefix")` transforms prompts for `generate`, `score`,
