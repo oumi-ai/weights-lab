@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 SAMPLES = 10_000
@@ -103,3 +104,23 @@ def beats(report: dict[str, Any]) -> bool:
     This is the release gate from v0.6.0 on; for v0.5.0 it is only reported.
     """
     return report["delta_ci"][0] > 0
+
+
+def record_method_result(
+    methods_dir: str | Path,
+    name: str,
+    version: str,
+    result: dict[str, Any],
+    setup: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Append a graded result to a saved method version's ``results.jsonl``.
+
+    ``result`` holds the ``task`` id, its ``split`` and the ``score`` dict that
+    ``grade_claim`` returned, and may hold the ``setup`` it ran in (``setup`` overrides it).
+    A grade from ``proving-ground grade`` has none: the task id fixes the model. The record
+    adds the time, and NaN is written as null. Raises ValueError for a method or version
+    that is not saved, or a result without those fields. Returns the record.
+    """
+    from ..methods_store import append_method_result
+
+    return append_method_result(methods_dir, name, version, result, setup)

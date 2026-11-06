@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import linecache
 import os
 import signal
 import subprocess
@@ -101,6 +102,7 @@ class Worker:
         snippet_id = source.stem
         running = self.path / "running" / source.name
         source.rename(running)
+        finished = str(self.path / "completed" / source.name)
         started = time.time()
         clock_started = time.monotonic()
         before = getattr(self.lab, "forward_passes", 0)
@@ -116,7 +118,19 @@ class Worker:
             try:
                 try:
                     signal.setitimer(signal.ITIMER_REAL, self.config["snippet_timeout"])
-                    code = compile(running.read_text(encoding="utf-8"), str(running), "exec")
+                    text = running.read_text(encoding="utf-8")
+                    # The file moves to completed/ when the snippet ends, so compile it under
+                    # the path it will have there: inspect.getsource then reads functions
+                    # defined here from disk, for example when a later snippet saves one as
+                    # a method. While the snippet runs the file is not there yet, so its
+                    # lines wait in linecache, and are dropped once the file has moved.
+                    linecache.cache[finished] = (
+                        len(text),
+                        None,
+                        text.splitlines(keepends=True),
+                        finished,
+                    )
+                    code = compile(text, finished, "exec")
                     exec(code, self.namespace)
                 finally:
                     # Disarm before any handler below runs. An alarm that lands after
@@ -138,6 +152,7 @@ class Worker:
         )
         write_json(self.path / "results" / f"{snippet_id}.json", result)
         running.rename(self.path / "completed" / running.name)
+        linecache.cache.pop(finished, None)
         if stopping:
             raise _WorkerStopped()
         self._status("ready")

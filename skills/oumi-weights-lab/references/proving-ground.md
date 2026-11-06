@@ -46,4 +46,6 @@ The result has `score`, which is `identification` times 1.0 if your ablation num
 
 Write one claim per method and task, grade each, and compare the mean scores across tasks. Use the same tasks, the same rows and the same time for every method, and at least five tasks before you trust a gap. The CLI compares results files that `proving-ground run` writes, and `oumi_weights_lab.proving.compare` takes two lists of result records with a `task`, `split`, `repeat` and `score` dict and returns a paired difference with its interval.
 
+To keep a method that does well, and record each grade against its version, see [Save and reuse a method](saved-methods.md).
+
 Do not change a method after seeing a held-out result. The maintainer runs held-out tasks, and they are the only ones that count for a release.

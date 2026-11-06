@@ -14,6 +14,7 @@ from .graphs import GraphMixin
 from .hf_data import hf_rows
 from .inspection import InspectionMixin
 from .methods import MethodsMixin
+from .methods_store import SavedMethodsMixin
 from .persistence import PersistenceMixin
 from .saes import SAEMixin
 from .scoring import ScoringMixin
@@ -32,6 +33,7 @@ class Lab(
     AnalysesMixin,
     SAEMixin,
     GraphMixin,
+    SavedMethodsMixin,
 ):
     """A loaded model, tokenizer, and the session's artifact directory.
 

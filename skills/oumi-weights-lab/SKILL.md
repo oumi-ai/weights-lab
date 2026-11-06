@@ -98,6 +98,7 @@ Read only the one you need:
 - [Steering vectors](references/steering.md): compute a direction from contrasting prompts, check it on held-out pairs, and add it to the residual stream.
 - [Sparse autoencoder features](references/saes.md): load a public SAE or transcoder, check its reconstruction error, then read, patch, and steer features.
 - [Attribution graphs](references/attribution-graphs.md): build a feature graph of one answer from transcoders, read it as JSON, and test a path with a real intervention.
+- [Save and reuse a method](references/saved-methods.md): keep a method you wrote with its source, results and setup, load it by name later, and draft a recipe from a winner.
 - [Logit lens](references/logit-lens.md): read each layer's output through the final norm and head.
 - [Short-row gradients](references/gradients.md): per-row gradients for selected parameters.
 - [Document-split probes](references/probes.md): linear probes that keep source documents apart.

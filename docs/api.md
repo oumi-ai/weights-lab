@@ -502,6 +502,29 @@ Tasks with a planted mechanism and a hidden answer key, a scorer, and a paired c
 - `grade_claim(task_dir, key, claim, work_dir)` returns the score dict: component precision, recall and F1, `direction_recall`, `direction_precision` and `direction_score` where the key has directions, `identification`, `ablation_reproduced`, `faithful`, `score` and `solved`. `score` is `identification` halved once if the ablation did not reproduce and halved again if the claim is not faithful. It reruns the claim's ablation on 400 rows of its own in a fresh lab. An invalid claim scores 0 with `problems`; `validate_claim(claim, task_dir)` lists them. `CLAIM_FORMAT` describes the claim to give an agent.
 - `compare(left, right, split=None)` pairs two lists of result records by task, averages repeats, and returns both means, the difference (right minus left), its 95% interval, the permutation p, the solve rates and each side's setup. Put the baseline on the left. It raises `ValueError` when no task pairs or a side mixes image ids, agent commands, agent labels or timeouts. `beats(report)` is true when the interval is above zero, meaning the right side won.
 - The command line wraps these as `oumi-weights-lab proving-ground build|run|grade|compare`. `run` needs Docker and refuses a keys directory inside the tasks directory.
+- `record_method_result(methods_dir, name, version, result, setup=None)` appends a graded result (`task`, `split`, the `score` dict, the time and the setup if one is given) to a saved method version's `results.jsonl`, writing NaN as null. It raises `ValueError` for a method or version that is not saved. `proving-ground grade ... --method NAME@VERSION [--methods-dir DIR]` prints the grade, then records it, and refuses an unknown method or version before it grades. See [Saved methods](#saved-methods).
+
+## Saved methods
+
+```python
+def rank_heads(lab, prompt, answer):
+    return {"ranking": []}
+
+
+meta = lab.save_method(rank_heads, note="zeroes one head at a time")
+result = lab.run_method("rank_heads", prompt, answer)
+# result["saved_method"] == {"name": "rank_heads", "version": meta["version"]}
+```
+
+A method an agent writes outlives the session. A method is a plain function whose first parameter is `lab`. It is saved with its source, its proving-ground results and the setup it ran on, and a later session loads it by name.
+
+- `lab.save_method(function, *, name=None, note="")` saves the function and returns its metadata: `name`, `version`, `function`, `signature`, `docstring`, `note`, `created_at`, `lab_version`, `setup` (the block that run summaries record, from the first save) and `setups` (every setup the same version was saved in; saving identical source again in a different setup adds to this list). `name` defaults to the function's name and holds lowercase letters, digits, `_` and `-`. The version is the first 12 hex digits of the SHA-256 of the saved source, so saving the same source again returns the existing entry. The source must run on its own: a module global becomes an import line (`import torch`, `import numpy as np`), and anything else raises `ValueError` naming it: a non-module global (also one used by a default, decorator or nested function), a closure variable, a first parameter not named `lab`, a lambda, or a source `inspect.getsource` cannot read. Pass values as arguments or import inside the function. A function defined in a snippet can be saved by a later snippet.
+- Files go to `OUMI_WEIGHTS_LAB_METHODS` if set, else `methods/` in the directory where the session started: `methods/<name>/<version>/method.py`, `meta.json` and `results.jsonl`.
+- `lab.methods()` lists each saved method with its versions (newest first), their notes and a summary of their proving-ground results: `results`, `tasks`, `mean_score`, `solve_rate` and `splits`. Each task counts once, averaged over its repeats. A grade whose score was NaN is stored as null and left out of the summary.
+- `lab.record_method_result(name, version, result)` records a graded result (`task`, `split` and the `score` dict) in that version's `results.jsonl` together with this session's setup. `proving-ground grade --method` records without a setup: the task id fixes the model. Records written either way are compared only when their setups match, or when one side has none and the task is the same.
+- `lab.load_method(name, version=None)` returns a `Method` with `name`, `version`, `source` and `meta`: the newest version by creation time unless one is named. It runs the saved Python with your permissions, as snippets do, and refuses a file edited since it was saved. Calling the method runs `function(lab, *args, **kwargs)`. A dict result comes back as a copy with `"saved_method": {"name", "version"}` added, and the call raises `ValueError` if the dict already has a `saved_method` key. Other results come back unchanged. `lab.run_method(name, *args, version=None, **kwargs)` loads and calls in one step.
+- `oumi-weights-lab methods list [--methods-dir DIR]` prints the same list as JSON.
+- `oumi-weights-lab methods promote NAME [--version V] [--against NAME[@VERSION]] --output FILE.md [--methods-dir DIR] [--force] [--overwrite]` writes a recipe draft for a maintainer: the docstring, the source, every setup the method was saved or graded in, a table of results per task and, with `--against`, the paired comparison on the tasks both were graded on. The comparison uses only results from matching setups, and the draft says what it left out. It refuses a method without scored results, and with `--against` a method that does not beat the other by the paired interval, unless `--force`. It refuses an output path under a `skills` directory, and an existing file unless `--overwrite`. Promotion into the skill is a reviewed change.
 
 ## Circuit analyses
 
