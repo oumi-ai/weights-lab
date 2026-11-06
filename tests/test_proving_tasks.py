@@ -35,10 +35,19 @@ def test_planted_family_builds_and_passes_its_own_validation(family, index, tmp_
     assert key["decoys"] and key["components"]
     assert check["rows"] == 400
     assert 0 <= check["attempt"] < tasks.ATTEMPTS
-    if family == "copy-backup":
-        assert len(key["components"]) == 2
-        assert key["components"][0]["layer"] != key["components"][1]["layer"]
-        assert min(check["key_head_ablated_alone"].values()) >= 0.85
+    if family in ("copy-backup", "copy-redundant", "copy-selfrepair"):
+        wanted = 3 if family == "copy-redundant" else 2
+        assert len(key["components"]) == wanted
+        assert len({c["layer"] for c in key["components"]}) == wanted
+        alone = check["key_head_ablated_alone"]
+        assert min(alone.values()) >= 0.85
+    if family == "copy-redundant":
+        assert len(check["key_pair_ablated"]) == 3
+        assert min(check["key_pair_ablated"].values()) >= 0.85
+    if family == "copy-selfrepair":
+        primary, backup = key["components"]
+        assert primary["layer"] < backup["layer"]
+        assert check["key_head_ablated_alone"][f"{backup['layer']}.{backup['head']}"] >= 0.95
     if family in ("lookup-mlp", "feature-direction"):
         assert key["neurons"][0]["layer"] == key["components"][0]["layer"]
     if family == "feature-direction":
@@ -120,7 +129,7 @@ def test_seeds_follow_the_published_formulas():
     assert tasks.task_id("copy-head", "heldout", 3, b"t" * 40) != f"heldout-{mac}"
     assert tasks.task_id("gpt2-ioi", "calibration", 0).startswith("calibration-")
     ids = {tasks.task_id(f, "dev", i) for f in FAMILIES for i in range(3)}
-    assert len(ids) == 12
+    assert len(ids) == 3 * len(FAMILIES)
     with pytest.raises(ValueError, match="needs the secret"):
         tasks.task_id("copy-head", "heldout", 3)
     with pytest.raises(ValueError, match="no seed"):
@@ -409,14 +418,24 @@ def test_calibration_task_builds_from_a_local_model_without_a_seed(
 
 
 def test_task_json_and_files_do_not_reveal_the_family(tmp_path):
-    one = build_task("copy-head", "dev", 0, tmp_path / "a", tmp_path / "ka")
-    two = build_task("copy-backup", "dev", 0, tmp_path / "b", tmp_path / "kb")
-    first = json.loads((Path(one["task_dir"]) / "task.json").read_text())
-    second = json.loads((Path(two["task_dir"]) / "task.json").read_text())
-    assert first["id"] != second["id"]
-    first.pop("id"), second.pop("id")
-    assert first == second and "family" not in first
-    assert one["task"].startswith("dev-") and len(one["task"]) == len("dev-") + 10
+    built = [
+        build_task(family, "dev", 0, tmp_path / family, tmp_path / f"k-{family}")
+        for family in planted.COPY_FAMILIES
+    ]
+    infos = [json.loads((Path(b["task_dir"]) / "task.json").read_text()) for b in built]
+    assert len({info["id"] for info in infos}) == len(infos)
+    for info in infos:
+        info.pop("id")
+    assert all(info == infos[0] for info in infos) and "family" not in infos[0]
+    assert all(b["task"].startswith("dev-") and len(b["task"]) == len("dev-") + 10 for b in built)
+    for built_one in built:  # the same model shape too, so the config does not hint
+        config = json.loads((Path(built_one["task_dir"]) / "model" / "config.json").read_text())
+        assert (config["n_layer"], config["n_head"], config["n_embd"], config["n_inner"]) == (
+            6,
+            4,
+            64,
+            256,
+        )
 
 
 def test_no_file_in_a_task_directory_contains_a_family_name(proving_tasks):

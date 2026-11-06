@@ -20,6 +20,10 @@ from oumi_weights_lab.proving.planted import PLANTED_FAMILIES  # noqa: E402
 FAMILIES = list(PLANTED_FAMILIES)
 
 
+def _name(part):
+    return f"{part['layer']}.{part['head']}"
+
+
 def effect(before, after, rows=400):
     return {"accuracy_before": before, "accuracy_after": after, "rows": rows}
 
@@ -131,7 +135,7 @@ def test_a_superset_claim_has_perfect_recall_and_lower_precision(family, proving
     taken = {(c["layer"], c.get("head")) for c in [*key["components"], *key["decoys"]]}
     extras = [
         {"kind": "head", "layer": layer, "head": head}
-        for layer in range(4)
+        for layer in range(6)
         for head in range(4)
         if (layer, head) not in taken
     ][:2]
@@ -160,6 +164,37 @@ def test_a_partial_claim_for_the_backup_family_has_half_recall(proving_tasks, tm
     assert result["component_precision"] == 1.0 and result["component_recall"] == 0.5
     assert result["component_f1"] == pytest.approx(2 / 3)
     assert result["faithful"] is False  # the other head still copies the flag
+
+
+def test_a_claim_naming_only_the_primary_of_the_self_repair_family_is_not_faithful(
+    proving_tasks, tmp_path
+):
+    key = proving_tasks["copy-selfrepair"]["key"]
+    primary = key["components"][:1]  # the earlier head; the backup repairs its loss
+    check = key["validation"]
+    one = effect(check["baseline_accuracy"], check["key_head_ablated_alone"][_name(primary[0])])
+    result = grade(
+        proving_tasks, "copy-selfrepair", claim_of(key, components=primary, ablation=one), tmp_path
+    )
+    assert result["ablation_reproduced"] == 1  # the numbers are honest
+    assert result["faithful"] is False and result["solved"] is False
+    assert result["score"] < 0.5
+
+
+def test_a_claim_naming_one_or_two_of_the_three_redundant_heads_scores_below_half(
+    proving_tasks, tmp_path
+):
+    key = proving_tasks["copy-redundant"]["key"]
+    assert len(key["components"]) == 3
+    for kept in (1, 2):
+        result = grade(
+            proving_tasks,
+            "copy-redundant",
+            claim_of(key, components=key["components"][:kept]),
+            tmp_path,
+        )
+        assert result["faithful"] is False and result["solved"] is False
+        assert result["score"] < 0.5, kept
 
 
 def test_neurons_count_as_their_mlp_layer_and_are_scored_apart(proving_tasks, tmp_path):
@@ -262,7 +297,7 @@ def mutated(claim, path, value):
         (["ablation"], KeyError, "ablation is required"),
         (["components"], KeyError, "components must be a list"),
         (["components", 0, "kind"], "layer", "unknown kind"),
-        (["components", 0, "layer"], 4, "layer must be"),
+        (["components", 0, "layer"], 6, "layer must be"),
         (["components", 0, "layer"], True, "layer must be"),
         (["components", 0, "layer"], -1, "layer must be"),
         (["components", 0, "head"], 4, "head must be"),

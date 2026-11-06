@@ -8,18 +8,22 @@ A task is a model, a question and 200 rows. The agent investigates and writes a 
 
 ## Families and decoys
 
-The planted families are tiny GPT-2 models (4 layers, 4 heads, hidden size 64) built from zero weights with one mechanism put in by hand. Where the mechanism sits comes from the task's seed. Every family also has a decoy: a part that looks like the mechanism but is never used, so naming it earns nothing.
+The planted families are tiny GPT-2 models (6 layers, 4 heads, hidden size 64, MLP width 256; every family has this one shape, so the config does not hint at the family) built from zero weights with one mechanism put in by hand. Where the mechanism sits comes from the task's seed. Every family also has a decoy: a part that looks like the mechanism but is never used, so naming it earns nothing.
 
 | Family | Mechanism | Decoy |
 | --- | --- | --- |
 | `copy-head` | one head copies a flag word to the answer | a head with the same query and key weights whose output nothing reads |
 | `copy-backup` | two heads in different layers each copy it, so either alone is enough | as above |
+| `copy-redundant` | three heads in three different layers each copy it, so any one is enough | as above |
+| `copy-selfrepair` | a primary head copies it and also writes a marker direction; a backup head in a later layer copies only when the marker is missing, so ablating the primary alone changes nothing | as above |
 | `lookup-mlp` | one MLP layer stores a map from subject to attribute, one neuron per subject | an MLP in another layer with the same neurons, writing where nothing reads |
 | `feature-direction` | one MLP layer writes a class along a direction the output reads | another layer writing the same class along a direction nothing reads |
 
+The four copy families share one task: the same words, rows, options, chance and question, so `task.json` is identical apart from its id. Each copy model also has a marker direction that exactly one head writes and nothing but the self-repair backup reads. In the other copy families the decoy writes it, so a marker in the model does not name the family. A single or pairwise ablation sweep finds the key of `copy-head` and `copy-backup` (a pair of heads) but not that of `copy-redundant` or `copy-selfrepair`: every single ablation and every pair of ablations leaves accuracy high, and only the whole key brings it to chance. Finding the key takes reading how the heads connect, for example attention patterns, which head writes what, and ablating one head while watching another.
+
 Two calibration families, `gpt2-ioi` and `gpt2-induction`, use GPT-2 small and published or measured keys. They download the model, their answers are public, and they check the scorer and agents; they are never held out.
 
-`build` validates each planted model before it writes the task. The baseline must be at least 0.95 accurate, ablating the key parts must bring it to near chance, and ablating the decoy or any other single head or MLP must change nothing. A model that fails is redrawn, up to 20 times, and the numbers it measured go in the key.
+`build` validates each planted model before it writes the task. The baseline must be at least 0.95 accurate, ablating the key parts must bring it to near chance, and ablating the decoy or any other single head or MLP must change nothing. `copy-backup` and `copy-redundant` also need each key head alone (and, for three heads, each pair) to leave at least 0.85. For `copy-selfrepair` the primary alone leaves at least 0.85 and the backup alone at least 0.95. A model that fails is redrawn, up to 20 times, and the numbers it measured go in the key.
 
 ## Splits and the secret
 
@@ -38,7 +42,7 @@ The secret is read from the file you name, at least 32 bytes after stripping. It
 
 ```sh
 oumi-weights-lab proving-ground build --family copy-head --family copy-backup \
-  --family lookup-mlp --family feature-direction --split heldout --count 3 \
+  --family copy-redundant --family copy-selfrepair --family lookup-mlp --family feature-direction --split heldout --count 3 \
   --out ~/proving/tasks --keys ~/proving/keys --secret-file ~/.config/weights-lab-secret
 ```
 
@@ -58,6 +62,8 @@ done
 docker run --rm weights-lab-proving:skill oumi-weights-lab --help
 ```
 
+In the skill image only, `/work/CLAUDE.md` and `/work/AGENTS.md` say where the skill is installed and to read its `SKILL.md` first. The agents read these files from their working directory. Claude Code loads the skill either way, but Sonnet skipped it on easy tasks. The control image writes neither file. The prompt itself is the same in both arms.
+
 `AGENT_INSTALL` is the shell command that installs the agent; it defaults to `npm install -g @anthropic-ai/claude-code`. Any agent that takes a prompt on its command line works. The image runs as a non-root user `agent`, because Claude Code refuses to skip permission prompts as root. Each image carries labels for its arm, the package version and the git revision, and `run` refuses an image whose arm label differs from `--arm`.
 
 What the image holds is part of the test. The proving package (task builders, planted constructions, the scorer), this page, the tests, keys and secrets are left out of the image and the build context, and the proving-ground recipe is replaced by a short stub (`docker/proving-ground-stub.md`) so links to it from other recipes still land, so a skill-arm agent cannot read how the families are built. `oumi-weights-lab proving-ground` is therefore absent inside the skill image. Network access stays on, because the agent needs its model API, and that limits what the proving ground can promise. An agent with network access can install the public package and rebuild any dev task and its key, so dev tasks are a smoke test and a place to tune recipes, never a measurement of the skill. Only held-out tasks measure it: their seeds and ids come from your secret, so nothing public can reproduce them. Block the agent's web tools as well, but treat that as hygiene and not as isolation.
@@ -69,15 +75,21 @@ export ANTHROPIC_API_KEY=...
 for arm in skill control; do
   oumi-weights-lab proving-ground run --tasks ~/proving/tasks --keys ~/proving/keys \
     --arm $arm --image weights-lab-proving:$arm \
-    --agent-cmd "claude -p {prompt} --dangerously-skip-permissions --model sonnet --disallowedTools WebFetch WebSearch" \
-    --agent-label claude-sonnet --repeats 3 --timeout 3600 \
+    --agent-cmd "claude -p {prompt} --dangerously-skip-permissions --model sonnet --output-format stream-json --verbose --disallowedTools WebFetch WebSearch" \
+    --agent-label claude-sonnet --repeats 3 --timeout 3600 --jobs 4 \
     --env ANTHROPIC_API_KEY --results ~/proving/results.jsonl
 done
 ```
 
+`--output-format stream-json --verbose` makes the agent print one JSON event per line, so `transcript.txt` keeps every tool call and result and not just the final message.
+
 Put `{prompt}` where the prompt goes. Without it the runner appends the prompt as the last argument, and a flag that takes any number of values, such as Claude Code's `--disallowedTools`, would swallow it as one more value; every run would then score 0. Put the prompt before such a flag, as above.
 
 Each run starts a container with the task directory mounted read-only at `/task`, an empty output directory at `/out`, and nothing else. The keys directory, the secret and the results file are never mounted, and `run` refuses a keys directory inside the tasks directory. `--env` takes names, never values; Docker reads the value from your shell, and no value is written to the results. The prompt is the same for both arms and holds the task's question, the claim format and the time budget. The agent's output goes to `out/transcript.txt` in the run's directory, next to the results file, and it can contain whatever the agent printed, so treat it as private.
+
+To see whether the agent used the skill, search the transcript for the skill's path or for `oumi_weights_lab` (a `Skill` tool call, a `Read` of `SKILL.md` or of a file under `references/`, or a Python import of the lab), and look at which tools it called before it wrote its first claim. An agent that never touched them solved the task by its own means, whatever arm it ran in. A transcript can hold anything the agent printed, so read it as private.
+
+`--jobs N` (default 1) runs up to N containers at once, each with its own run directory and container name. Each record is appended to the results file as its run finishes, so the file is in completion order, and the other behavior below is unchanged: resume skips finished runs, the setup checks run before anything starts, and `--timeout` applies to each run. Grading happens on the host in the worker thread, but one claim at a time behind a lock: it builds a lab for each claim and saves and restores global torch state such as the RNG, which two threads must not do together. Choose N from what the machine and the model API allow. If one run raises an error, the others finish and keep their records, and then the error is raised.
 
 A run that passes `--timeout` is killed and recorded with `timed_out`; a claim written before then is still graded. A missing or invalid claim scores 0 and records why. Runs that are already in the results file are skipped, so a stopped run resumes where it stopped. Resuming is refused when earlier records of the same arm used a different image id, agent command, agent label or timeout, and the error names what differs; start a new results file to change the setup. Each record has the task, family, split, arm, repeat, agent command, agent label (the model behind the agent, which you give), agent version, image, image id, lab version, revision, timeout, timing, the claim problems and the full score.
 

@@ -1,14 +1,20 @@
 """Tiny GPT-2 models with one planted mechanism, and the rows that exercise it.
 
-Every model has the same shape: 4 layers, 4 heads of 16 dimensions, hidden size 64, an
+Every model has the same shape: 6 layers, 4 heads of 16 dimensions, hidden size 64, an
 MLP width of 256, untied embeddings, no dropout. All weights start at zero and LayerNorm
 gains at 1. Named subspaces are cut from an orthonormal basis of the mean-zero subspace,
 so LayerNorm only rescales and the planted signals stay exactly where they were put.
 Random "noise" heads and MLPs read from everywhere but write only into a small leftover
 subspace, so they never disturb the planted mechanism.
 
-Four families are planted. Each also plants a decoy that looks like the mechanism but is
-never used: ``copy-head``, ``copy-backup``, ``lookup-mlp`` and ``feature-direction``.
+Six families are planted. Each also plants a decoy that looks like the mechanism but is
+never used: ``copy-head``, ``copy-backup``, ``copy-redundant``, ``copy-selfrepair``,
+``lookup-mlp`` and ``feature-direction``. The four copy families share one task: the same
+vocabulary, rows, options and question. ``copy-backup`` has two copy heads, either of which
+suffices. ``copy-redundant`` has three. ``copy-selfrepair`` has a primary head that writes a
+marker direction and a backup head that stays quiet until the marker is gone. Every copy
+model has a marker direction written by one head and every copy family has a decoy, so
+neither the marker nor the shape of the model names the family.
 ``plant`` builds one model from ``(family, seed, attempt)``; ``validate_plant`` measures
 that the mechanism and the decoy behave as designed. Importing this module does not
 import torch or transformers.
@@ -23,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 HIDDEN = 64
-LAYERS = 4
+LAYERS = 6
 HEADS = 4
 HEAD_DIM = HIDDEN // HEADS
 INNER = 256
@@ -50,6 +56,8 @@ THRESHOLD = 2.5
 MLP_WRITE = 1.5
 LOOKUP_UNEMBED_NOISE = 0.05
 DIRECTION_WRITE = 0.5
+MARKER_WRITE = 3.0
+MARKER_SUPPRESS = 2.5
 
 ROW_COUNT = 200
 FLAGS, NOISE_TOKENS = 8, 12
@@ -78,29 +86,30 @@ _COPY_VOCAB = ("<eos>", "?", *(f"f{i}" for i in range(FLAGS)), *(f"n{i}" for i i
 _COPY_ALLOCATION = (
     ("flag", 1),
     ("query", 1),
+    ("marker", 1),
     ("fcode", FLAGS),
     ("ncode", NOISE_TOKENS),
     ("out", FLAGS),
     ("dout", FLAGS),
 )
 
+_COPY_QUESTION = (
+    "Each prompt is a run of filler words with one special word hidden among them, "
+    "then a question mark. Which parts of this model make it answer correctly?"
+)
+COPY_FAMILIES = ("copy-head", "copy-backup", "copy-redundant", "copy-selfrepair")
+
 FAMILIES: dict[str, Family] = {
-    "copy-head": Family(
-        "copy-head",
-        "Each prompt is a run of filler words with one special word hidden among them, "
-        "then a question mark. Which parts of this model make it answer correctly?",
-        tuple(f" f{i}" for i in range(FLAGS)),
-        _COPY_VOCAB,
-        _COPY_ALLOCATION,
-    ),
-    "copy-backup": Family(
-        "copy-backup",
-        "Each prompt is a run of filler words with one special word hidden among them, "
-        "then a question mark. Which parts of this model make it answer correctly?",
-        tuple(f" f{i}" for i in range(FLAGS)),
-        _COPY_VOCAB,
-        _COPY_ALLOCATION,
-    ),
+    **{
+        name: Family(
+            name,
+            _COPY_QUESTION,
+            tuple(f" f{i}" for i in range(FLAGS)),
+            _COPY_VOCAB,
+            _COPY_ALLOCATION,
+        )
+        for name in COPY_FAMILIES
+    },
     "lookup-mlp": Family(
         "lookup-mlp",
         "Each prompt is a run of filler words and then one subject word. The model "
@@ -117,9 +126,9 @@ FAMILIES: dict[str, Family] = {
     ),
     "feature-direction": Family(
         "feature-direction",
-        "Each prompt is a run of filler words and then one word. The model answers yes "
-        "or no. Where in this model is the feature that decides the answer, and which "
-        "parts of the model write it?",
+        "Each prompt is a run of filler words and then one word, and the model answers "
+        "yes or no. Which parts of the model write the feature that decides the answer, "
+        "and along which direction in the residual stream does it travel?",
         (" yes", " no"),
         ("<eos>", "yes", "no", *(f"w{i}" for i in range(WORDS)))
         + tuple(f"n{i}" for i in range(NOISE_TOKENS)),
@@ -166,7 +175,7 @@ def make_rows(
         raise ValueError(f"unknown planted family {family!r}; choose from {list(FAMILIES)}")
     spec, rng, rows = FAMILIES[family], random.Random(seed), []
     for _ in range(n):
-        if family in ("copy-head", "copy-backup"):
+        if family in COPY_FAMILIES:
             words = [f"n{rng.randrange(NOISE_TOKENS)}" for _ in range(PROMPT_NOISE)]
             flag = rng.randrange(FLAGS)
             words[rng.randrange(PROMPT_NOISE)] = f"f{flag}"
@@ -415,8 +424,21 @@ def _embeddings(model: Any, vocab: tuple[str, ...], space: _Space, signal) -> No
     model.transformer.wpe.weight.copy_(space.noise(POSITIONS, EMBED_NOISE))
 
 
-def _plant_copy_head(model: Any, space: _Space, layer: int, head: int, writes: str) -> None:
-    """One head: queries from '?', keys on flag tokens, values carry the flag code to ``writes``."""
+def _plant_copy_head(
+    model: Any,
+    space: _Space,
+    layer: int,
+    head: int,
+    writes: str,
+    *,
+    marks: bool = False,
+    suppressed: bool = False,
+) -> None:
+    """One head: queries from '?', keys on flag tokens, values carry the flag code to ``writes``.
+
+    ``marks`` also copies the flag indicator into the marker direction. ``suppressed``
+    pushes the query down by the marker, so the head stays quiet while a marker is present.
+    """
     sub, d = space.sub, HIDDEN
     block = model.transformer.h[layer]
     q = slice(head * HEAD_DIM, (head + 1) * HEAD_DIM)
@@ -427,13 +449,17 @@ def _plant_copy_head(model: Any, space: _Space, layer: int, head: int, writes: s
     e0 = torch.zeros(HEAD_DIM)
     e0[0] = 1.0
     weight = block.attn.c_attn.weight
-    weight[:, q] = QK_SCALE * torch.outer(sub["query"][0], e0)
+    query = sub["query"][0] - (MARKER_SUPPRESS * sub["marker"][0] if suppressed else 0)
+    weight[:, q] = QK_SCALE * torch.outer(query, e0)
     weight[:, k] = QK_SCALE * torch.outer(sub["flag"][0], e0)
     value = torch.zeros(d, HEAD_DIM)
     value[:, :FLAGS] = OV_SCALE * sub["fcode"].T
-    weight[:, v] = value
     out = torch.zeros(HEAD_DIM, d)
     out[:FLAGS] = OV_SCALE * sub[writes]
+    if marks:
+        value[:, FLAGS] = MARKER_WRITE * sub["flag"][0]
+        out[FLAGS] = MARKER_WRITE * sub["marker"][0]
+    weight[:, v] = value
     block.attn.c_proj.weight[head * HEAD_DIM : (head + 1) * HEAD_DIM] = out
 
 
@@ -463,7 +489,7 @@ def plant(family: str, seed: int, attempt: int = 0) -> Plant:
     result = Plant(family, model, tokenizer, [], [])
     with torch.no_grad():
         _fill_noise(model, space)
-        if family in ("copy-head", "copy-backup"):
+        if family in COPY_FAMILIES:
             _build_copy(model, space, spec, result)
         elif family == "lookup-mlp":
             _build_lookup(model, space, spec, result)
@@ -488,15 +514,32 @@ def _build_copy(model: Any, space: _Space, spec: Family, result: Plant) -> None:
     _embeddings(model, spec.vocab, space, signal)
     slots = [(layer, head) for layer in range(LAYERS) for head in range(HEADS)]
     order = [slots[i] for i in space.perm(len(slots))]
-    copies = [order.pop(0)]
-    if result.family == "copy-backup":
-        later = next(slot for slot in order if slot[0] != copies[0][0])
-        order.remove(later)
-        copies.append(later)
+    family = result.family
+    if family == "copy-selfrepair":
+        # The primary leaves at least one layer after it; the backup sits in a later layer.
+        primary = next(slot for slot in order if slot[0] < LAYERS - 1)
+        order.remove(primary)
+        backup = next(slot for slot in order if slot[0] > primary[0])
+        order.remove(backup)
+        copies = [primary, backup]
+    else:
+        copies = [order.pop(0)]
+        for _ in range({"copy-backup": 1, "copy-redundant": 2}.get(family, 0)):
+            other = next(slot for slot in order if slot[0] not in {c[0] for c in copies})
+            order.remove(other)
+            copies.append(other)
     decoy = order.pop(0)
-    for layer, head in copies:
-        _plant_copy_head(model, space, layer, head, "out")
-    _plant_copy_head(model, space, decoy[0], decoy[1], "dout")
+    for slot in copies:
+        _plant_copy_head(
+            model,
+            space,
+            *slot,
+            "out",
+            marks=family == "copy-selfrepair" and slot == copies[0],
+            suppressed=family == "copy-selfrepair" and slot == copies[1],
+        )
+    # The marker is written by exactly one head in every copy model; here, the decoy's.
+    _plant_copy_head(model, space, decoy[0], decoy[1], "dout", marks=family != "copy-selfrepair")
     for t, word in enumerate(spec.vocab):
         model.lm_head.weight[t] = space.noise(1, UNEMBED_NOISE)[0] + (
             UNEMBED * sub["out"][int(word[1:])] if word.startswith("f") else 0
@@ -613,7 +656,10 @@ def validate_plant(result: Plant, rows: list[dict[str, Any]]) -> dict[str, Any]:
     together leaves at most chance + 0.15; each decoy and each other single head or MLP
     layer moves accuracy by at most 0.05; for ``copy-backup`` each key head alone leaves at
     least 0.85; and for ``feature-direction`` projecting the direction out after the writer
-    layer leaves at most 0.65. Returns the numbers, ``passed``, and a list of ``failures``.
+    layer leaves at most 0.65. ``copy-redundant`` needs each key head alone and each pair of
+    key heads to leave at least 0.85. ``copy-selfrepair`` needs the primary (the earlier key
+    head) alone to leave at least 0.85 and the backup alone at least 0.95. Returns the
+    numbers, ``passed``, and a list of ``failures``.
     """
     model, tokenizer, chance = result.model, result.tokenizer, result.spec.chance
     measure = lambda: option_accuracy(model, tokenizer, rows)  # noqa: E731
@@ -636,14 +682,29 @@ def validate_plant(result: Plant, rows: list[dict[str, Any]]) -> dict[str, Any]:
             numbers["direction_ablated_accuracy"] = measure()["accuracy"]
         if numbers["direction_ablated_accuracy"] > 0.65:
             failures.append("projecting the direction out leaves accuracy above 0.65")
-    if result.family == "copy-backup":
+    if result.family in COPY_FAMILIES[1:]:
         alone = {}
         for part in result.components:
             with zeroed(model, [part]):
                 alone[_name(part)] = measure()["accuracy"]
         numbers["key_head_ablated_alone"] = alone
-        if min(alone.values()) < 0.85:
-            failures.append("ablating one backup head alone drops accuracy below 0.85")
+        if result.family == "copy-selfrepair":
+            primary, backup = (_name(part) for part in result.components)  # sorted by layer
+            if alone[primary] < 0.85:
+                failures.append("ablating the primary head alone drops accuracy below 0.85")
+            if alone[backup] < 0.95:
+                failures.append("ablating the backup head alone drops accuracy below 0.95")
+        elif min(alone.values()) < 0.85:
+            failures.append("ablating one key head alone drops accuracy below 0.85")
+        if result.family == "copy-redundant":
+            pairs = {}
+            for i, first in enumerate(result.components):
+                for second in result.components[i + 1 :]:
+                    with zeroed(model, [first, second]):
+                        pairs[f"{_name(first)}+{_name(second)}"] = measure()["accuracy"]
+            numbers["key_pair_ablated"] = pairs
+            if min(pairs.values()) < 0.85:
+                failures.append("ablating two key heads drops accuracy below 0.85")
     key_names = {_name(part) for part in result.components}
     decoy_names = {_name(part) for part in result.decoys}
     effects: dict[str, float] = {}
