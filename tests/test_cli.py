@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import subprocess
@@ -173,6 +174,19 @@ def test_stop_keeps_the_final_status_a_worker_writes_as_it_exits(session_path, m
 def test_terminal_states_are_the_worker_status_terminal_states():
     # status.json holds only worker states; snippet result states never appear there.
     assert cli.TERMINAL_STATES == {"stopped", "failed"}
+
+
+@pytest.mark.parametrize("proving", [True, False])
+def test_usage_names_every_command_except_the_internal_worker(monkeypatch, proving):
+    # The agent images leave out the proving package, and with it proving-ground.
+    monkeypatch.setattr(cli, "_proving_available", lambda: proving)
+    parser = cli._parser()
+    (commands,) = [a for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
+    public = [name for name in commands.choices if name != "_worker"]
+    assert "script" in public
+    assert ("proving-ground" in public) == proving
+    assert "{" + ",".join(public) + "}" in parser.format_usage()
+    assert "_worker" not in parser.format_help()
 
 
 def test_start_parser_defaults_use_shared_session_constants():

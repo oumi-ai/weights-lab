@@ -543,9 +543,7 @@ def _parser() -> argparse.ArgumentParser:
         prog="oumi-weights-lab",
         description="Keep a local model loaded and run Python snippets against it.",
     )
-    commands = parser.add_subparsers(
-        dest="command", required=True, metavar="{start,send,peek,stop,backup,methods}"
-    )
+    commands = parser.add_subparsers(dest="command", required=True)
     start = commands.add_parser("start", help="launch a detached local worker")
     start.add_argument("--session", required=True, type=Path)
     start.add_argument("--model", required=True)
@@ -690,6 +688,8 @@ def _parser() -> argparse.ArgumentParser:
         from .proving.cli import add_commands
 
         add_commands(commands)
+    # Name the commands in the usage line by hand so it leaves out _worker.
+    commands.metavar = "{" + ",".join(name for name in commands.choices if name != "_worker") + "}"
     return parser
 
 
