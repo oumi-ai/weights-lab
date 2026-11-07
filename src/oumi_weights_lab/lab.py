@@ -10,13 +10,20 @@ from .circuits import CircuitsMixin
 from .editing import EditingMixin
 from .hf_data import hf_rows
 from .inspection import InspectionMixin
+from .methods import MethodsMixin
 from .persistence import PersistenceMixin
 from .scoring import ScoringMixin
 from .session import DTYPES, QUANTIZE
 
 
 class Lab(
-    EditingMixin, ScoringMixin, InspectionMixin, CircuitsMixin, AttachmentMixin, PersistenceMixin
+    EditingMixin,
+    ScoringMixin,
+    InspectionMixin,
+    MethodsMixin,
+    CircuitsMixin,
+    AttachmentMixin,
+    PersistenceMixin,
 ):
     """A loaded model, tokenizer, and the session's artifact directory.
 

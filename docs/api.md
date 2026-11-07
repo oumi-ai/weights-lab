@@ -358,6 +358,65 @@ gradients = lab.gradient("hello world", parameters=[name], max_tokens=64)
 - `lora_diagnostics(pattern="*", adapter=None)` reports each LoRA update's singular
   values and rank without running the model.
 
+## Building blocks for new methods
+
+```python
+result = lab.run_with(
+    "The capital of France is",
+    activations=[{"module": "model.layers.3", "positions": -1, "value": replacement}],
+    record=["model.layers.5"],
+)
+jac = lab.jacobian("The capital of France is", "model.layers.3", "model.layers.5")
+rows = lab.sweep("The capital of France is", [None, [intervention_a], [intervention_b]])
+```
+
+An intervention is `{"module": name, "at": "output" | "input", "positions": None, "value":
+tensor or callable}`, as for `patch`: positions default to the last token, and a callable
+receives the selected tensor and returns its replacement.
+
+- `run_with(inputs, *, activations=(), weights=None, record=(), logits="last", grad=False)`
+  runs the model once. `inputs` is a string, a list of strings (left-padded with an
+  attention mask and position ids, as scoring batches are), or a dict of tensors, which
+  passes through unchanged for full control. Text is prepared the way `score` prepares a
+  prompt: prefix attachments and any chat template apply, and special tokens follow
+  scoring's rule, so numbers line up with `score` and `evaluate` on the same text. Active
+  logit attachments are model hooks, so they do apply to the returned logits, and a
+  padded batch refuses them as scoring does. `activations` are interventions that apply
+  for this call only. `record` takes module names or `{"module", "at", "positions"}`
+  dicts, each module once, and a record sees the replaced value. `logits` is `"last"`,
+  `"all"`, or `None`.
+- `weights` maps parameter names to whole replacement tensors through
+  `torch.func.functional_call`; nothing is written into the model. Shapes must match.
+  A tied parameter has one value for all its names: replacing `lm_head.weight` on a tied
+  model also replaces the input embedding for that call. Two names for one parameter with
+  different tensors raise, and so does a quantized weight; use `edit` and `undo` there.
+- Results are `{"logits", "records", "forward_passes"}`. By default they are detached
+  float32 CPU tensors. With `grad=True` the call keeps its graph and logits and records
+  stay on their device, attached, so `torch.autograd.grad` reaches parameters, replaced
+  tensors, and recorded values. `requires_grad` flags and train/eval modes are not changed.
+- Hooks are removed, parameters are unchanged, and `lab.patches()` is untouched after
+  any error, including `KeyboardInterrupt`. Absolute (nonnegative) positions raise on a
+  padded batch with the message scoring gives; negative positions and `"all"` do not.
+- `jacobian(inputs, source, target, *, source_at="output", target_at="output",
+  source_positions=None, target_positions=None)` returns the derivative of the target
+  selection with respect to the source selection for one sequence, shaped
+  `[*target_shape, *source_shape]` without the batch dimension, as a float32 CPU tensor.
+  `jvp(..., tangent)` returns `(target_value, derivative)` and `vjp(..., cotangent)`
+  returns `(target_value, gradient)`, with the same point arguments.
+- The model runs with the source selection replaced through a hook, so the derivative is
+  the effect of changing that selection with everything else held fixed. The source and
+  the target must each run once in the forward; otherwise the call raises and names the
+  module. A target that runs before the source has a zero derivative. Parameters gain no
+  `.grad`. Each of these three calls costs one forward pass.
+- `sweep(inputs, interventions, *, record=(), logits="last", batch_size=8)` repeats one
+  prompt (a string, or a dict with batch size 1) once per entry of `interventions`, each
+  entry None or a list of interventions. Row i gets only entry i's interventions, and rows
+  may set the same module to different values. It runs in chunks of `batch_size`, one pass
+  per sequence, and returns one `{"logits", "records"}` per entry, shaped as `run_with`
+  returns for that entry alone. The budget is checked before each chunk: a sweep over the
+  cap fails before the chunk that would cross it, and earlier chunks have run and counted.
+  Weight replacements are not supported; call `run_with` in a loop.
+
 ## Attention heads
 
 ```python
