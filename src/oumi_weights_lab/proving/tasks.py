@@ -29,16 +29,20 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from . import calibration, planted
+from . import calibration, gpt2_planted, planted
 from .calibration import CALIBRATION_FAMILIES
+from .gpt2_planted import GPT2_FAMILIES
 from .planted import PLANTED_FAMILIES, derive
 
 SPLITS = ("dev", "heldout", "calibration")
-ALL_FAMILIES = (*PLANTED_FAMILIES, *CALIBRATION_FAMILIES)
+SEEDED_FAMILIES = (*PLANTED_FAMILIES, *GPT2_FAMILIES)
+ALL_FAMILIES = (*SEEDED_FAMILIES, *CALIBRATION_FAMILIES)
 MIN_SECRET_BYTES = 32
 ATTEMPTS = 20
 TASK_ROWS = 200
 VALIDATION_ROWS = 400
+GPT2_VALIDATION_ROWS = 300
+SCORER_ROWS = 400  # rows the scorer draws from a key's eval_seed
 CLAIM_VERSION = 1
 OPTIONS_NOTE = "Every row lists its options and its answer; the model's choice is scored on them."
 CALIBRATION_QUESTIONS = {
@@ -108,7 +112,7 @@ def _check_task(family: str, split: str, index: int) -> None:
         raise ValueError("index must be a non-negative integer")
     if family in CALIBRATION_FAMILIES and split != "calibration":
         raise ValueError(f"{family} is a calibration family; use the calibration split")
-    if family in PLANTED_FAMILIES and split == "calibration":
+    if family in SEEDED_FAMILIES and split == "calibration":
         raise ValueError(f"{family} is a planted family; use the dev or heldout split")
 
 
@@ -120,10 +124,14 @@ def make_rows(
     row_spec: dict[str, Any] | None = None,
     tokenizer: Any = None,
 ) -> list[dict[str, Any]]:
-    """Rows for any family. Planted families need ``row_spec`` (from the key) for some
-    families; calibration families need the task's ``tokenizer``."""
+    """Rows for any family. Some planted families and both GPT-2 planted families need
+    ``row_spec`` (from the key); calibration families need the task's ``tokenizer``."""
     if family in PLANTED_FAMILIES:
         return planted.make_rows(family, n, seed, row_spec)
+    if family in GPT2_FAMILIES:
+        if row_spec is None:
+            raise ValueError(f"{family} rows need the key's row_spec")
+        return gpt2_planted.make_rows(n, seed, row_spec)
     if tokenizer is None:
         raise ValueError(f"{family} rows need the task's tokenizer")
     return calibration.make_rows(family, tokenizer, n, seed)
@@ -164,7 +172,8 @@ def build_task(
     ``calibration`` build with one), a secret under 32 bytes, and a secret file inside the
     task directory. A planted model that fails validation is redrawn from
     ``(seed, attempt + 1)``, up to 20 attempts, and then the build raises RuntimeError.
-    Calibration tasks download ``model_id`` (GPT-2 small) and save it into the task.
+    Calibration tasks and the GPT-2 planted families download ``model_id`` (GPT-2 small)
+    and save it, edited or not, into the task.
     """
     _check_task(family, split, index)
     secret = None
@@ -185,6 +194,8 @@ def build_task(
         raise ValueError(f"{task_dir} already exists")
     if split == "calibration":
         built = _calibration(family, index, model_id)
+    elif family in GPT2_FAMILIES:
+        built = _gpt2_planted(family, task_seed(family, split, index, secret), model_id)
     else:
         built = _planted(family, task_seed(family, split, index, secret))
     model, tokenizer, rows, key, question, chance = built
@@ -248,6 +259,41 @@ def _planted(family: str, seed: int):
         key["directions"] = result.directions
         key["decoy_directions"] = result.decoy_directions
     return result.model, result.tokenizer, rows, key, spec.question, spec.chance
+
+
+def _gpt2_planted(family: str, seed: int, model_id: str):
+    failures: list[str] = []
+    for attempt in range(ATTEMPTS):
+        try:
+            result = gpt2_planted.plant(family, seed, attempt, model_id)
+        except (gpt2_planted.NoWordDraw, gpt2_planted.NoHost) as error:
+            failures = [str(error)]
+            continue
+        check_rows = gpt2_planted.make_rows(
+            GPT2_VALIDATION_ROWS, derive(seed, "validation", attempt), result.row_spec
+        )
+        scorer_rows = gpt2_planted.make_rows(SCORER_ROWS, derive(seed, "eval"), result.row_spec)
+        numbers = gpt2_planted.validate(result, check_rows, scorer_rows)
+        if numbers["passed"]:
+            break
+        failures = numbers["failures"]
+    else:
+        raise RuntimeError(
+            f"no valid {family} model in {ATTEMPTS} attempts; the last failed with: {failures}"
+        )
+    numbers.update(attempt=attempt)
+    del numbers["passed"], numbers["failures"]
+    rows = gpt2_planted.make_rows(TASK_ROWS, derive(seed, "rows"), result.row_spec)
+    key: dict[str, Any] = {
+        "components": result.components,
+        "decoys": result.decoys,
+        "eval_seed": derive(seed, "eval"),
+        "row_spec": result.row_spec,
+        "validation": numbers,
+    }
+    if "marker" in result.facts:
+        key["marker"] = result.facts["marker"]
+    return result.model, result.tokenizer, rows, key, gpt2_planted.QUESTION, gpt2_planted.CHANCE
 
 
 def _calibration(family: str, index: int, model_id: str):

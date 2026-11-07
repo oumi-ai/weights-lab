@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 pytest.importorskip("torch")
@@ -120,7 +122,13 @@ def test_compare_uses_the_labs_own_paired_statistics(monkeypatch):
 
 
 def setup_record(task, **setup):
-    base = {"image_id": "sha256:a", "agent_cmd": "agent -p", "agent_label": "m", "timeout": 600}
+    base = {
+        "image_id": "sha256:a",
+        "agent_cmd": "agent -p",
+        "agent_label": "m",
+        "timeout": 600,
+        "network": {"mode": "proxy", "allow": ["api.anthropic.com"]},
+    }
     return {**record(task, 0.5), **base, **setup}
 
 
@@ -134,12 +142,21 @@ def test_each_sides_setup_is_reported():
         "agent_cmd": "agent -p",
         "agent_label": "m",
         "timeout": 600,
+        "network": {"mode": "proxy", "allow": ["api.anthropic.com"]},
     }
 
 
 @pytest.mark.parametrize(
     "field,other",
-    [("image_id", "sha256:z"), ("agent_cmd", "x"), ("agent_label", "n"), ("timeout", 60)],
+    [
+        ("image_id", "sha256:z"),
+        ("agent_cmd", "x"),
+        ("agent_label", "n"),
+        ("timeout", 60),
+        ("network", {"mode": "open"}),
+        ("network", {"mode": "proxy", "allow": ["api.anthropic.com", "pypi.org"]}),
+        ("network", None),
+    ],
 )
 def test_a_side_that_mixes_setups_is_refused(field, other):
     mixed = [setup_record("t0"), setup_record("t1", **{field: other})]
@@ -147,3 +164,18 @@ def test_a_side_that_mixes_setups_is_refused(field, other):
         compare(mixed, [setup_record("t0"), setup_record("t1")])
     with pytest.raises(ValueError, match=field):
         compare([setup_record("t0"), setup_record("t1")], mixed)
+
+
+@pytest.mark.parametrize(
+    "network",
+    [{"mode": "open"}, {"mode": "proxy", "allow": ["api.anthropic.com", "pypi.org"]}, None],
+)
+def test_sides_that_ran_on_different_networks_are_refused(network):
+    restricted = [setup_record(f"t{i}") for i in range(4)]
+    other = [setup_record(f"t{i}", network=network) for i in range(4)]
+    for left, right in ((restricted, other), (other, restricted)):
+        with pytest.raises(ValueError, match="different networks") as error:
+            compare(left, right)
+        assert json.dumps(network) in str(error.value)
+    # The other setup fields may differ between the sides: that is what is compared.
+    compare(restricted, [setup_record(f"t{i}", image_id="sha256:b") for i in range(4)])

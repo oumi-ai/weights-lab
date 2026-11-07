@@ -14,6 +14,7 @@ import stat
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -92,6 +93,22 @@ class Fake:
         return {"exit_code": None if self.timed_out else 0, "timed_out": self.timed_out}
 
 
+class FakeEgress:
+    """Stands in for ``docker_egress``: records each network it was asked for and whether
+    it was taken down."""
+
+    def __init__(self):
+        self.made, self.removed = [], []
+
+    @contextmanager
+    def __call__(self, name, image, allow):
+        self.made.append((name, image, allow))
+        try:
+            yield runner.Egress(f"{name}-net", f"http://{name}-proxy:3128", allow)
+        finally:
+            self.removed.append(name)
+
+
 def run_all(tasks, tmp_path, fake, **overrides):
     tasks_dir, keys_dir, _ = tasks
     settings = {
@@ -104,6 +121,7 @@ def run_all(tasks, tmp_path, fake, **overrides):
         "results": tmp_path / "results.jsonl",
         "launch": fake,
         "probe": probe,
+        "egress": FakeEgress(),
     }
     settings.update(overrides)
     return runner.run(tasks_dir, keys_dir, **settings)
@@ -506,6 +524,7 @@ def test_a_heldout_run_passes_neither_the_secret_nor_the_family(tmp_path, monkey
         results=tmp_path / "results.jsonl",
         launch=fake,
         probe=probe,
+        egress=FakeEgress(),
     )
     (invocation,) = fake.invocations
     text = all_text(invocation)
@@ -550,6 +569,7 @@ def run_copy(tasks_dir, keys_dir, tmp_path, **overrides):
         "results": tmp_path / "results.jsonl",
         "launch": lambda invocation: {"exit_code": 0, "timed_out": False},
         "probe": probe,
+        "egress": FakeEgress(),
     }
     settings.update(overrides)
     return runner.run(tasks_dir, keys_dir, **settings)
@@ -674,6 +694,154 @@ def test_a_timed_out_container_is_killed_by_name(tmp_path, monkeypatch):
     assert outcome == {"exit_code": None, "timed_out": True}
     assert "kill wl-test" in log.read_text()
     assert "started" in transcript.read_text()
+
+
+# --- the agent's network -------------------------------------------------------------
+
+
+def network_flags(argv):
+    """The ``--network`` values and the proxy variables an argv sets."""
+    networks = [argv[i + 1] for i, w in enumerate(argv) if w == "--network"]
+    proxies = dict(
+        argv[i + 1].split("=", 1)
+        for i, w in enumerate(argv)
+        if w == "-e" and "=" in argv[i + 1] and "PROXY" in argv[i + 1].upper()
+    )
+    return networks, proxies
+
+
+def test_a_restricted_container_joins_only_the_internal_network_and_uses_the_proxy(tmp_path):
+    route = runner.Egress("wl-net", "http://wl-proxy:3128", ("api.anthropic.com",))
+    (argv, _), _, _ = argv_for(tmp_path, egress=route, env=["FAKE_API_KEY"])
+    networks, proxies = network_flags(argv)
+    assert networks == ["wl-net"]
+    assert proxies == {name: "http://wl-proxy:3128" for name in runner.PROXY_ENV}
+    assert {"HTTPS_PROXY", "HTTP_PROXY"} <= set(proxies)
+    assert argv.index("--network") < argv.index("img:skill")
+    assert [argv[i + 1] for i, w in enumerate(argv) if w == "-e" and "=" not in argv[i + 1]] == [
+        "FAKE_API_KEY"
+    ]
+
+
+@pytest.mark.parametrize("name", ["HTTPS_PROXY", "http_proxy", "NO_PROXY"])
+def test_a_proxy_variable_from_the_caller_is_refused_when_the_runner_sets_them(tmp_path, name):
+    route = runner.Egress("wl-net", "http://wl-proxy:3128", ("api.anthropic.com",))
+    with pytest.raises(ValueError, match="set by the runner"):
+        argv_for(tmp_path, egress=route, env=[name])
+
+
+def test_runs_are_restricted_to_the_api_host_by_default(tasks, tmp_path):
+    fake, egress = Fake(tasks[2]), FakeEgress()
+    records = run_all(tasks, tmp_path, fake, egress=egress)
+    assert len(egress.made) == 1 and egress.removed == [egress.made[0][0]]
+    name, image, allow = egress.made[0]
+    assert image == "weights-lab-proving:skill" and allow == ("api.anthropic.com",)
+    for invocation in fake.invocations:
+        networks, proxies = network_flags(list(invocation.argv))
+        assert networks == [f"{name}-net"]
+        assert set(proxies.values()) == {f"http://{name}-proxy:3128"}
+    assert {json.dumps(r["network"]) for r in records} == {
+        json.dumps({"mode": "proxy", "allow": ["api.anthropic.com"]})
+    }
+
+
+def test_allowed_hosts_and_the_proxy_image_are_passed_on(tasks, tmp_path):
+    egress = FakeEgress()
+    records = run_all(
+        tasks,
+        tmp_path,
+        Fake(tasks[2]),
+        egress=egress,
+        allow_hosts=["pypi.org", "api.anthropic.com", "pypi.org"],
+        proxy_image="weights-lab-proving:control",
+    )
+    assert egress.made[0][1:] == ("weights-lab-proving:control", ("api.anthropic.com", "pypi.org"))
+    assert records[0]["network"] == {"mode": "proxy", "allow": ["api.anthropic.com", "pypi.org"]}
+
+
+def test_an_open_network_run_records_it_and_starts_no_proxy(tasks, tmp_path):
+    fake, egress = Fake(tasks[2]), FakeEgress()
+    records = run_all(tasks, tmp_path, fake, egress=egress, open_network=True)
+    assert egress.made == []
+    assert all(network_flags(list(i.argv)) == ([], {}) for i in fake.invocations)
+    assert all(r["network"] == {"mode": "open"} for r in records)
+
+
+@pytest.mark.parametrize(
+    "change,message",
+    [
+        ({"open_network": True, "allow_hosts": ["pypi.org"]}, "restricted network"),
+        ({"allow_hosts": ["pypi.org/simple"]}, "host"),
+    ],
+)
+def test_bad_network_settings_are_refused_before_anything_runs(tasks, tmp_path, change, message):
+    fake, egress = Fake(tasks[2]), FakeEgress()
+    with pytest.raises(ValueError, match=message):
+        run_all(tasks, tmp_path, fake, egress=egress, **change)
+    assert fake.invocations == [] and egress.made == []
+
+
+def test_the_network_is_taken_down_when_a_run_raises(tasks, tmp_path):
+    egress = FakeEgress()
+
+    def broken(invocation):
+        raise RuntimeError("the container did not start")
+
+    with pytest.raises(RuntimeError, match="did not start"):
+        run_all(tasks, tmp_path, broken, egress=egress, jobs=2)
+    assert len(egress.made) == 1 and egress.removed == [egress.made[0][0]]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses a shell script")
+def test_docker_egress_makes_an_internal_network_and_a_bare_proxy_and_removes_both(
+    tmp_path, monkeypatch
+):
+    log = tmp_path / "docker.log"
+    script = tmp_path / "bin" / "docker"
+    script.parent.mkdir()
+    script.write_text(
+        # One line per call, cut short: the proxy's source is one of the arguments.
+        f'#!/bin/sh\nprintf "%s" "$*" | tr "\\n" " " | head -c 200 >> {shlex.quote(str(log))}\n'
+        f"echo >> {shlex.quote(str(log))}\n"
+        'if [ "$1" = logs ]; then echo "listening on 0.0.0.0:3128"; fi\n'
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{script.parent}{os.pathsep}{os.environ['PATH']}")
+    with pytest.raises(KeyError):
+        with runner.docker_egress("wl-x", "img:control", ("api.anthropic.com", "pypi.org")) as e:
+            assert e == runner.Egress(
+                "wl-x-net", "http://wl-x-proxy:3128", ("api.anthropic.com", "pypi.org")
+            )
+            raise KeyError("a run failed")
+    calls = [line for line in log.read_text().splitlines() if line]
+    assert calls[0] == "network create --internal wl-x-net"
+    start = calls[1]
+    assert start.startswith(
+        "run --detach --rm --name wl-x-proxy --cap-drop ALL --security-opt no-new-privileges "
+        "img:control python -c "
+    )
+    assert "--mount" not in start and "-v " not in start and "--network" not in start
+    assert calls[2] == "network connect wl-x-net wl-x-proxy"
+    assert calls[3] == "logs wl-x-proxy"
+    assert calls[4:] == ["rm --force wl-x-proxy", "network rm wl-x-net"]
+
+
+def test_the_proxy_command_allows_exactly_the_given_hosts(monkeypatch):
+    seen = []
+
+    def docker(*args, timeout=120):
+        seen.append(args)
+        return "listening on 0.0.0.0:3128" if args[0] == "logs" else ""
+
+    monkeypatch.setattr(runner, "_docker", docker)
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: None)
+    with runner.docker_egress("wl-y", "img", ("api.anthropic.com", "pypi.org")):
+        pass
+    command = list(next(args for args in seen if args[0] == "run"))
+    source = command[command.index("-c") + 1]
+    assert source == (ROOT / "src/oumi_weights_lab/proving/egress.py").read_text()
+    rest = command[command.index("-c") + 2 :]
+    assert rest == ["--port", "3128", "--allow", "api.anthropic.com", "--allow", "pypi.org"]
 
 
 # --- the image files -----------------------------------------------------------------
@@ -815,6 +983,21 @@ def test_the_skill_and_control_arms_share_one_dockerfile_and_label_themselves(im
     assert "oumi" not in control and "skill" not in control.lower().replace("arm-control", "")
 
 
+def test_both_arms_switch_off_the_agents_traffic_to_other_hosts(image_files):
+    dockerfile, _ = image_files
+    final = dockerfile.split("FROM arm-${ARM} AS final")[1]
+    for name in (
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        "DISABLE_TELEMETRY",
+        "DISABLE_ERROR_REPORTING",
+        "DISABLE_AUTOUPDATER",
+        "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL",
+    ):
+        assert f"    {name}=1" in final, name
+    # The image's Python runs the proxy: the base stage, which both arms share, installs it.
+    assert "uv venv --python 3.12 /opt/venv" in dockerfile.split("FROM base AS pins")[0]
+
+
 def test_the_extras_are_listed_once_and_match_the_plugin_wrapper(image_files):
     dockerfile, _ = image_files
     declared = re.findall(r'^ARG LAB_EXTRAS="([^"]*)"', dockerfile, re.M)
@@ -858,6 +1041,8 @@ def test_a_huge_integer_or_deeply_nested_claim_scores_zero_and_the_run_goes_on(t
         ({"agent_cmd": "other-agent -p"}, "agent_cmd"),
         ({"agent_label": "other-model"}, "agent_label"),
         ({"timeout": 60}, "timeout"),
+        ({"open_network": True}, "network"),
+        ({"allow_hosts": ["pypi.org"]}, "network"),
     ],
 )
 def test_resuming_with_a_different_setup_is_refused_and_names_the_difference(

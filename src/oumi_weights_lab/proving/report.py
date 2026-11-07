@@ -31,7 +31,7 @@ def _per_task(records: list[dict[str, Any]], split: str | None) -> dict[str, dic
     }
 
 
-SETUP_FIELDS = ("image_id", "agent_cmd", "agent_label", "timeout")
+SETUP_FIELDS = ("image_id", "agent_cmd", "agent_label", "timeout", "network")
 
 
 def _setup(records: list[dict[str, Any]], side: str) -> dict[str, Any]:
@@ -60,14 +60,23 @@ def compare(
     paired statistics, one observation per task with each task its own cluster, 10,000
     resamples and seed 0: the mean scores, the delta, its 95% interval and the sign-flip
     permutation p. ``split`` keeps only that split's records. Raises ValueError when a
-    side mixes records with different ``image_id``, ``agent_cmd``, ``agent_label`` or
-    ``timeout`` values; the report gives each side's ``left_setup`` and ``right_setup``.
+    side mixes records with different ``image_id``, ``agent_cmd``, ``agent_label``,
+    ``timeout`` or ``network`` values (a record from before the network was recorded has
+    none, which differs from both modes), and when the two sides ran on different networks
+    (mode or allowed hosts); the report gives each side's ``left_setup`` and
+    ``right_setup``.
     """
     from ..evaluation import _paired_report
 
     kept_left = [r for r in left_results if split is None or r["split"] == split]
     kept_right = [r for r in right_results if split is None or r["split"] == split]
     left_setup, right_setup = _setup(kept_left, "left"), _setup(kept_right, "right")
+    networks = [json.dumps(setup["network"]) for setup in (left_setup, right_setup)]
+    if networks[0] != networks[1]:
+        raise ValueError(
+            f"the two sides ran on different networks (left {networks[0]}, right "
+            f"{networks[1]}); compare runs made with the same network"
+        )
     left, right = _per_task(left_results, split), _per_task(right_results, split)
     tasks = sorted(left.keys() & right.keys())
     if not tasks:
