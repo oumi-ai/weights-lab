@@ -75,35 +75,52 @@ print(json.dumps(lab.diff(baseline, ablated), indent=2))
 3. After undoing, measure again: restored results must match the baseline.
 4. If you will choose among several edits or settings, set aside held-out rows first. Evaluate only the final choice on them, once, with `held_out=True` and `max_passes`. Held-out rows can never become dev rows, even after a failed run. A single pre-planned edit needs no held-out split.
 5. Report the question, model and device, parameters edited, dataset size, baseline, edited, and restored results, changed items, forward passes, and the limits of the evidence. A small hand-written set is a diagnostic, not a benchmark.
-6. An attention pattern, a probe score, or a plot is a lead. Before calling something a mechanism, confirm it with an intervention, a control intervention, and new prompts. A null ablation does not show a part is unused, and an ablation that breaks the behavior does not show the part is the whole mechanism.
+6. An attention pattern, a probe score, or a plot is a lead. Before calling something a mechanism, confirm it with an intervention, a control intervention, and new prompts. A null ablation does not show a part is unused, and an ablation that breaks the behavior does not show the part is the whole mechanism. Follow the protocol in [Find and test a circuit](references/circuit-workflow.md): state rival hypotheses, measure how much of the behavior your claim explains, try to prove it wrong, and report what failed. When no method fits the question, design one; don't narrow the question to the tools.
 7. To keep edited weights, call `lab.export("NAME")` before stopping. Export fails while attachments or patches are active, and `backup` never saves weights.
 
 ## Recipes
 
-Read only the one you need:
+Read only the ones you need.
+
+To understand how a model does something:
+
+- [Choose a method](references/method-map.md): which method answers which question, and what each cannot show.
+- [Find and test a circuit](references/circuit-workflow.md): the protocol for a claim, from leads to a causal test, faithfulness, attempts to prove it wrong, and a report.
+- [What a finished circuit looks like](references/worked-circuits.md): induction heads and indirect-object identification in GPT-2 small.
+- [When current methods fall short](references/new-methods.md): design a method, test it on known answers, and report where it wins and loses.
+
+Methods for finding mechanisms:
+
+- [Logit lens](references/logit-lens.md): read each layer's output through the final norm and head.
+- [Activation patching](references/activation-patching.md): replace hidden states or module inputs at chosen tokens, and capture attention weights.
+- [Attribution patching](references/attribution-patching.md): rank module and token sites with activation gradients, then confirm with real patches.
+- [Circuit analyses](references/circuit-analyses.md): direct logit attribution, path patching, and edge attribution patching as calls.
+- [Attention heads](references/heads.md): list heads as weight slices, ablate one, and screen for induction heads.
+- [Steering vectors](references/steering.md): compute a direction from contrasting prompts, check it on held-out pairs, and add it to the residual stream.
+- [Document-split probes](references/probes.md): linear probes that keep source documents apart.
+- [Sparse autoencoder features](references/saes.md): load a public SAE or transcoder, check its reconstruction error, then read, patch, and steer features.
+- [Attribution graphs](references/attribution-graphs.md): build a feature graph of one answer from transcoders, read it as JSON, and test a path with a real intervention.
+
+New methods:
+
+- [Building blocks for new methods](references/building-blocks.md): run with anything replaced, take derivatives between two points, and sweep interventions in one batch.
+- [Test a method on known answers](references/proving-ground.md): build tasks with known mechanisms, grade a claim against the key, and compare methods.
+- [Save and reuse a method](references/saved-methods.md): keep a method you wrote with its source, results and setup, load it by name later, and draft a recipe from a winner.
+
+Editing and measuring:
 
 - [Worked example](references/worked-example.md): full baseline, ablation, undo, and report snippet.
 - [Zero or swap parts](references/zero-swap.md): reversible ablations and matched checkpoint slices.
 - [Remove a direction](references/direction-edits.md): project a direction out of a weight, bias, or embedding.
-- [Compare checkpoints](references/compare-checkpoints.md): parameter deltas without forward passes.
 - [Evaluation reports and screens](references/evaluation.md): paired statistics, regression suites, and pinned dev subsets.
 - [Save and resume edits](references/edit-bundles.md): save points that carry undo history and held-out reservations.
-- [Activation patching](references/activation-patching.md): replace hidden states or module inputs at chosen tokens, and capture attention weights.
-- [Attention heads](references/heads.md): list heads as weight slices, ablate one, and screen for induction heads.
-- [Attribution patching](references/attribution-patching.md): rank module and token sites with activation gradients, then confirm with real patches.
-- [Circuit analyses](references/circuit-analyses.md): direct logit attribution, path patching, and edge attribution patching as calls.
-- [Find and test a circuit](references/circuit-workflow.md): chain the logit lens, attribution patching, patches, and ablations into one tested claim.
-- [Test a method on known answers](references/proving-ground.md): build tasks with known mechanisms, grade a claim against the key, and compare methods.
-- [Building blocks for new methods](references/building-blocks.md): run with anything replaced, take derivatives between two points, and sweep interventions in one batch.
-- [Steering vectors](references/steering.md): compute a direction from contrasting prompts, check it on held-out pairs, and add it to the residual stream.
-- [Sparse autoencoder features](references/saes.md): load a public SAE or transcoder, check its reconstruction error, then read, patch, and steer features.
-- [Attribution graphs](references/attribution-graphs.md): build a feature graph of one answer from transcoders, read it as JSON, and test a path with a real intervention.
-- [Save and reuse a method](references/saved-methods.md): keep a method you wrote with its source, results and setup, load it by name later, and draft a recipe from a winner.
-- [Logit lens](references/logit-lens.md): read each layer's output through the final norm and head.
+- [Compare checkpoints](references/compare-checkpoints.md): parameter deltas without forward passes.
 - [Short-row gradients](references/gradients.md): per-row gradients for selected parameters.
-- [Document-split probes](references/probes.md): linear probes that keep source documents apart.
 - [LoRA update diagnostics](references/lora-diagnostics.md): adapter update spectra and rank without forward passes.
 - [Written-working control](references/written-working.md): test a computation in text before editing weights.
 - [Hand-built parts](references/hand-built.md): temporary prompt transforms and logit adjustments.
+
+Setup:
+
 - [Quantized models](references/quantized.md): load nf4, fp4, or int8 and know what you can edit.
 - [Remote workers](references/remote.md): SkyPilot clouds and Slurm.
