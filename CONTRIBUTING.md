@@ -11,9 +11,11 @@ uv lock --check
 After changing dependencies in `pyproject.toml`, run `uv lock`. The Claude Code plugin
 installs exactly what `uv.lock` records, and CI fails when the lock is stale.
 
-Tests build tiny offline models. CI skips the model tests when only docs or plugin
-metadata change. `tests/live/validate_*.py` run live checks that can provision
-infrastructure or download large models.
+Tests build tiny offline models. Pull requests and pushes to `main` run only the
+quick package checks: the lock, lints, repository contracts and a wheel build. The model
+tests take 20 to 25 minutes, so CI runs them once a day on `main`, and on demand from the
+Actions tab; run `uv run pytest` before you open a pull request. `tests/live/validate_*.py`
+run live checks that can provision infrastructure or download large models.
 
 Claude Code and Codex integration tests are opt-in. Build the image with
 `docker build -f tests/integration/Dockerfile -t oumi-weights-lab-harness:local .`,
