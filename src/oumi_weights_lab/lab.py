@@ -146,40 +146,86 @@ def open_lab(
     seed: int = 0,
     pass_limit: int | None = None,
     allow_hub_kernels: bool = False,
+    revision: str | None = None,
+    adapter_revision: str | None = None,
+    device_map: str | None = None,
+    max_memory: dict[str, str] | str | None = None,
+    resume: str | Path | None = None,
 ) -> Lab:
     """Load a model into a ``Lab`` in this process, for a script on a model that loads quickly.
 
     It is the same ``lab`` a worker session gives its snippets, without the worker: the model
     is loaded when the script starts and is gone when it ends, so a model that takes long to
-    load is better kept in a worker (``oumi-weights-lab start`` and ``send``). ``session`` is
-    the directory for run records and artifacts; it must be new or empty, and by default is a
-    new directory under ``./sessions/``. The other arguments mean what the ``start`` options
-    of the same names mean, and the pass limit covers everything this lab runs.
+    load is better kept in a worker (``oumi-weights-lab start`` and ``send``). Every option
+    ``start`` passes to the loader is accepted here under the same name: ``revision``,
+    ``adapter``, ``adapter_revision``, ``dtype``, ``device``, ``device_map``, ``max_memory``
+    (a ``{"0": "70GiB"}`` dict or the ``0=70GiB`` text ``start`` takes), ``quantize``,
+    ``seed``, ``pass_limit``, ``allow_hub_kernels`` and ``resume`` (a saved-edits file to
+    load). They are checked before anything is created or loaded, with the checks ``start``
+    uses. The options of the worker itself have no counterpart: a snippet timeout, idle
+    timeout, maximum lifetime and shutdown grace, and ``--cluster``. The pass limit covers
+    everything this lab runs.
+
+    ``session`` is the directory for artifacts; it must be new or empty, and by default is a
+    new directory under ``./sessions/``. A relative path is made absolute. It holds only
+    ``artifacts/``: there is no config, status or worker file, so ``peek``, ``send``,
+    ``stop`` and ``backup`` do not apply to it. A session directory this call created is
+    removed again if loading fails.
 
     Refuses a session directory that already holds files, so runs from different scripts
     never mix. Custom model code from the Hub is never enabled.
     """
     import secrets
+    import shutil
     import time
 
-    if session is None:
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        session = Path.cwd() / "sessions" / f"script-{stamp}-{secrets.token_hex(3)}"
-    session = Path(session)
-    if session.exists() and any(session.iterdir()):
-        raise ValueError(f"open_lab needs a new session directory; {session} is not empty")
-    session.mkdir(parents=True, exist_ok=True)
+    import torch
+
+    from .budget import PassBudget
+    from .session import parse_max_memory, validate_placement
+
+    if not str(model).strip():
+        raise ValueError("model must be a nonempty checkpoint path or Hub ID")
+    if isinstance(max_memory, str):
+        max_memory = parse_max_memory(max_memory)
     config = {
         "model": str(model),
         "adapter": None if adapter is None else str(adapter),
         "device": device,
         "dtype": dtype,
+        "device_map": device_map,
+        "max_memory": max_memory,
         "quantize": quantize,
         "seed": seed,
         "pass_limit": pass_limit,
         "allow_hub_kernels": allow_hub_kernels,
+        "revision": revision,
+        "adapter_revision": adapter_revision,
+        "resume": None if resume is None else str(Path(resume).expanduser().resolve()),
     }
-    return load_lab({key: value for key, value in config.items() if value is not None}, session)
+    PassBudget(pass_limit)
+    validate_placement(config)
+    if dtype not in DTYPES:
+        raise ValueError(f"Unsupported dtype {dtype!r}; choose {', '.join(DTYPES)}")
+    _resolve_device(torch, device)
+
+    if session is None:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        session = Path.cwd() / "sessions" / f"script-{stamp}-{secrets.token_hex(3)}"
+    session = Path(session).expanduser().resolve()
+    if session.exists() and any(session.iterdir()):
+        raise ValueError(f"open_lab needs a new session directory; {session} is not empty")
+    existed = session.exists()
+    session.mkdir(parents=True, exist_ok=True)
+    try:
+        return load_lab({key: value for key, value in config.items() if value is not None}, session)
+    except BaseException:
+        if existed:
+            for entry in session.iterdir():
+                shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
+        else:
+            shutil.rmtree(session, ignore_errors=True)
+        raise
 
 
 def load_lab(config: dict[str, Any], session_path: Path) -> Lab:

@@ -322,8 +322,10 @@ def _script(args: argparse.Namespace) -> int:
     path = args.file.expanduser()
     if not path.is_file():
         raise ValueError(f"no such script: {path}")
-    saved = sys.argv
+    saved_argv, saved_path = sys.argv, sys.path[:]
     sys.argv = [str(path), *args.arguments]
+    # Like `python FILE`, put the script's folder first so it can import its neighbours.
+    sys.path.insert(0, str(path.resolve().parent))
     try:
         runpy.run_path(str(path), run_name="__main__")
     except SystemExit as exc:
@@ -337,7 +339,8 @@ def _script(args: argparse.Namespace) -> int:
         traceback.print_exc()
         return 1
     finally:
-        sys.argv = saved
+        sys.argv = saved_argv
+        sys.path[:] = saved_path
     return 0
 
 

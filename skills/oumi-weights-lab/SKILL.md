@@ -8,7 +8,7 @@ compatibility: Requires the oumi-weights-lab CLI (Python 3.11+ on Linux or macOS
 
 Run Python against a live model with tested calls for finding mechanisms, editing weights with exact undo, and measuring what changed. There are two ways to run it, with the same `lab` object:
 
-- **A script**, for a model that loads in seconds, such as one under a billion parameters on CPU. Write a file that calls `open_lab` and run it with `oumi-weights-lab script analysis.py`, which runs it in the lab's own environment.
+- **A script**, for a model that loads in seconds, such as one under a billion parameters on CPU. Write a file that calls `open_lab` and run it with `oumi-weights-lab script analysis.py`, which runs it in the lab's own environment. A script session holds only `artifacts/`, so `send`, `peek`, `stop` and `backup` do not apply to it.
 - **A persistent worker**, for a large model or a long session. Load the model once, then send Python snippets (see Session commands). Snippets share state, so an edit made in one is measured in the next, and the worker saves every snippet's source, output, and forward-pass count in the session directory.
 
 Scripts and snippets are trusted Python with the user's filesystem and network access.
@@ -28,8 +28,8 @@ corrupt = ["When Mary and John went to the store, Anna gave a drink to"]
 direct = lab.logit_attribution(clean[0], (" Mary", " John"))  # who writes the answer
 edges = lab.edge_attribution(clean, corrupt, metric=(" Mary", " John"))  # candidate circuit
 circuit = lab.find_circuit(
-    clean, corrupt, metric=(" Mary", " John"), top=50
-)  # tested by real patching
+    clean, corrupt, metric=(" Mary", " John"), top=50, edges=edges
+)  # tested by real patching, reusing the attribution above
 print(circuit["faithfulness"])
 ```
 
