@@ -517,6 +517,43 @@ weights = lab.head_weights(0, 1)  # q, k, v, o as float32 CPU tensors, plus bias
 - On a quantized model the weights are dequantized for the read; see
   [Quantized models](#quantized-models).
 
+### Ablation scan
+
+```python
+rows = [{"prompt": "...", "options": [" a", " b"], "answer": 0}, ...]
+scan = lab.ablation_scan(rows)  # every head and every MLP
+scan["baseline"], scan["parts"][0]  # {"part": ("head", 3, 7), "value": ..., "delta": ...}
+```
+
+- `ablation_scan(rows, parts=None, *, metric="accuracy", groups=None,
+  batch_size=None, max_passes=None)` zeroes each part in turn and scores `rows` with it
+  removed. It is the sweep an agent otherwise writes as `lab.zero`, `lab.evaluate` and `lab.undo` in a
+  loop, without a run directory per part.
+- `rows` are in the format of `evaluate`'s likelihood mode and run through the same
+  batched scoring, so left padding, position ids and prefix attachments behave the same.
+  `batch_size` defaults as in `evaluate`: 8, or 1 for a model that takes no position ids.
+  The baseline is the model as it stands, so active edits are part of it.
+- `parts` is None (every head and every MLP) or a list of `("head", layer, head)`,
+  `("mlp", layer)`, or a list of those, which is ablated together as one group.
+  `groups="layers"` makes one group per layer from the given heads. `groups="pairs"`
+  ablates every pair of the given entries.
+- A head is ablated by zeroing its slice of the output projection's input through a
+  temporary hook, which gives the same logits as `lab.zero` on its `o` part. An MLP is
+  ablated by zeroing its output. Nothing is written into the weights and nothing stays
+  attached, even after an error.
+- `metric` is `"accuracy"` (a tie is incorrect), `"margin"` (the mean answer log
+  probability minus the best other option's), or a callable that takes one
+  `{label: log probability}` dict per row and returns a finite number, higher is better.
+- Passes are rows x options x (1 + parts), one per sequence. The whole scan is checked
+  against the pass budget and `max_passes` before it starts, and a scan that does not fit
+  raises `BudgetExceeded` with the passes it needs. `groups="pairs"` counts its pairs
+  first and refuses before building any.
+- Returns `{"baseline", "parts": [{"part", "value", "delta"}, ...], "passes"}`, sorted
+  from the largest drop. A single part is a tuple and a group is a list of tuples.
+- A part that changes nothing may have a backup, so scan groups as well. A part that
+  breaks the behavior may not be the whole mechanism. `find_circuit` and `path_patch`
+  are the next step; see [Circuit analyses](#circuit-analyses).
+
 ## Circuit analyses
 
 ```python

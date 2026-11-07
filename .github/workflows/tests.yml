@@ -117,7 +117,7 @@ jobs:
           tests/test_proving_grade.py tests/test_proving_report.py
           tests/test_proving_runner.py tests/test_proving_cli.py
           tests/test_methods.py
-          tests/test_contrast_directions.py
+          tests/test_contrast_directions.py tests/test_ablation_scan.py
           tests/test_analyses.py
           tests/test_saved_methods.py tests/test_saved_methods_cli.py
           tests/test_open_lab.py tests/test_cli_script.py

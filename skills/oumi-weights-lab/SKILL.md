@@ -23,6 +23,9 @@ from oumi_weights_lab import open_lab
 lab = open_lab(
     "/abs/path/to/model", device="cpu"
 )  # or a Hub id; a worker snippet already has `lab`
+rows = [{"prompt": "The capital of France is", "options": [" Paris", " Rome"], "answer": 0}]
+scan = lab.ablation_scan(rows)  # zero each head and MLP, batched; most breaking first
+print(scan["parts"][:5])
 clean = ["When Mary and John went to the store, John gave a drink to"]
 corrupt = ["When Mary and John went to the store, Anna gave a drink to"]
 direct = lab.logit_attribution(clean[0], (" Mary", " John"))  # who writes the answer
@@ -32,6 +35,8 @@ circuit = lab.find_circuit(
 )  # tested by real patching, reusing the attribution above
 print(circuit["faithfulness"])
 ```
+
+`ablation_scan` is the fast first sweep, not the answer: a part with a backup shows no drop, and a part that breaks the behavior may be only one of several, so scan groups (`groups="layers"`, `"pairs"`) and then run the circuit calls.
 
 - [Choose a method](references/method-map.md) says which call answers which question and what each cannot show. That covers heads, directions (`contrast_directions`), sparse features (`load_sae`), and attribution graphs.
 - [Find and test a circuit](references/circuit-workflow.md) is the protocol for a claim: rival hypotheses, faithfulness and completeness, look-alikes, redundancy, and a report of what failed. A single ablation sweep misses backup parts and parts that only work together.

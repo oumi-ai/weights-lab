@@ -60,6 +60,13 @@ _OWNED_CHAT_ARGUMENTS = {
 _CHAT_PROBE = "Weights Lab prompt format probe."
 
 
+def _prediction(scores: dict[str, float]) -> str | None:
+    """The best-scoring option's label, or None on an exact tie, which is never correct."""
+    best = max(scores.values())
+    leaders = [label for label, value in scores.items() if value == best]
+    return leaders[0] if len(leaders) == 1 else None
+
+
 def _check_batch_size(batch_size: Any) -> None:
     if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
         raise ValueError("batch_size must be a positive integer")
@@ -553,12 +560,22 @@ class ScoringMixin(EvaluationMixin):
         Batches are never reordered, so the same rows and batch size always run
         the same forwards.
         """
+        yield from self._score_encoded(self._encoded_rows(tasks), batch_size)
+
+    def _encoded_rows(self, tasks: list[dict[str, Any]]) -> list[list[tuple]]:
+        """Each row's sequences as ``(row, label, prompt tokens, answer tokens)``."""
         sequences = []
         for index, task in enumerate(tasks):
             prompt_ids, answers = self._encode(task["prompt"], task["options"])
             sequences.append(
                 [(index, label, prompt_ids, answer_ids) for label, answer_ids in answers.items()]
             )
+        return sequences
+
+    def _score_encoded(
+        self, sequences: list[list[tuple]], batch_size: int
+    ) -> Iterator[tuple[int, dict[str, float]]]:
+        """``_score_rows`` for rows already encoded, so a caller can score them repeatedly."""
         pending: dict[int, dict[str, float]] = {}
         remaining = {index: len(row) for index, row in enumerate(sequences)}
         next_row = 0
@@ -1029,10 +1046,7 @@ class ScoringMixin(EvaluationMixin):
                                 pass_totals[k] += item["pass_at"][str(k)]
                         else:
                             scores = result
-                            best = max(scores.values())
-                            leaders = [label for label, value in scores.items() if value == best]
-                            # An exact tie names no prediction, so it is never correct.
-                            prediction = leaders[0] if len(leaders) == 1 else None
+                            prediction = _prediction(scores)
                             item.update(
                                 scores=scores,
                                 prediction=prediction,
