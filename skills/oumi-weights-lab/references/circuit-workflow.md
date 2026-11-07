@@ -2,6 +2,8 @@
 
 A circuit claim says a set of components carries a behavior. This recipe is the protocol for making one: locate candidates, state a hypothesis, test it causally, measure how much of the behavior it explains, try to prove it wrong, and report what failed along with what held. Each step names the recipe that does the work; [Choose a method](method-map.md) says what each method can and cannot show. [What a finished circuit looks like](worked-circuits.md) shows the result on public models.
 
+The steps list what a finished claim needs, not an order to run calls in. At each point, run the test that best separates your standing hypotheses for its cost, and keep the belief file current, as [Investigate by experiment](../SKILL.md#investigate-by-experiment) describes.
+
 ## 1. Pick a behavior and a contrast pair
 
 Choose a clean prompt and a corrupt prompt that differ in one token and have different answer tokens, such as "The capital of France is" with " Paris" and "The capital of Germany is" with " Berlin". Check that both tokenize to the same length. Score both prompts with `score` and keep the baseline. A useful measure is the clean answer's score minus the corrupt answer's score:
@@ -19,6 +21,7 @@ If the two baselines are close, the pair does not isolate the behavior. Pick ano
 
 ## 2. Locate candidates
 
+- Weights: `measure`, `head_weights` and the QK and OV weights in [Attention heads](heads.md) show what a part could read and write, at no forward-pass cost.
 - [Logit lens](logit-lens.md): find the layer where the answer first becomes the top token.
 - `logit_attribution` ([Circuit analyses](circuit-analyses.md)): find the heads and MLPs that write the answer directly.
 - [Attribution patching](attribution-patching.md) and `edge_attribution`: rank sites and edges. The ranking is an estimate.
@@ -29,7 +32,7 @@ These steps produce leads, not results. Keep going past the first strong lead: l
 
 ## 3. State the hypothesis and its rivals
 
-Write down which components you think carry the behavior and what each one does. Then write at least one rival hypothesis that fits the leads as well, such as "a different head with the same attention pattern does the copying", or "the direction the probe found is decodable but unused". For each intervention below, write what you expect under each hypothesis. Do this before running anything, so the result cannot choose its own story.
+Write down which components you think carry the behavior and what each one does. Then write at least one rival hypothesis that fits the leads as well, such as "a different head with the same attention pattern does the copying", or "the direction the probe found is decodable but unused". For each intervention below, write what you expect under each hypothesis, and how confident you are in each hypothesis. Do this before running anything, so the result cannot choose its own story.
 
 ## 4. Test it causally
 
@@ -56,6 +59,6 @@ Write down which components you think carry the behavior and what each one does.
 
 ## 7. Report what held and what failed
 
-Report the behavior and metric, the prompt sets, each component's role with its causal test, control and effect size, faithfulness and completeness, the redundancy search, the rival hypotheses and the tests that ruled them out, the restored result, forward passes, and what the evidence does not show. A failed hypothesis is a result; list it. See the report item in [Worked example](worked-example.md).
+Report the behavior and metric, the prompt sets, each component's role with its causal test, control and effect size, faithfulness and completeness, the redundancy search, the rival hypotheses and the tests that ruled them out, the restored result, forward passes, how confident you are in each component and in the claim, and what the evidence does not show. A failed hypothesis is a result; list it. See the report item in [Worked example](worked-example.md).
 
 If no method answers a step's question, don't drop the step: see [When current methods fall short](new-methods.md).

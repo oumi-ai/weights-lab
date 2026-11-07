@@ -36,10 +36,35 @@ circuit = lab.find_circuit(
 print(circuit["faithfulness"])
 ```
 
-`ablation_scan` is the fast first sweep, not the answer: a part with a backup shows no drop, and a part that breaks the behavior may be only one of several, so scan groups (`groups="layers"`, `"pairs"`) and then run the circuit calls.
+These calls are not a sequence to run in order; choose each one for what it would tell you (see [Investigate by experiment](#investigate-by-experiment)). `ablation_scan` is a broad sweep, not the answer: a part with a backup shows no drop, and a part that breaks the behavior may be only one of several, so scan groups (`groups="layers"`, `"pairs"`) and then run the circuit calls.
 
-- [Choose a method](references/method-map.md) says which call answers which question and what each cannot show. That covers heads, directions (`contrast_directions`), sparse features (`load_sae`), and attribution graphs.
+- [Choose a method](references/method-map.md) says which call answers which question, what each cannot show, and what each costs. That covers heads, directions (`contrast_directions`), sparse features (`load_sae`), and attribution graphs.
 - [Find and test a circuit](references/circuit-workflow.md) is the protocol for a claim: rival hypotheses, faithfulness and completeness, look-alikes, redundancy, and a report of what failed. A single ablation sweep misses backup parts and parts that only work together.
+
+## Investigate by experiment
+
+Treat the model as the subject of an experiment, not a checklist. There is no fixed order of calls: at each step, run the experiment that would most reduce your uncertainty about what the task needs, for what it costs. Uncertainty that would not change your answer or your edit is not worth resolving.
+
+Keep a belief file, such as `beliefs.md` in the session directory, and update it after every experiment:
+
+- **Established:** findings that survived an intervention and a control, each with the test that showed it.
+- **Hypotheses:** the rival explanations still standing, the evidence for and against each, and how confident you are in each.
+- **Assumptions:** what you rely on but have not tested, such as "this prompt pair isolates the behavior" or "the feature is linear at this site".
+- **Open questions:** what you do not know yet, the ones that matter most to the task first.
+
+Before each experiment, answer in the belief file:
+
+1. What am I unsure of that matters for the task?
+2. Which explanations compete?
+3. Which experiment would come out differently under each of them?
+4. What will each possible outcome tell me? Write the result each hypothesis predicts before you run.
+5. Is there a cheaper experiment that would tell me nearly as much?
+
+An experiment that every standing hypothesis predicts the same way teaches nothing, however thorough it is.
+
+- **Cost.** Reading weights (`parts`, `measure`, `compare`, `head_weights`) costs no forward passes and shows what a part could do: what it reads and writes, and how large it is. Running prompts shows what the model does on them. Only an intervention with a control shows what a part causes. Rule out what cheap experiments can, and spend passes where only an intervention can decide. [Choose a method](references/method-map.md#what-each-method-costs) lists each call's cost, and `lab.forward_passes` read before and after a call gives the count.
+- **Surprises.** When a result fits none of your predictions, check the setup first: active edits (`lab.active_edit_ids`), patches and batch size, and whether restored scores match the baseline. If the setup holds, the surprise is evidence: add the hypothesis it suggests and design the test that separates it from the rest.
+- **Edits.** An edit is an experiment inside the investigation, not its end. Make one when the hypotheses it depends on have survived tests that could have refuted them, and write down beforehand what it should change and what it should leave alone. Then measure both. If the result differs from the prediction, undo it and keep investigating.
 
 ## Setup
 
@@ -103,11 +128,11 @@ print(json.dumps(lab.diff(baseline, ablated), indent=2))
 
 ## Experiment discipline
 
-1. Write down the question and the observation you expect before running anything.
+1. Write down the question, and the result each hypothesis predicts, before running anything.
 2. Measure a baseline in the same session before any edit.
 3. After undoing, measure again: restored results must match the baseline.
 4. If you will choose among several edits or settings, set aside held-out rows first. Evaluate only the final choice on them, once, with `held_out=True` and `max_passes`. Held-out rows can never become dev rows, even after a failed run. A single pre-planned edit needs no held-out split.
-5. Report the question, model and device, parameters edited, dataset size, baseline, edited, and restored results, changed items, forward passes, and the limits of the evidence. A small hand-written set is a diagnostic, not a benchmark.
+5. Report the question, model and device, parameters edited, dataset size, baseline, edited, and restored results, changed items, forward passes, and the limits of the evidence. Say which findings are established, which are hypotheses, and which are assumptions, and how confident you are in each. A small hand-written set is a diagnostic, not a benchmark.
 6. An attention pattern, a probe score, or a plot is a lead. Before calling something a mechanism, confirm it with an intervention, a control intervention, and new prompts. A null ablation does not show a part is unused, and an ablation that breaks the behavior does not show the part is the whole mechanism. Follow the protocol in [Find and test a circuit](references/circuit-workflow.md): state rival hypotheses, measure how much of the behavior your claim explains, try to prove it wrong, and report what failed. When no method fits the question, design one; don't narrow the question to the tools.
 7. To keep edited weights, call `lab.export("NAME")` before stopping. Export fails while attachments or patches are active, and `backup` never saves weights.
 
