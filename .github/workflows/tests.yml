@@ -118,3 +118,4 @@ jobs:
           tests/test_proving_runner.py tests/test_proving_cli.py
           tests/test_methods.py
           tests/test_contrast_directions.py
+          tests/test_analyses.py

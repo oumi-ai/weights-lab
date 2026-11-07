@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .analyses import AnalysesMixin
 from .attachments import AttachmentMixin
 from .budget import PassBudget
 from .circuits import CircuitsMixin
@@ -26,6 +27,7 @@ class Lab(
     CircuitsMixin,
     AttachmentMixin,
     PersistenceMixin,
+    AnalysesMixin,
 ):
     """A loaded model, tokenizer, and the session's artifact directory.
 

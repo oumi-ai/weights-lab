@@ -44,6 +44,8 @@ sites.sort()  # most negative first: restoring these sites lowers the loss most
 print(sites[:5])
 ```
 
+This ranks sites, meaning a module at a token. To rank edges between heads, MLPs and the embeddings instead, with integrated gradients and a patching test of the result, call `lab.edge_attribution` and `lab.find_circuit` ([Circuit analyses](circuit-analyses.md)). They work on the layouts `heads` supports. The hand-built ranking here still works on any model.
+
 Only prompt tokens are ranked, because later positions hold the answer itself.
 
 The loss falls when the gradient step moves toward the clean answer, so a negative estimate means restoring that site lowers the corrupt run's loss. The list above ranks the most negative estimates first. To rank by size of effect either way, sort by `-abs(estimate)` instead, and say which you used in your notes.
