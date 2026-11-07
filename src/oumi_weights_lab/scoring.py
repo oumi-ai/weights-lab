@@ -60,6 +60,13 @@ _OWNED_CHAT_ARGUMENTS = {
 _CHAT_PROBE = "Weights Lab prompt format probe."
 
 
+def _prediction(scores: dict[str, float]) -> str | None:
+    """The best-scoring option's label, or None on an exact tie, which is never correct."""
+    best = max(scores.values())
+    leaders = [label for label, value in scores.items() if value == best]
+    return leaders[0] if len(leaders) == 1 else None
+
+
 def _check_batch_size(batch_size: Any) -> None:
     if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
         raise ValueError("batch_size must be a positive integer")
@@ -1039,10 +1046,7 @@ class ScoringMixin(EvaluationMixin):
                                 pass_totals[k] += item["pass_at"][str(k)]
                         else:
                             scores = result
-                            best = max(scores.values())
-                            leaders = [label for label, value in scores.items() if value == best]
-                            # An exact tie names no prediction, so it is never correct.
-                            prediction = leaders[0] if len(leaders) == 1 else None
+                            prediction = _prediction(scores)
                             item.update(
                                 scores=scores,
                                 prediction=prediction,

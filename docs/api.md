@@ -525,12 +525,13 @@ scan = lab.ablation_scan(rows)  # every head and every MLP
 scan["baseline"], scan["parts"][0]  # {"part": ("head", 3, 7), "value": ..., "delta": ...}
 ```
 
-- `ablation_scan(rows, parts=None, *, metric="accuracy", groups=None, batch_size=8,
-  max_passes=None)` zeroes each part in turn and scores `rows` with it removed. It is
-  the sweep an agent otherwise writes as `lab.zero`, `lab.evaluate` and `lab.undo` in a
+- `ablation_scan(rows, parts=None, *, metric="accuracy", groups=None,
+  batch_size=None, max_passes=None)` zeroes each part in turn and scores `rows` with it
+  removed. It is the sweep an agent otherwise writes as `lab.zero`, `lab.evaluate` and `lab.undo` in a
   loop, without a run directory per part.
 - `rows` are in the format of `evaluate`'s likelihood mode and run through the same
   batched scoring, so left padding, position ids and prefix attachments behave the same.
+  `batch_size` defaults as in `evaluate`: 8, or 1 for a model that takes no position ids.
   The baseline is the model as it stands, so active edits are part of it.
 - `parts` is None (every head and every MLP) or a list of `("head", layer, head)`,
   `("mlp", layer)`, or a list of those, which is ablated together as one group.
@@ -545,7 +546,8 @@ scan["baseline"], scan["parts"][0]  # {"part": ("head", 3, 7), "value": ..., "de
   `{label: log probability}` dict per row and returns a finite number, higher is better.
 - Passes are rows x options x (1 + parts), one per sequence. The whole scan is checked
   against the pass budget and `max_passes` before it starts, and a scan that does not fit
-  raises `BudgetExceeded` with the passes it needs.
+  raises `BudgetExceeded` with the passes it needs. `groups="pairs"` counts its pairs
+  first and refuses before building any.
 - Returns `{"baseline", "parts": [{"part", "value", "delta"}, ...], "passes"}`, sorted
   from the largest drop. A single part is a tuple and a group is a list of tuples.
 - A part that changes nothing may have a backup, so scan groups as well. A part that

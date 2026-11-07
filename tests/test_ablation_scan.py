@@ -278,3 +278,91 @@ def test_an_active_edit_is_part_of_the_baseline(tiny_model, make_lab):
     scan = lab.ablation_scan(ROWS, [("head", 1, 0)])
     assert scan["baseline"] == pytest.approx(evaluated(lab, ROWS))
     lab.undo(edit)
+
+
+MIXED_ROWS = [
+    {"prompt": "hello yes", "options": [" yes"], "answer": 0},
+    {"prompt": "world hello", "options": [" yes", " no"], "answer": 1},
+    {"prompt": "yes no", "options": [" yes", " no", " hello"], "answer": 2},
+    {"prompt": "hello world", "options": [" no"], "answer": 0},
+    {"prompt": "world yes", "options": [" yes", " world"], "answer": 0},
+]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_accuracy_scores_single_option_rows_as_evaluate_does(kind, tiny_model, make_lab):
+    lab, _ = make(kind, tiny_model, make_lab)
+    result = lab.ablation_scan(MIXED_ROWS, [("mlp", 0), ("head", 1, 0)])
+    assert result["baseline"] == pytest.approx(evaluated(lab, MIXED_ROWS))
+    by_part = {entry["part"]: entry["value"] for entry in result["parts"]}
+    with zero_mlp(lab, kind, 0):
+        assert by_part[("mlp", 0)] == pytest.approx(evaluated(lab, MIXED_ROWS))
+    edit = head_edit(lab, 1, 0)
+    assert by_part[("head", 1, 0)] == pytest.approx(evaluated(lab, MIXED_ROWS))
+    lab.undo(edit)
+    for count in (1, 2, 3):
+        rows = [row for row in MIXED_ROWS if len(row["options"]) == count]
+        scan = lab.ablation_scan(rows, [("mlp", 1)])
+        assert scan["baseline"] == pytest.approx(evaluated(lab, rows))
+
+
+def test_accuracy_counts_a_tie_as_incorrect_like_evaluate(tiny_model, make_lab):
+    lab, _ = make("gpt2", tiny_model, make_lab)
+    original = lab._score_encoded
+
+    def tied(sequences, batch_size):
+        for index, row in original(sequences, batch_size):
+            yield index, dict.fromkeys(row, 0.0)
+
+    lab._score_encoded = tied
+    # Only the two single-option rows can be correct when every score ties.
+    assert evaluated(lab, MIXED_ROWS) == pytest.approx(2 / 5)
+    assert lab.ablation_scan(MIXED_ROWS, [("mlp", 0)])["baseline"] == pytest.approx(2 / 5)
+
+
+def test_margin_refuses_a_single_option_row_before_spending_a_pass(tiny_model, make_lab):
+    lab, _ = make("gpt2", tiny_model, make_lab)
+    with pytest.raises(ValueError, match="two options"):
+        lab.ablation_scan(MIXED_ROWS, metric="margin")
+    assert lab.forward_passes == 0 and lab.budget.used == 0
+
+
+def test_prefix_attachments_run_as_often_as_in_evaluate(tiny_model, make_lab):
+    lab, _ = make("gpt2", tiny_model, make_lab)
+    evaluate_calls, scan_calls = [], []
+    with lab.attach(
+        lambda prompt: evaluate_calls.append(prompt) or "world " + prompt, mode="prefix"
+    ):
+        evaluated(lab, ROWS)
+    with lab.attach(lambda prompt: scan_calls.append(prompt) or "world " + prompt, mode="prefix"):
+        lab.ablation_scan(ROWS, [("mlp", 0), ("head", 0, 0)])
+    assert scan_calls == evaluate_calls
+    assert len(scan_calls) == len({row["prompt"] for row in ROWS})
+
+
+def test_default_batch_size_is_one_for_a_model_without_position_ids(tiny_model, make_lab):
+    lab, _ = make("gpt2", tiny_model, make_lab)
+    lab._takes_position_ids = lambda: False
+    seen = []
+    original = lab._score_batch
+
+    def watching(batch, *, padded):
+        seen.append(padded)
+        return original(batch, padded=padded)
+
+    lab._score_batch = watching
+    result = lab.ablation_scan(ROWS, [("mlp", 0)])
+    assert result["passes"] == OPTION_COUNT * 2 and seen and not any(seen)
+    with pytest.raises(ValueError, match="position_ids"):
+        lab.ablation_scan(ROWS, [("mlp", 0)], batch_size=8)
+
+
+def test_pairs_are_counted_before_any_are_built(tiny_model, make_lab, monkeypatch):
+    lab, _ = make("gpt2", tiny_model, make_lab)
+    built = []
+    original = lab._scan_sites
+    monkeypatch.setattr(lab, "_scan_sites", lambda *args: built.append(1) or original(*args))
+    need = OPTION_COUNT * 16
+    with pytest.raises(BudgetExceeded, match=f"{need} passes"):
+        lab.ablation_scan(ROWS, groups="pairs", max_passes=need - 1)
+    assert built == [] and lab.forward_passes == 0

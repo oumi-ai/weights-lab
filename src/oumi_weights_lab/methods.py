@@ -29,7 +29,7 @@ from .inspection import (
     _site_hook,
 )
 from .quantized import lookup
-from .scoring import _check_batch_size, _pad_token
+from .scoring import _check_batch_size, _pad_token, _prediction
 
 _INTERVENTION_KEYS = {"module", "at", "positions", "value"}
 _RECORD_KEYS = {"module", "at", "positions"}
@@ -627,15 +627,24 @@ class MethodsMixin:
     # Ablation scan -------------------------------------------------------------------
 
     def ablation_scan(
-        self, rows, parts=None, *, metric="accuracy", groups=None, batch_size=8, max_passes=None
+        self,
+        rows,
+        parts=None,
+        *,
+        metric="accuracy",
+        groups=None,
+        batch_size=None,
+        max_passes=None,
     ):
         """Zero each attention head and MLP in turn and score ``rows`` with each one removed.
 
         This is the first sweep most analyses start with, run in batched forwards with no
         run directory per part. ``rows`` are in the format of ``evaluate``'s likelihood mode
         (prompt, options, answer) and are scored as it scores them: the same left padding,
-        position ids, prefix attachments and pass budget. The baseline is the model as it
-        stands, so active edits count as part of it.
+        position ids, prefix attachments (applied once per distinct prompt) and pass budget.
+        ``batch_size`` defaults as in ``evaluate``: 8, or 1 for a model whose forward takes no
+        position ids. The baseline is the model as it stands, so active edits count as part
+        of it.
 
         ``parts`` is None for every attention head and every MLP, or a list whose entries
         are ``("head", layer, head)``, ``("mlp", layer)``, or a list of those, which are
@@ -645,7 +654,7 @@ class MethodsMixin:
         ablated by zeroing its slice of the attention output projection's input through a
         temporary hook, which matches ``lab.zero`` on the head's ``o`` part. An MLP is
         ablated by zeroing its output. Nothing is written into the weights and nothing
-        stays attached, even after an error. Train/eval modes and RNG state are restored.
+        stays attached, even after an error. Train/eval modes are restored.
 
         ``metric`` is "accuracy" (a tie for the best option is incorrect, as in
         ``evaluate``), "margin" (the mean over rows of the answer's log probability minus
@@ -675,26 +684,33 @@ class MethodsMixin:
             raise ValueError("metric must be 'accuracy', 'margin' or a callable")
         if groups not in (None, "layers", "pairs"):
             raise ValueError("groups must be None, 'layers' or 'pairs'")
+        if batch_size is None:
+            batch_size = self._default_batch_size()
         _check_batch_size(batch_size)
         self._check_batching(batch_size)
         PassBudget(max_passes)
         tasks, _ = _tasks(rows, "likelihood")
         if metric == "margin" and any(len(task["options"]) < 2 for task in tasks):
             raise ValueError("the margin metric needs two options in every row")
-        with self._prompts_prepared_once():
-            self._check_inputs(tasks, "likelihood", {})
-        targets = self._scan_targets(parts, groups)
-        total = sum(len(task["options"]) for task in tasks) * (1 + len(targets))
-        with self.limit_passes(max_passes):
+        options = sum(len(task["options"]) for task in tasks)
+
+        def check(count):
+            total = options * (1 + count)
             try:
                 self._check_budget(total)
             except BudgetExceeded as error:
                 raise BudgetExceeded(f"the scan needs {total} passes: {error}") from None
+
+        # One preparation of the prompts serves the input check and the encoding, so a
+        # prefix attachment runs once per distinct prompt, as in evaluate.
+        with self._prompts_prepared_once(), self.limit_passes(max_passes):
+            self._check_inputs(tasks, "likelihood", {})
+            targets = self._scan_targets(parts, groups, check)
+            # Tokenize once; every part scores the same sequences.
+            encoded = self._encoded_rows(tasks)
             before = self._forward_passes
             results = []
-            with self._evaluation_mode(), self._prompts_prepared_once():
-                # Tokenize once; every part scores the same sequences.
-                encoded = self._encoded_rows(tasks)
+            with self._evaluation_mode():
                 baseline = self._scan_value(tasks, encoded, metric, batch_size)
                 for item, sites in targets:
                     with self._ablated(sites):
@@ -704,8 +720,12 @@ class MethodsMixin:
         results.sort(key=lambda entry: entry["delta"])
         return {"baseline": baseline, "parts": results, "passes": passes}
 
-    def _scan_targets(self, parts, groups):
-        """The scan's targets as ``(reported part, sites)``; sites map (module, at) to ranges."""
+    def _scan_targets(self, parts, groups, check):
+        """The scan's targets as ``(reported part, sites)``; sites map (module, at) to ranges.
+
+        ``check`` gets the number of targets before pairs are built, so a scan too large for
+        the budget is refused without building them.
+        """
         found = {}
 
         def heads():
@@ -774,7 +794,11 @@ class MethodsMixin:
             for item in items:
                 by_layer.setdefault(item[1], []).append(item)
             items = list(by_layer.values())
-        elif groups == "pairs":
+        count = len(items) * (len(items) - 1) // 2 if groups == "pairs" else len(items)
+        if not count:
+            raise ValueError("there are no parts to ablate")
+        check(count)
+        if groups == "pairs":
 
             def listed(item):
                 return [item] if isinstance(item, tuple) else item
@@ -784,8 +808,6 @@ class MethodsMixin:
                 for index, left in enumerate(items)
                 for right in items[index + 1 :]
             ]
-        if not items:
-            raise ValueError("there are no parts to ablate")
         return [(item, self._scan_sites(item, heads, mlp_module)) for item in items]
 
     @staticmethod
@@ -838,10 +860,14 @@ class MethodsMixin:
             return float(value)
         total = 0.0
         for task, row in zip(tasks, scores, strict=True):
-            gold = row[task["answer"]]
-            others = [value for label, value in row.items() if label != task["answer"]]
-            # A tie for the best option names no prediction, so it is never correct.
-            total += gold - max(others) if metric == "margin" else float(gold > max(others))
+            if metric == "margin":
+                gold = row[task["answer"]]
+                total += gold - max(
+                    value for label, value in row.items() if label != task["answer"]
+                )
+            else:
+                # The prediction and tie rule evaluate uses, so a one-option row scores alike.
+                total += float(_prediction(row) == task["answer"])
         return total / len(tasks)
 
 
