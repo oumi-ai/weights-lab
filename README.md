@@ -17,7 +17,7 @@ export the result. It is inspired by
 (Takehi, Teoh, Zhang, and Khattab), in which a general-purpose LLM reads and writes a
 network's weights directly instead of relying on an optimizer such as gradient
 descent. Every snippet's source, output, and forward-pass count is saved.
-Version 0.4 is experimental, and snippets run as trusted Python with your filesystem
+Version 0.5 is experimental, and snippets run as trusted Python with your filesystem
 and network access.
 
 Tested on CPU, Apple MPS, NVIDIA H200, a 72B model split across eight NVIDIA H100s,
