@@ -1,6 +1,6 @@
 # Choose a method
 
-Pick a method from the question you are asking, not from the tools you know best. Each method answers one kind of question and is silent or misleading on others. A row's last column is what the method cannot tell you, so plan the next test before you trust its answer.
+Pick a method from the question you are asking, not from the tools you know best, and prefer the cheapest one whose outcome would separate the hypotheses you still hold. Each method answers one kind of question and is silent or misleading on others. A row's last column is what the method cannot tell you, so plan the next test before you trust its answer.
 
 | Question | Method | What it shows | What it cannot show |
 | --- | --- | --- | --- |
@@ -21,9 +21,27 @@ Pick a method from the question you are asking, not from the tools you know best
 
 ## Combine them
 
-A finished claim uses several rows: a cheap method to find candidates, an intervention to test them, and a control for each intervention. The [circuit workflow](circuit-workflow.md) gives the order and the protocol for a claim. [What a finished circuit looks like](worked-circuits.md) shows the result on public models.
+A finished claim uses several rows: a cheap method to find candidates, an intervention to test them, and a control for each intervention. The [circuit workflow](circuit-workflow.md) gives what a claim needs and the protocol for it. [What a finished circuit looks like](worked-circuits.md) shows the result on public models.
+
+## What each method costs
+
+Costs are in forward passes, one per sequence. Backward passes are not counted, so a gradient method takes more time than its count shows. Read `lab.forward_passes` before and after a call for the real count.
+
+| Call | Forward passes |
+| --- | --- |
+| `parts`, `measure`, `compare`, `head_weights`, `lora_diagnostics` | None; they read weights |
+| `logit_attribution`, `jacobian`, `jvp`, `vjp` | 1 per call |
+| `score` and `evaluate` (likelihood) | 1 per option per row |
+| `contrast_directions` | 2 per prompt pair |
+| `path_patch` | 4 per prompt pair |
+| `edge_attribution` | 2 + `steps` per prompt pair |
+| `find_circuit` | 3 + `steps` per prompt pair, or 3 with `edges` |
+| `ablation_scan` | rows × options × (1 + parts) |
+| `attribution_graph`, then `graph.measure` | 3 to build, then 2 per measure |
 
 ## Common mistakes
+
+- Running an experiment whose every outcome fits all your standing hypotheses. Choose one whose outcomes differ between them.
 
 - Stopping at the first component that matters. Measure how much of the behavior your components account for before you look away.
 - Treating a probe hit, an attention pattern, or a feature label as the mechanism. Each is a lead.
