@@ -19,7 +19,7 @@ from . import session
 from .session import TERMINAL_STATES
 
 
-def _json(value: dict) -> None:
+def _json(value: dict | list) -> None:
     print(json.dumps(value), flush=True)
 
 
@@ -481,6 +481,28 @@ def _teardown(transport, cluster: str, *, stop_failed: bool) -> int:
     return code
 
 
+def _methods_list(args: argparse.Namespace) -> int:
+    from .methods_store import list_methods
+
+    _json(list_methods(args.methods_dir))
+    return 0
+
+
+def _methods_promote(args: argparse.Namespace) -> int:
+    from .methods_store import promotion_draft, write_draft
+
+    draft = promotion_draft(
+        args.name,
+        args.version,
+        against=args.against,
+        directory=args.methods_dir,
+        force=args.force,
+    )
+    path = write_draft(draft, args.output, overwrite=args.overwrite)
+    _json({"draft": str(path)})
+    return 0
+
+
 def _proving_available() -> bool:
     """Whether the optional proving package is installed; the agent images leave it out."""
     return importlib.util.find_spec("oumi_weights_lab.proving") is not None
@@ -492,7 +514,7 @@ def _parser() -> argparse.ArgumentParser:
         description="Keep a local model loaded and run Python snippets against it.",
     )
     commands = parser.add_subparsers(
-        dest="command", required=True, metavar="{start,send,peek,stop,backup}"
+        dest="command", required=True, metavar="{start,send,peek,stop,backup,methods}"
     )
     start = commands.add_parser("start", help="launch a detached local worker")
     start.add_argument("--session", required=True, type=Path)
@@ -604,6 +626,24 @@ def _parser() -> argparse.ArgumentParser:
         "--remote-output", help="remote archive path to retain when copying a backup"
     )
     backup.set_defaults(handler=_backup)
+    methods = commands.add_parser("methods", help="list saved methods and draft a recipe from one")
+    steps = methods.add_subparsers(dest="methods_command", required=True)
+    listing = steps.add_parser("list", help="print saved methods, versions and result summaries")
+    listing.add_argument("--methods-dir", type=Path)
+    listing.set_defaults(handler=_methods_list)
+    promote = steps.add_parser("promote", help="write a recipe draft for a maintainer to review")
+    promote.add_argument("name")
+    promote.add_argument("--version", help="default: the newest version")
+    promote.add_argument("--against", help="NAME[@VERSION] of the method it must beat")
+    promote.add_argument("--output", required=True, type=Path, help="draft file, outside skills/")
+    promote.add_argument("--methods-dir", type=Path)
+    promote.add_argument(
+        "--force", action="store_true", help="write the draft although --against does not win"
+    )
+    promote.add_argument(
+        "--overwrite", action="store_true", help="replace the output file if it exists"
+    )
+    promote.set_defaults(handler=_methods_promote)
     worker = commands.add_parser("_worker")
     worker.add_argument("--session", required=True, type=Path)
     for command in (start, send, peek, stop, backup):

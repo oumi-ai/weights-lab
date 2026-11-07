@@ -7,7 +7,7 @@ Importing this package does not import torch or transformers.
 
 from .claims import CLAIM_FORMAT, load_claim, validate_claim
 from .grade import grade_bundle, grade_claim
-from .report import beats, compare
+from .report import beats, compare, record_method_result
 from .tasks import (
     ALL_FAMILIES,
     SPLITS,
@@ -30,6 +30,7 @@ __all__ = [
     "load_claim",
     "load_key",
     "read_secret",
+    "record_method_result",
     "task_id",
     "task_seed",
     "validate_claim",

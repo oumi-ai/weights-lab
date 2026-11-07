@@ -119,3 +119,4 @@ jobs:
           tests/test_methods.py
           tests/test_contrast_directions.py
           tests/test_analyses.py
+          tests/test_saved_methods.py tests/test_saved_methods_cli.py

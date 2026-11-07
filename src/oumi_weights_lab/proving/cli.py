@@ -78,22 +78,41 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _grade(args: argparse.Namespace) -> int:
-    from . import grade_claim, load_claim, load_key
+    from ..methods_store import methods_dir, parse_reference
+    from . import grade_claim, load_claim, load_key, record_method_result
 
+    method = None
+    if args.method is not None:
+        # Refuse an unknown method before any grading work starts.
+        from ..methods_store import _version_dir
+
+        name, version = parse_reference(args.method)
+        if version is None:
+            raise ValueError("--method needs NAME@VERSION")
+        root = methods_dir(args.methods_dir)
+        _version_dir(root, name, version)
+        method = (root, name, version)
+    elif args.methods_dir is not None:
+        raise ValueError("--methods-dir needs --method")
+    key = load_key(args.key)
     try:
         claim = load_claim(args.claim)
     except (OSError, ValueError) as error:
-        _json(
-            {
-                "valid": False,
-                "problems": [f"the claim could not be read: {error}"],
-                "score": 0.0,
-                "solved": False,
-            }
-        )
+        graded = {
+            "valid": False,
+            "problems": [f"the claim could not be read: {error}"],
+            "score": 0.0,
+            "solved": False,
+        }
+    else:
+        with tempfile.TemporaryDirectory(prefix="proving-grade-") as work:
+            graded = grade_claim(args.task, key, claim, work)
+    if method is None:
+        _json(graded)
         return 0
-    with tempfile.TemporaryDirectory(prefix="proving-grade-") as work:
-        _json(grade_claim(args.task, load_key(args.key), claim, work))
+    # Print the grade first: recording can fail after the grading work is done.
+    _json({**graded, "saved_method": {"name": method[1], "version": method[2]}})
+    record_method_result(*method, {"task": key["task"], "split": key["split"], "score": graded})
     return 0
 
 
@@ -156,6 +175,10 @@ def add_commands(commands) -> None:
     grade.add_argument("--task", required=True, type=Path)
     grade.add_argument("--key", required=True, type=Path)
     grade.add_argument("--claim", required=True, type=Path)
+    grade.add_argument(
+        "--method", help="NAME@VERSION of a saved method; its results file records this grade"
+    )
+    grade.add_argument("--methods-dir", type=Path, help="saved methods directory (with --method)")
     grade.set_defaults(handler=_grade)
     compare = steps.add_parser("compare", help="paired comparison of two sets of results")
     compare.add_argument("left", help="RESULTS_FILE or RESULTS_FILE:ARM")
