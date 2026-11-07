@@ -10,6 +10,7 @@ from .budget import PassBudget
 from .circuits import CircuitsMixin
 from .directions import DirectionsMixin
 from .editing import EditingMixin
+from .graphs import GraphMixin
 from .hf_data import hf_rows
 from .inspection import InspectionMixin
 from .methods import MethodsMixin
@@ -30,6 +31,7 @@ class Lab(
     PersistenceMixin,
     AnalysesMixin,
     SAEMixin,
+    GraphMixin,
 ):
     """A loaded model, tokenizer, and the session's artifact directory.
 

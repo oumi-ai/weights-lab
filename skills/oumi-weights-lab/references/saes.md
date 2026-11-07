@@ -29,6 +29,7 @@ print(check["fvu"], check["l0"], check["rows"])
 - The BOS token's activations are far larger than other tokens', so an `fvu` over all positions can look good while the real text is poorly explained. Check without position 0.
 - Text gets a BOS token first when the SAE was trained with one. Compare `sae.prepend_bos`.
 - If `fvu` is far off, the SAE may record nothing about the model processing it was trained under. Pass what you know, for example `lab.load_sae(..., model_kwargs={"center_writing_weights": True})` for a GPT-2 SAE trained on mean-centered residuals, or `{"fold_ln": True, "fold_value_biases": True}` for an attention-output SAE, and measure again.
+- A release can also record the wrong input hook. Gemma Scope 2 transcoders record `blocks.L.hook_mlp_in` but read the MLP's own input, and `fvu` comes out in the thousands. Load with `hook_name="blocks.L.mlp.hook_in"` to override the recorded hook (`sae.recorded_hook_name` keeps it), and measure again.
 
 ## Read the top features
 

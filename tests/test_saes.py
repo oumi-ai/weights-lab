@@ -770,9 +770,9 @@ def test_labels_are_cached_in_the_session(lab_for, tmp_path, monkeypatch):
     monkeypatch.setattr(saes, "_fetch_label", fetch)
     assert sae.labels([1, 2], timeout=3.0) == {1: "feature 1", 2: None}
     assert calls == [("gpt2-small/1-res-jb", 1, 3.0), ("gpt2-small/1-res-jb", 2, 3.0)]
-    # Found labels are cached; a miss is asked for again.
+    # Found labels are cached, and a miss is remembered for the session.
     assert sae.labels([1, 2]) == {1: "feature 1", 2: None}
-    assert [call[1] for call in calls] == [1, 2, 2]
+    assert [call[1] for call in calls] == [1, 2]
     cached = list((lab.artifacts / "saes").glob("*.json"))
     assert len(cached) == 1
     assert json.loads(cached[0].read_text()) == {"1": "feature 1"}
@@ -912,3 +912,34 @@ def test_a_failing_feature_does_not_stop_the_other_labels(lab_for, tmp_path, mon
     assert found == {1: "feature 1", 2: None, 3: None, 4: "feature 4", 5: None, 6: None}
     # A network-level failure stops the rest.
     assert seen == [1, 2, 3, 4, 5]
+
+
+# Hook name override
+
+
+def test_hook_name_override_changes_the_site_and_is_checked(lab_for, tmp_path):
+    lab = lab_for("gpt2")
+    make_sae(
+        tmp_path / "tc",
+        "blocks.1.hook_mlp_in",
+        architecture="transcoder",
+        hook_name_out="blocks.1.hook_mlp_out",
+        d_out=D,
+    )
+    recorded = lab.load_sae(path=tmp_path / "tc")
+    assert (recorded.module, recorded.at) == ("transformer.h.1.ln_2", "input")
+    assert recorded.hook_name == recorded.recorded_hook_name == "blocks.1.hook_mlp_in"
+    assert "recorded" not in repr(recorded)
+    fixed = lab.load_sae(path=tmp_path / "tc", hook_name="blocks.1.mlp.hook_in")
+    assert (fixed.module, fixed.at) == ("transformer.h.1.mlp", "input")
+    assert fixed.hook_name == "blocks.1.mlp.hook_in"
+    assert fixed.recorded_hook_name == "blocks.1.hook_mlp_in"
+    assert "blocks.1.mlp.hook_in (recorded blocks.1.hook_mlp_in)" in repr(fixed)
+    # The output site still comes from the recorded output hook.
+    assert (fixed.output_module, fixed.output_at) == ("transformer.h.1.mlp", "output")
+    for bad, message in [("nonsense", "not mapped"), ("blocks.7.hook_resid_pre", "layer 7")]:
+        with pytest.raises(ValueError, match=message):
+            lab.load_sae(path=tmp_path / "tc", hook_name=bad)
+    make_sae(tmp_path / "narrow", "blocks.1.hook_resid_pre", d_in=8)
+    with pytest.raises(ValueError, match="blocks.1.hook_resid_post has width 16.*d_in 8"):
+        lab.load_sae(path=tmp_path / "narrow", hook_name="blocks.1.hook_resid_post")
