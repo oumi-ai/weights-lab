@@ -12,6 +12,8 @@ import re
 import shlex
 import stat
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -278,6 +280,91 @@ def test_rerunning_skips_finished_runs_and_resumes_the_rest(tasks, tmp_path):
     assert len(more.invocations) == len(PLANTED_FAMILIES)
     assert {r["repeat"] for r in records} == {1}
     assert len(lines(tmp_path / "results.jsonl")) == 2 * len(PLANTED_FAMILIES)
+
+
+class Slow(Fake):
+    """A launcher that waits so that runs overlap, and counts how many run at once."""
+
+    def __init__(self, keys):
+        super().__init__(keys)
+        self.lock, self.now, self.peak = threading.Lock(), 0, 0
+
+    def __call__(self, invocation):
+        with self.lock:
+            self.now += 1
+            self.peak = max(self.peak, self.now)
+        try:
+            time.sleep(0.05)
+            return super().__call__(invocation)
+        finally:
+            with self.lock:
+                self.now -= 1
+
+
+def test_jobs_run_every_task_and_repeat_once_and_write_each_record_once(tasks, tmp_path):
+    fake = Slow(tasks[2])
+    records = run_all(tasks, tmp_path, fake, repeats=2, jobs=3)
+    wanted = {(t, n) for t in tasks[2] for n in range(2)}
+    written = lines(tmp_path / "results.jsonl")
+    assert len(fake.invocations) == len(records) == len(written) == len(wanted)
+    assert {(r["task"], r["repeat"]) for r in written} == wanted
+    assert 1 < fake.peak <= 3
+    assert len({i.name for i in fake.invocations}) == len(fake.invocations)
+    assert len({r["run_dir"] for r in written}) == len(written)
+    assert all(r["score"]["valid"] for r in written)
+
+
+def test_jobs_resume_after_a_partial_run_skips_the_finished_runs(tasks, tmp_path):
+    one = next(iter(tasks[2]))
+    run_all(tasks, tmp_path, Fake(tasks[2]), repeats=1, task_ids=[one])
+    records = run_all(tasks, tmp_path, Slow(tasks[2]), repeats=1, jobs=3)
+    assert one not in {r["task"] for r in records}
+    assert len(records) == len(tasks[2]) - 1
+    assert len(lines(tmp_path / "results.jsonl")) == len(tasks[2])
+    assert run_all(tasks, tmp_path, Fake(tasks[2]), repeats=1, jobs=3) == []
+
+
+def test_jobs_must_be_at_least_one(tasks, tmp_path):
+    with pytest.raises(ValueError, match="jobs"):
+        run_all(tasks, tmp_path, Fake(tasks[2]), jobs=0)
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_an_interrupt_launches_nothing_more_and_writes_no_record(
+    tasks, tmp_path, jobs, monkeypatch
+):
+    """Ctrl-C reaches the main thread; the container it also killed must not be recorded."""
+    import _thread
+
+    launched, lock = [], threading.Lock()
+    noticed = threading.Event()
+    real_wait = runner.wait
+
+    def watching_wait(*args, **kwargs):
+        try:
+            return real_wait(*args, **kwargs)
+        except BaseException:
+            noticed.set()
+            raise
+
+    monkeypatch.setattr(runner, "wait", watching_wait)
+
+    def launch(invocation):
+        with lock:
+            launched.append(invocation.name)
+            first = len(launched) == 1
+        if first:
+            _thread.interrupt_main()
+        # Every container dies with the same Ctrl-C, but each launch returns only once the
+        # main thread has caught the interrupt, so no timing decides the outcome. (At jobs=1
+        # the interrupt lands in this very call and nothing after it runs.)
+        noticed.wait(timeout=30)
+        return {"exit_code": 130, "timed_out": False}
+
+    with pytest.raises(KeyboardInterrupt):
+        run_all(tasks, tmp_path, launch, repeats=3, jobs=jobs)
+    assert len(launched) <= jobs
+    assert runner.read_results(tmp_path / "results.jsonl") == []
 
 
 def test_the_other_arm_is_not_skipped_by_the_first(tasks, tmp_path):
@@ -699,6 +786,20 @@ def test_the_skill_image_strips_the_proving_package_and_its_recipe(image_files):
     # the lab and the skill reach the image only through the stripped source stage
     for line in re.findall(r"^COPY --from=(\S+) .*$", dockerfile, re.M):
         assert line in {"uv", "source", "pins"}
+
+
+def test_the_skill_stage_points_the_agent_at_the_skill_and_control_does_not(image_files):
+    dockerfile, _ = image_files
+    skill = dockerfile.split("FROM base AS arm-skill")[1].split("FROM base AS arm-control")[0]
+    control = dockerfile.split("FROM base AS arm-control")[1].split("FROM arm-")[0]
+    assert "${SKILL_DIR}" in skill and "/work/CLAUDE.md" in skill and "/work/AGENTS.md" in skill
+    assert "CLAUDE.md" not in control and "AGENTS.md" not in control
+    # only the skill stage names the skill or writes the agent's instruction files
+    base = dockerfile.split("AS base")[1].split("FROM base AS arm-skill")[0]
+    final = "FROM arm-" + dockerfile.split("FROM base AS arm-control")[1].split("FROM arm-", 1)[1]
+    for shared in (base, final):
+        for word in ("CLAUDE.md", "AGENTS.md", "SKILL_DIR", "skills/oumi-weights-lab"):
+            assert word not in shared, word
 
 
 def test_the_skill_and_control_arms_share_one_dockerfile_and_label_themselves(image_files):

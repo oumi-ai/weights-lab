@@ -75,6 +75,11 @@ RUN uv pip install --python /opt/venv/bin/python --no-deps --torch-backend cpu \
     && rm -rf /opt/lab-source \
     && ln -s /opt/venv/bin/oumi-weights-lab /usr/local/bin/oumi-weights-lab
 COPY --from=source /src/skills/oumi-weights-lab ${SKILL_DIR}
+# Point the agent at the skill, as a user who installed it for this work would. Agents read
+# CLAUDE.md or AGENTS.md from their working directory. The prompt itself is the same in both arms.
+RUN printf '%s\n' "The oumi-weights-lab skill is installed at ${SKILL_DIR}. Read its SKILL.md before you start." \
+        > /work/CLAUDE.md \
+    && cp /work/CLAUDE.md /work/AGENTS.md
 
 FROM base AS arm-control
 COPY --from=pins /pins/pinned.txt /pins/pinned.txt

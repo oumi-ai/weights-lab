@@ -20,9 +20,11 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -337,6 +339,7 @@ def run(
     task_ids: list[str] | None = None,
     launch: Launch | None = None,
     probe: Probe | None = None,
+    jobs: int = 1,
 ) -> list[dict[str, Any]]:
     """Run ``agent_cmd`` on every task ``repeats`` times in ``image`` and grade each claim.
 
@@ -356,11 +359,21 @@ def run(
     caller's environment. ``timeout`` is seconds per run; a run that overruns is killed,
     recorded with ``timed_out`` and graded on any claim written before. ``launch`` and
     ``probe`` replace Docker, for tests.
+
+    ``jobs`` is how many containers run at once (a thread pool). Each run keeps its own
+    directory and container name. Each finished record is appended under a lock, so the
+    results file lists records in completion order, and the returned list does too.
+    Grading runs on the host in the worker thread but one claim at a time, behind its own
+    lock: it builds a Lab per claim and saves and restores global torch state (the RNG),
+    which two threads must not do together. If a run raises, the others finish and
+    their records are kept; the first error is then raised.
     """
     if arm not in ARMS:
         raise ValueError(f"arm must be one of {list(ARMS)}")
     if repeats < 1 or timeout <= 0:
         raise ValueError("repeats must be at least 1 and timeout above 0")
+    if jobs < 1:
+        raise ValueError("jobs must be at least 1")
     tasks_root, keys_root = Path(tasks_dir).resolve(), Path(keys_dir).resolve()
     results_path = Path(results).resolve()
     if not tasks_root.is_dir():
@@ -412,8 +425,13 @@ def run(
     runs_root = results_path.parent / f"{results_path.stem}.runs"
     runs_root.mkdir(parents=True, exist_ok=True)
     launcher = launch or docker_launch
-    records = []
-    for ident, repeat in todo:
+    write_lock, grade_lock = threading.Lock(), threading.Lock()
+    stop = threading.Event()
+    records: list[dict[str, Any]] = []
+
+    def one(ident: str, repeat: int) -> None:
+        if stop.is_set():
+            return
         task_dir = tasks_root / ident
         run_dir = Path(tempfile.mkdtemp(prefix=f"{ident}-{arm}-{repeat}-", dir=runs_root))
         out_dir = run_dir / "out"
@@ -444,7 +462,10 @@ def run(
         clock = time.monotonic()
         outcome = launcher(invocation)
         seconds = time.monotonic() - clock
-        score = _grade_claim(task_dir, keys[ident], out_dir, run_dir / "grade")
+        if stop.is_set():
+            return
+        with grade_lock:
+            score = _grade_claim(task_dir, keys[ident], out_dir, run_dir / "grade")
         shutil.rmtree(run_dir / "grade", ignore_errors=True)
         key = keys[ident]
         record = {
@@ -470,9 +491,35 @@ def run(
             "score": score,
             "run_dir": str(run_dir),
         }
-        with results_path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(record, allow_nan=False) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        records.append(record)
+        with write_lock:
+            if stop.is_set():
+                return
+            with results_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record, allow_nan=False) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            records.append(record)
+
+    if jobs == 1:
+        # Serial runs stay in the main thread, so Ctrl-C stops the run in progress.
+        for ident, repeat in todo:
+            one(ident, repeat)
+        return records
+    pool = ThreadPoolExecutor(max_workers=min(jobs, len(todo)))
+    futures = [pool.submit(one, ident, repeat) for ident, repeat in todo]
+    try:
+        # A short timeout keeps the main thread in Python code, where an interrupt lands.
+        while wait(futures, timeout=0.1).not_done:
+            pass
+    except BaseException:
+        # Ctrl-C reaches only the main thread. Launch nothing new, drop the queued runs, and
+        # record nothing for a run the interrupt cut short.
+        stop.set()
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=True)
+        raise
+    pool.shutdown()
+    for future in futures:
+        future.result()
     return records

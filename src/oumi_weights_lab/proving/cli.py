@@ -63,6 +63,7 @@ def _run(args: argparse.Namespace) -> int:
         results=args.results,
         env=args.env,
         task_ids=args.task or None,
+        jobs=args.jobs,
     )
     scores = [record["score"]["score"] for record in records]
     _json(
@@ -170,6 +171,7 @@ def add_commands(commands) -> None:
     run.add_argument("--results", required=True, type=Path)
     run.add_argument("--env", action="append", default=[], help="environment variable name to pass")
     run.add_argument("--task", action="append", help="run only this task id")
+    run.add_argument("--jobs", type=_positive_int, default=1, help="containers to run at once")
     run.set_defaults(handler=_run)
     grade = steps.add_parser("grade", help="grade one claim against a key")
     grade.add_argument("--task", required=True, type=Path)

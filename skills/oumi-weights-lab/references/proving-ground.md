@@ -11,7 +11,7 @@ oumi-weights-lab proving-ground build --family copy-head --family lookup-mlp \
   --split dev --count 2 --out tasks --keys keys
 ```
 
-The families are `copy-head`, `copy-backup`, `lookup-mlp` and `feature-direction`. Each task directory holds `task.json` (the question), `model/` and `rows.jsonl` (rows for `lab.evaluate`). The key is `keys/<task id>.json`; do not open it while you test a method on a task, or you only test your reading.
+The families are `copy-head`, `copy-backup`, `copy-redundant`, `copy-selfrepair`, `lookup-mlp` and `feature-direction`. Each task directory holds `task.json` (the question), `model/` and `rows.jsonl` (rows for `lab.evaluate`). The key is `keys/<task id>.json`; do not open it while you test a method on a task, or you only test your reading.
 
 ## 2. Run the method
 
