@@ -116,7 +116,7 @@ jobs:
           tests/test_quantized_persistence.py tests/test_proving_tasks.py
           tests/test_proving_grade.py tests/test_proving_report.py
           tests/test_proving_runner.py tests/test_proving_cli.py
-          tests/test_proving_gpt2_planted.py
+          tests/test_proving_gpt2_planted.py tests/test_proving_egress.py
           tests/test_methods.py
           tests/test_contrast_directions.py tests/test_ablation_scan.py
           tests/test_analyses.py

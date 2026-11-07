@@ -23,14 +23,16 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .claims import CLAIM_FORMAT, load_claim, task_shape, validate_claim
+from .egress import parse_allow
 from .tasks import load_key
 
 ARMS = ("skill", "control")
@@ -47,6 +49,11 @@ TASK_FIELDS = frozenset(
 )
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")
+# The agent's network: only its API host, through the proxy, unless the caller adds hosts.
+DEFAULT_ALLOW = ("api.anthropic.com",)
+PROXY_PORT = 3128
+PROXY_START = 60  # seconds the proxy container has to start listening
+PROXY_ENV = ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy")
 
 PROMPT = """\
 You are investigating a small language model.
@@ -70,6 +77,73 @@ claim will be checked by rerunning its ablation on new rows and comparing its co
 with the true mechanism. Put the hypotheses you tried and dropped in "failed_hypotheses".
 
 {claim_format}"""
+
+
+@dataclass(frozen=True)
+class Egress:
+    """Where a restricted agent container is put: the internal Docker ``network`` it joins
+    and the ``proxy`` URL that is its only way out, open to the ``allow`` hosts."""
+
+    network: str
+    proxy: str
+    allow: tuple[str, ...]
+
+
+EgressFactory = Callable[[str, str, tuple[str, ...]], AbstractContextManager[Egress]]
+
+
+def _docker(*args: str, timeout: float = 120) -> str:
+    done = subprocess.run(
+        ["docker", *args], capture_output=True, text=True, check=False, timeout=timeout
+    )
+    if done.returncode:
+        raise RuntimeError(f"docker {args[0]} failed: {done.stderr.strip()}")
+    return done.stdout
+
+
+@contextmanager
+def docker_egress(name: str, image: str, allow: tuple[str, ...]) -> Iterator[Egress]:
+    """Create an internal network and start the proxy beside it; remove both on exit.
+
+    The network is made with ``--internal``, so a container on it has no route out. The
+    proxy runs ``egress.py`` (passed to ``python -c``, so the image needs Python and nothing
+    from the lab) in a container named ``{name}-proxy`` from ``image``, unprivileged and
+    with nothing mounted. It starts on the default bridge, which reaches the internet, and
+    is then joined to the internal network, where the agent finds it by name. Waits until
+    it listens. The container and the network are removed on exit, even after an error.
+    """
+    network, proxy = f"{name}-net", f"{name}-proxy"
+    source = (Path(__file__).parent / "egress.py").read_text(encoding="utf-8")
+    command = ["python", "-c", source, "--port", str(PROXY_PORT)]
+    for host in allow:
+        command += ["--allow", host]
+    _docker("network", "create", "--internal", network)
+    try:
+        _docker(
+            "run",
+            "--detach",
+            "--rm",
+            "--name",
+            proxy,
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            image,
+            *command,
+        )
+        try:
+            _docker("network", "connect", network, proxy)
+            deadline = time.monotonic() + PROXY_START
+            while "listening on" not in _docker("logs", proxy):
+                if time.monotonic() > deadline:
+                    raise RuntimeError(f"the proxy did not start within {PROXY_START} s")
+                time.sleep(0.5)
+            yield Egress(network, f"http://{proxy}:{PROXY_PORT}", tuple(allow))
+        finally:
+            subprocess.run(["docker", "rm", "--force", proxy], capture_output=True, check=False)
+    finally:
+        subprocess.run(["docker", "network", "rm", network], capture_output=True, check=False)
 
 
 @dataclass(frozen=True)
@@ -150,15 +224,19 @@ def docker_argv(
     command: list[str],
     prompt: str,
     env: Iterable[str] = (),
+    egress: Egress | None = None,
 ) -> tuple[list[str], list[tuple[str, str, str]]]:
     """The ``docker run`` command line and its mounts. This is the only place either is made.
 
     The task directory goes in read-only at ``/task`` and ``out_dir`` at ``/out``; nothing
     else is mounted. Each ``env`` name is passed as ``-e NAME``, so Docker reads the value
-    from the caller's environment and it appears in no argument. ``command`` is the agent
-    command split into words; the prompt replaces a word that is exactly ``{prompt}`` or,
-    with none, is appended as the last argument. Refuses a path with a comma (it would
-    break the mount syntax) and an env name that is not a plain name.
+    from the caller's environment and it appears in no argument. With ``egress`` the
+    container joins only ``egress.network`` and gets ``HTTPS_PROXY`` and ``HTTP_PROXY`` (and
+    their lower-case forms) set to ``egress.proxy``; without it, it gets Docker's default
+    network. ``command`` is the agent command split into words; the prompt replaces a word
+    that is exactly ``{prompt}`` or, with none, is appended as the last argument. Refuses a
+    path with a comma (it would break the mount syntax) and an env name that is not a plain
+    name, or that names a proxy variable when ``egress`` sets them.
     """
     mounts = [
         (str(Path(task_dir).resolve()), TASK_MOUNT, "ro"),
@@ -173,6 +251,8 @@ def docker_argv(
             raise ValueError(
                 f"{item!r} is not an environment variable name; pass names, not values"
             )
+        if egress is not None and item.upper() in ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"):
+            raise ValueError(f"{item} is set by the runner when the network is restricted")
     if not command:
         raise ValueError("the agent command is empty")
     argv = [
@@ -193,6 +273,10 @@ def docker_argv(
             "--mount",
             f"type=bind,source={host},target={target}" + (",readonly" if mode == "ro" else ""),
         ]
+    if egress is not None:
+        argv += ["--network", egress.network]
+        for item in PROXY_ENV:
+            argv += ["-e", f"{item}={egress.proxy}"]
     for item in names:
         argv += ["-e", item]
     argv.append(image)
@@ -277,7 +361,16 @@ SETUP = (
     ("agent_cmd", "agent_cmd"),
     ("agent_label", "agent_label"),
     ("timeout", "timeout"),
+    ("network", "network"),
 )
+
+
+def network_setup(open_network: bool, allow: Iterable[str]) -> dict[str, Any]:
+    """What a record says about the agent's network: ``{"mode": "open"}``, or
+    ``{"mode": "proxy", "allow": [sorted hosts]}``."""
+    if open_network:
+        return {"mode": "open"}
+    return {"mode": "proxy", "allow": sorted(allow)}
 
 
 def _check_setup(earlier: list[dict[str, Any]], now: dict[str, Any]) -> None:
@@ -340,6 +433,10 @@ def run(
     launch: Launch | None = None,
     probe: Probe | None = None,
     jobs: int = 1,
+    allow_hosts: Iterable[str] = (),
+    open_network: bool = False,
+    proxy_image: str | None = None,
+    egress: EgressFactory | None = None,
 ) -> list[dict[str, Any]]:
     """Run ``agent_cmd`` on every task ``repeats`` times in ``image`` and grade each claim.
 
@@ -350,15 +447,23 @@ def run(
     there. The key is read on the host to grade and to record the family and split, and it
     is never mounted, nor are the secret and the results file.
 
+    The agent's network is restricted: every container joins one internal network, made
+    for this call, whose only way out is a proxy (see ``docker_egress``) that opens
+    tunnels to ``api.anthropic.com`` and the ``allow_hosts`` and refuses anything else.
+    The proxy runs from ``proxy_image`` (default: ``image``) and is removed when the call
+    ends. ``open_network`` leaves containers on Docker's default network instead. Each
+    record's ``network`` says which (see ``network_setup``).
+
     Refuses: an arm other than skill or control; a keys directory inside the tasks
     directory (or the reverse), or a results file inside the tasks directory; a task
     directory with files beyond what ``build_task`` writes; a task without a key; an
     image whose arm label differs from ``arm``; earlier records of this arm in
-    ``results`` that used another image id, agent command, agent label or timeout (the
-    error names what differs); an environment name that is not set in the
-    caller's environment. ``timeout`` is seconds per run; a run that overruns is killed,
-    recorded with ``timed_out`` and graded on any claim written before. ``launch`` and
-    ``probe`` replace Docker, for tests.
+    ``results`` that used another image id, agent command, agent label, timeout or
+    network (the error names what differs); an environment name that is not set in the
+    caller's environment; ``allow_hosts`` with ``open_network``, and a host the proxy
+    cannot parse. ``timeout`` is seconds per run; a run that overruns is killed,
+    recorded with ``timed_out`` and graded on any claim written before. ``launch``,
+    ``probe`` and ``egress`` replace Docker, for tests.
 
     ``jobs`` is how many containers run at once (a thread pool). Each run keeps its own
     directory and container name. Each finished record is appended under a lock, so the
@@ -374,6 +479,12 @@ def run(
         raise ValueError("repeats must be at least 1 and timeout above 0")
     if jobs < 1:
         raise ValueError("jobs must be at least 1")
+    extra_hosts = list(dict.fromkeys(allow_hosts))
+    if open_network and extra_hosts:
+        raise ValueError("allowed hosts only apply to a restricted network, not an open one")
+    allow = tuple(dict.fromkeys([*DEFAULT_ALLOW, *extra_hosts]))
+    parse_allow(allow)
+    network = network_setup(open_network, allow)
     tasks_root, keys_root = Path(tasks_dir).resolve(), Path(keys_dir).resolve()
     results_path = Path(results).resolve()
     if not tasks_root.is_dir():
@@ -413,6 +524,7 @@ def run(
             "agent_cmd": agent_cmd,
             "agent_label": agent_label,
             "timeout": timeout,
+            "network": network,
         },
     )
     if not todo:
@@ -447,6 +559,7 @@ def run(
             command=shlex.split(agent_cmd),
             prompt=build_prompt(task_dir, timeout=timeout),
             env=env_names,
+            egress=route,
         )
         invocation = Invocation(
             name=argv[argv.index("--name") + 1],
@@ -483,6 +596,7 @@ def run(
             "revision": labels.get(LABEL_PREFIX + "revision"),
             "started": started.isoformat(),
             "timeout": timeout,
+            "network": network,
             "seconds": round(seconds, 1),
             "exit_code": outcome.get("exit_code"),
             "timed_out": bool(outcome.get("timed_out")),
@@ -500,26 +614,33 @@ def run(
                 os.fsync(stream.fileno())
             records.append(record)
 
-    if jobs == 1:
-        # Serial runs stay in the main thread, so Ctrl-C stops the run in progress.
-        for ident, repeat in todo:
-            one(ident, repeat)
-        return records
-    pool = ThreadPoolExecutor(max_workers=min(jobs, len(todo)))
-    futures = [pool.submit(one, ident, repeat) for ident, repeat in todo]
-    try:
-        # A short timeout keeps the main thread in Python code, where an interrupt lands.
-        while wait(futures, timeout=0.1).not_done:
-            pass
-    except BaseException:
-        # Ctrl-C reaches only the main thread. Launch nothing new, drop the queued runs, and
-        # record nothing for a run the interrupt cut short.
-        stop.set()
+    if open_network:
+        network_scope: AbstractContextManager[Egress | None] = nullcontext(None)
+    else:
+        network_scope = (egress or docker_egress)(
+            f"wl-proving-{uuid.uuid4().hex[:12]}", proxy_image or image, allow
+        )
+    with network_scope as route:
+        if jobs == 1:
+            # Serial runs stay in the main thread, so Ctrl-C stops the run in progress.
+            for ident, repeat in todo:
+                one(ident, repeat)
+            return records
+        pool = ThreadPoolExecutor(max_workers=min(jobs, len(todo)))
+        futures = [pool.submit(one, ident, repeat) for ident, repeat in todo]
+        try:
+            # A short timeout keeps the main thread in Python code, where an interrupt lands.
+            while wait(futures, timeout=0.1).not_done:
+                pass
+        except BaseException:
+            # Ctrl-C reaches only the main thread. Launch nothing new, drop the queued runs,
+            # and record nothing for a run the interrupt cut short.
+            stop.set()
+            for future in futures:
+                future.cancel()
+            pool.shutdown(wait=True)
+            raise
+        pool.shutdown()
         for future in futures:
-            future.cancel()
-        pool.shutdown(wait=True)
-        raise
-    pool.shutdown()
-    for future in futures:
-        future.result()
+            future.result()
     return records

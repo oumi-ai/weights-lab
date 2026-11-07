@@ -64,6 +64,9 @@ def _run(args: argparse.Namespace) -> int:
         env=args.env,
         task_ids=args.task or None,
         jobs=args.jobs,
+        allow_hosts=args.allow_host,
+        open_network=args.open_network,
+        proxy_image=args.proxy_image,
     )
     scores = [record["score"]["score"] for record in records]
     _json(
@@ -172,6 +175,18 @@ def add_commands(commands) -> None:
     run.add_argument("--env", action="append", default=[], help="environment variable name to pass")
     run.add_argument("--task", action="append", help="run only this task id")
     run.add_argument("--jobs", type=_positive_int, default=1, help="containers to run at once")
+    run.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        help="host (or host:port) the agent may reach besides api.anthropic.com",
+    )
+    run.add_argument(
+        "--open-network",
+        action="store_true",
+        help="give the agent Docker's default network instead of the filtering proxy",
+    )
+    run.add_argument("--proxy-image", help="image the proxy runs from (default: --image)")
     run.set_defaults(handler=_run)
     grade = steps.add_parser("grade", help="grade one claim against a key")
     grade.add_argument("--task", required=True, type=Path)

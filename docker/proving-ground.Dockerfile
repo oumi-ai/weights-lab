@@ -94,9 +94,17 @@ LABEL org.oumi.weights-lab.arm="${ARM}" \
       org.oumi.weights-lab.version="${VERSION}" \
       org.oumi.weights-lab.revision="${REVISION}"
 RUN mkdir -p /home/agent/.claude && chown -R agent:agent /home/agent /work
+# The agent talks to its API host and nothing else: `proving-ground run` lets the container
+# reach only that host, so Claude Code's telemetry, error reports, update checks and plugin
+# marketplace fetches are switched off rather than left to fail.
 ENV PATH="/opt/venv/bin:${PATH}" \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+    DISABLE_TELEMETRY=1 \
+    DISABLE_ERROR_REPORTING=1 \
+    DISABLE_AUTOUPDATER=1 \
+    CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1
 USER agent
 WORKDIR /work

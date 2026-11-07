@@ -289,6 +289,12 @@ def projected(model: Any, directions: list[dict[str, Any]]):
             handle.remove()
 
 
+def _accepts(model: Any, name: str) -> bool:
+    import inspect
+
+    return name in inspect.signature(model.forward).parameters
+
+
 def option_accuracy(model: Any, tokenizer: Any, rows: list[dict[str, Any]]) -> dict[str, float]:
     """Accuracy and mean logit margin of the next-token choice among each row's options.
 
@@ -307,13 +313,17 @@ def option_accuracy(model: Any, tokenizer: Any, rows: list[dict[str, Any]]) -> d
     by_length: dict[int, list[int]] = {}
     for i, ids in enumerate(prompts):
         by_length.setdefault(len(ids), []).append(i)
+    # Only the last position is scored, so models that can skip the other positions' logits
+    # (GPT-2 can) are asked to; a full-vocabulary unembedding at every position is most of
+    # the cost of the GPT-2 families' validation.
+    keep = {"logits_to_keep": 1} if _accepts(model, "logits_to_keep") else {}
     was_training = model.training
     model.eval()
     try:
         with torch.no_grad():
             for group in by_length.values():
                 batch = torch.tensor([prompts[i] for i in group], device=device)
-                last = model(batch).logits[:, -1, :].float().cpu()
+                last = model(batch, **keep).logits[:, -1, :].float().cpu()
                 for row_index, logits in zip(group, last, strict=True):
                     row = rows[row_index]
                     scores = logits[option_ids[row_index]]

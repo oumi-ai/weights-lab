@@ -120,7 +120,13 @@ def test_compare_uses_the_labs_own_paired_statistics(monkeypatch):
 
 
 def setup_record(task, **setup):
-    base = {"image_id": "sha256:a", "agent_cmd": "agent -p", "agent_label": "m", "timeout": 600}
+    base = {
+        "image_id": "sha256:a",
+        "agent_cmd": "agent -p",
+        "agent_label": "m",
+        "timeout": 600,
+        "network": {"mode": "proxy", "allow": ["api.anthropic.com"]},
+    }
     return {**record(task, 0.5), **base, **setup}
 
 
@@ -134,12 +140,21 @@ def test_each_sides_setup_is_reported():
         "agent_cmd": "agent -p",
         "agent_label": "m",
         "timeout": 600,
+        "network": {"mode": "proxy", "allow": ["api.anthropic.com"]},
     }
 
 
 @pytest.mark.parametrize(
     "field,other",
-    [("image_id", "sha256:z"), ("agent_cmd", "x"), ("agent_label", "n"), ("timeout", 60)],
+    [
+        ("image_id", "sha256:z"),
+        ("agent_cmd", "x"),
+        ("agent_label", "n"),
+        ("timeout", 60),
+        ("network", {"mode": "open"}),
+        ("network", {"mode": "proxy", "allow": ["api.anthropic.com", "pypi.org"]}),
+        ("network", None),
+    ],
 )
 def test_a_side_that_mixes_setups_is_refused(field, other):
     mixed = [setup_record("t0"), setup_record("t1", **{field: other})]

@@ -1,19 +1,20 @@
 """Copy mechanisms planted inside a trained GPT-2, and the rows that exercise them.
 
 The tiny families in ``planted`` start from zero weights, so the rest of the model does
-nothing and keeping only the planted parts keeps the behavior. These two families
-overwrite a few heads of a trained GPT-2 (GPT-2 small for real tasks) and keep every other
-weight, so the planted heads have to work inside the model's own computation:
+nothing and keeping only the planted parts keeps the behavior. These two families change
+four heads of a trained GPT-2 (GPT-2 small for real tasks) and keep every other weight, so
+the planted heads have to work inside the model's own computation:
 
 - ``gpt2-copy-redundant``: three heads in three layers each copy the flag word; any one is
-  enough.
+  enough. One decoy.
 - ``gpt2-copy-selfrepair``: a primary head copies it and writes a marker direction; a backup
-  head in a later layer copies it only when the marker is missing.
+  head in a later layer copies it only when the marker is missing. Two decoys, so both
+  families change four heads.
 
-Both plant a decoy: one more head with the same query and key, which writes one direction
-the flag words' logits do not read, the same whichever flag it attends to, so it carries
-nothing the answer could use. In ``gpt2-copy-redundant`` the decoy also writes a marker
-direction, so a marker in the model does not name the family.
+A decoy reads like a copy head and writes directions the flag words' logits do not read,
+the same whichever flag it attends to, so it carries nothing the answer could use. In
+``gpt2-copy-redundant`` the first decoy also writes a marker direction, so a marker in the
+model does not name the family.
 
 A row is a comma-separated list of 14 ordinary words ending in the same closing word. One
 word, never the first, is a flag word, and the answer is that flag. The 8 flags, 24 fillers
@@ -21,22 +22,42 @@ and the closing word are drawn per task from ``WORDS``, among the words the toke
 as one token, and a draw is kept only when the unedited model is near chance on it, so the
 planted heads are what answers.
 
-How a head is planted. Its query, key and value read directions fitted by ridge regression
-to the layer's attention input (the ``ln_1`` output), recorded on real prompts: the query
-fires at the closing word, the key at flag words, and the value says which flag it is. A
-second query-key pair sends attention to the first word otherwise, as trained heads do. The
-query is also fitted on recordings with most earlier heads zeroed, where it must stay quiet,
-so the head reads context the rest of the model builds: keeping only the planted heads
-breaks the behavior. It is fitted too on recordings with a few earlier heads zeroed, the
-ones that move its input most among them, where it must still fire, so zeroing any one other
-head does not. The backup's query is fitted with the marker in place, with only the marker
-projected out and with the primary zeroed, so the marker alone holds it back. The output
-writes the flag's unembedding direction (GPT-2 ties it to the token embedding), scaled so
-that each key head alone clears a logit margin of 2 on 95% of the rows it was fitted on. The
-head dimensions the planted circuit does not use hold the head's own trained weights, split
-so that each query, key, value or output column meets a nearly zero partner, and the head
-dimensions are then rotated at random. The planted head keeps the Frobenius norms of the
-query, key, value and output weights it replaced.
+The reads. A planted head's query, key and value read directions fitted by ridge
+regression to the layer's attention input (the ``ln_1`` output), recorded on real prompts:
+the query fires at the closing word, the key at flag words, and the value says which flag it
+is. The query is also fitted on recordings with most earlier heads zeroed, where it must
+stay quiet, so the head reads context the rest of the model builds: keeping only the planted
+heads breaks the behavior. It is fitted too on recordings with one earlier head zeroed, for
+the heads that move its input most and for every head of the first layer, and with a few
+random earlier heads zeroed, where it must still fire, so zeroing any one other head does
+not. The backup's query is fitted with the marker in place, with only the marker projected
+out, with the primary zeroed and with the primary's output scaled down, so a full marker
+alone holds it back and a weakened primary still gets repaired. The query and key reads
+take a strong ridge penalty: they read the large directions of the input and need little
+weight for the response they get.
+
+The head. The planted circuit goes into the head's own trained weights, so the head keeps
+looking like the one it was:
+
+- Query and key: the top singular pair of the head's ``W_Q W_K^T`` is turned onto the
+  planted query and key reads, by a rotation of the input space on each side. A rotation
+  keeps every singular value, so the head's query and key norms and spectra and its
+  query-key spectrum stay its own. The rest of its query-key product keeps working. The
+  query bias loses the part that would score the flag direction, and is scaled back to its
+  norm; the key bias, which shifts every score of a query alike, stays.
+- Value and output: the planted circuit, as its singular pairs (seven for the eight flag
+  copies, whose directions are centred, and one for the signals), takes the head
+  dimensions where the head's own value and output weights are weakest, and the rest is
+  scaled so the value and output norms stay the head's own. The value bias loses those
+  dimensions and is scaled back to its norm. A key head's copies write the flag's
+  unembedding direction (GPT-2 ties it to the token embedding), scaled so that each key head
+  alone clears a logit margin of 2 on 95% of the rows it was fitted on; a decoy's writes
+  are sized at the median singular value of the head's own value-output product.
+- The head dimensions are then rotated at random.
+
+Every statistic in ``CHECKED`` (see ``head_statistics``) of a planted head must stay within
+the range of its layer's unedited heads. A head that cannot hold the circuit that way is
+passed over for another head of the same layer, which reads the same fitted directions.
 
 ``plant`` builds one model from ``(family, seed, attempt)``; ``validate`` measures that the
 mechanism and the decoy behave as designed. Importing this module does not import torch or
@@ -90,19 +111,49 @@ FIT_ROWS = 400  # rows the reads are fitted on and the writes calibrated on
 NATIVE_ROWS = 600  # rows that check the unedited model on a word draw
 NATIVE_SLACK = 0.03  # a word draw is kept when the unedited model is within this of chance
 WORD_DRAWS = 40  # word draws tried per attempt
-FIRST_LAYER = 2  # planted heads sit at or after this layer, so earlier heads feed them
-GAP = 25.0  # attention logit of the flag above the rest, at the closing word
-SINK = 4.0  # attention logit of the first word when the query is elsewhere
+# Planted heads sit in the last two thirds of the layers (layer 4 on in GPT-2 small), so earlier
+# heads feed them; heads of earlier layers write too little to carry a copy to the output.
+FIRST_SHARE = 1 / 3
+# Ridge penalties of the reads, as a share of the mean input variance. A strong one gives
+# the query and flag reads a small norm for the response they get, so a planted head needs
+# no larger a query-key product than a trained one.
+QK_RIDGE = 10.0
+VALUE_RIDGE = 3.0
+EXACT_RIDGE = 0.1  # the constant read and the flag read the value side writes signals from
+SIGN_SHARE = 0.97  # share of each recording's marker words the query must read with the right sign
+WEAK_PRIMARY = 0.35  # a primary scaled to this share of its output counts as missing
 MARGIN_FLOOR, MARGIN_QUANTILE = 2.0, 0.05  # each key head alone: 95% of fit rows clear 2 logits
 WRITE_SHARE = 0.125  # first guess at a flag write, as a share of the residual norm at the marker
-MARKER_SHARE = 0.5  # size of the marker write, as a share of a flag write
-FILL = 0.05  # scale of the trained weights left opposite the unused dimensions
+MARKER_SHARE = 1.0  # size of the marker write, as a share of a flag write
 LIGHT = 6  # recordings with a few earlier heads zeroed, where the query must still fire
 LIGHT_SHARE = 1 / 30  # share of the earlier heads zeroed in each of those
-INFLUENTIAL = 6  # and one recording each with the earlier heads that move the input most
+INFLUENTIAL = 12  # and one recording each with the earlier heads that move the input most
 INFLUENCE_ROWS = 64  # rows that rank the earlier heads by how far they move the input
 HEAVY_KEEP = (0.0, 0.0, 0.02, 0.05, 0.08, 0.12)  # earlier heads kept where it must not fire
 CALIBRATIONS = 3
+DECOYS = {"gpt2-copy-redundant": 1, "gpt2-copy-selfrepair": 2}  # four planted heads either way
+LOW = 0.1  # a singular value under this share of the top counts as low
+# A layer of fewer heads gives too narrow a range to plant in; a model with fewer heads per
+# layer (the tiny one the tests use) compares planted heads with all of its heads instead.
+LAYER_RANGE_HEADS = 8
+# The statistics each planted head must keep within its layer's range of unedited heads.
+CHECKED = (
+    "q",
+    "k",
+    "v",
+    "o",
+    "q_bias",
+    "k_bias",
+    "v_bias",
+    "qk_top",
+    "qk_low",
+    "ov_top",
+    "ov_low",
+    "q_low",
+    "k_low",
+    "v_low",
+    "o_low",
+)
 
 # Validation thresholds (see ``validate``).
 BASELINE_MIN = 0.9
@@ -156,12 +207,18 @@ def make_rows(n: int, seed: int, row_spec: dict[str, Any]) -> list[dict[str, Any
     return rows
 
 
+def first_layer(layers: int) -> int:
+    """The first layer a planted head may sit in: a third of the way in, and never before
+    layer 2."""
+    return max(2, int(layers * FIRST_SHARE))
+
+
 def _check_model(model: Any) -> None:
     config = model.config
     if getattr(config, "model_type", None) != "gpt2":
         raise ValueError("the GPT-2 planted families need a GPT-2 model")
-    if config.n_layer < FIRST_LAYER + 3:
-        raise ValueError(f"the GPT-2 planted families need at least {FIRST_LAYER + 3} layers")
+    if config.n_layer < first_layer(config.n_layer) + 3:
+        raise ValueError("the GPT-2 planted families need at least 5 layers")
     if config.n_embd // config.n_head < FLAGS + 5:
         raise ValueError(f"the GPT-2 planted families need heads of at least {FLAGS + 5} dims")
 
@@ -254,6 +311,28 @@ def _without(model: Any, layer: int | None, direction):
         handle.remove()
 
 
+@contextmanager
+def _weakened(model: Any, weak):
+    """Scale one head's output by a factor; ``weak`` is ``(slot, factor)`` or None. The
+    head's output rows are written back on exit, even after an error."""
+    if weak is None:
+        yield
+        return
+    import torch
+
+    (layer, head), factor = weak
+    size = model.config.n_embd // model.config.n_head
+    rows = model.transformer.h[layer].attn.c_proj.weight[head * size : (head + 1) * size]
+    saved = rows.detach().clone()
+    with torch.no_grad():
+        rows.mul_(factor)
+    try:
+        yield
+    finally:
+        with torch.no_grad():
+            rows.copy_(saved)
+
+
 def _influential(model: Any, layer: int, ids, upstream: list[tuple[int, int]], count: int):
     """The ``count`` heads of ``upstream`` whose zeroing alone moves ``layer``'s attention
     input the most (summed squared change over ``ids``), largest first."""
@@ -304,17 +383,24 @@ class _Sums:
         self.t += (t if weight is None else t * weight[:, None]).sum(0)
         self.n += len(x) if weight is None else float(weight.sum())
 
-    def solve(self, *, intercept: bool = True, penalty: float = 1.0):
+    def solve(self, ridge: float, *, intercept: bool = True):
+        """The ridge weights and intercept. The penalty is ``ridge`` times the mean
+        eigenvalue of the (centered) input covariance sum, so it scales with the data."""
         import torch
 
-        eye = penalty * torch.eye(self.xx.shape[0], dtype=torch.float64)
+        width = self.xx.shape[0]
         if not intercept:
-            return torch.linalg.solve(self.xx + eye, self.xt), torch.zeros_like(self.t)
-        mean, target = self.x / self.n, self.t / self.n
-        weight = torch.linalg.solve(
-            self.xx - self.n * torch.outer(mean, mean) + eye,
-            self.xt - self.n * torch.outer(mean, target),
-        )
+            gram, cross = self.xx, self.xt
+            mean = target = None
+        else:
+            mean, target = self.x / self.n, self.t / self.n
+            gram = self.xx - self.n * torch.outer(mean, mean)
+            cross = self.xt - self.n * torch.outer(mean, target)
+        penalty = ridge * float(torch.trace(gram)) / width
+        eye = penalty * torch.eye(width, dtype=torch.float64)
+        weight = torch.linalg.solve(gram + eye, cross)
+        if mean is None:
+            return weight, torch.zeros_like(self.t)
         return weight, target - mean @ weight
 
 
@@ -323,12 +409,14 @@ class _Reads:
 
     def __init__(self, width: int):
         self.query, self.flag, self.value = _Sums(width, 1), _Sums(width, 1), _Sums(width, FLAGS)
-        self.first, self.constant = _Sums(width, 1), _Sums(width, 1)
+        self.constant = _Sums(width, 1)
+        self.last: list[tuple[Any, float]] = []  # each recording's marker-word inputs
 
     def add(self, x, answers, places, query: float) -> None:
         import torch
 
         rows, length, width = x.shape
+        self.last.append((x[:, -1].clone(), query))
         everywhere = x.reshape(-1, width)
         target = torch.zeros(rows, length)
         target[:, -1] = query
@@ -345,40 +433,128 @@ class _Reads:
         which = torch.zeros(rows, length - 1, FLAGS)
         which[index, places, answers] = 1
         self.value.add(before, which.reshape(-1, FLAGS))
-        first = torch.zeros(rows, length - 1)
-        first[:, 0] = 1
-        self.first.add(before, first.reshape(-1, 1))
 
     def solve(self) -> dict[str, Any]:
+        """The reads. The query and flag reads take a strong ridge (``QK_RIDGE``), so they
+        read the large directions of the input; the query's is lowered step by step, down to
+        ``EXACT_RIDGE``, until the query has the right sign on ``SIGN_SHARE`` of the marker
+        words of every recording. The value read is fitted closely."""
         # x . constant is close to 1 at every position, so intercepts fold into weights
         # and the planted head needs no bias of its own.
-        constant = self.constant.solve(intercept=False)[0][:, 0]
-        reads = {}
-        for name, sums in (
-            ("query", self.query),
-            ("flag", self.flag),
-            ("value", self.value),
-            ("first", self.first),
-        ):
-            weight, bias = sums.solve()
-            reads[name] = weight + constant[:, None] * bias[None, :]
-        reads["constant"] = constant[:, None]
-        return reads
+        constant = self.constant.solve(EXACT_RIDGE, intercept=False)[0][:, 0]
+
+        def fit(sums, ridge):
+            weight, bias = sums.solve(ridge)
+            return weight + constant[:, None] * bias[None, :]
+
+        ridge = QK_RIDGE
+        while True:
+            query = fit(self.query, ridge)
+            right = [float(((x @ query[:, 0]) * want > 0).double().mean()) for x, want in self.last]
+            if min(right) >= SIGN_SHARE or ridge <= EXACT_RIDGE:
+                break
+            ridge = max(EXACT_RIDGE, ridge / 3)
+        flag = fit(self.flag, QK_RIDGE)
+        # The value side writes signals from the flag read too, scaled to read 1 on average
+        # at a flag word (``xt / t`` is the mean input there).
+        signal = flag / float((self.flag.xt[:, 0] / self.flag.t[0]) @ flag[:, 0])
+        return {
+            "query": query,
+            "query_ridge": ridge,
+            "flag": flag,
+            "value": fit(self.value, VALUE_RIDGE),
+            "signal": signal,
+        }
+
+
+class _TooSmall(Exception):
+    """A planted circuit needs more than a head's whole norm."""
+
+
+def _merge(first, second, add_first, add_second):
+    """Put functional column pairs into a head's own weights, keeping its norms.
+
+    ``first`` and ``second`` are the head's two ``width x size`` matrices whose product is
+    one of its circuits (query and key, or value and the transposed output);
+    ``add_first[:, i]`` pairs with ``add_second[:, i]``. The head dimensions where the head's
+    own weights are weakest (the smallest eigenvectors of ``first^T first + second^T
+    second``) are emptied and given the pairs, each pair split between the two sides in the
+    ratio of the head's own norms. The rest is scaled so each matrix keeps its Frobenius
+    norm. Returns the two matrices and the projector that empties the functional
+    dimensions, for the biases. Raises ``_TooSmall`` when a pair needs more than a matrix's
+    whole norm.
+    """
+    import torch
+
+    size, count = first.shape[1], add_first.shape[1]
+    _, vectors = torch.linalg.eigh(first.T @ first + second.T @ second)
+    used = vectors[:, :count]
+    keep = torch.eye(size, dtype=torch.float64) - used @ used.T
+    ratio = float(first.norm() / second.norm())
+    add_first, add_second = add_first.clone(), add_second.clone()
+    for i in range(count):
+        split = (ratio * add_second[:, i].norm() / add_first[:, i].norm().clamp(min=1e-12)) ** 0.5
+        add_first[:, i] *= split
+        add_second[:, i] /= split
+    merged = []
+    for own, add in ((first, add_first), (second, add_second)):
+        room = own.norm() ** 2 - add.norm() ** 2
+        rest = (own @ keep).norm() ** 2
+        if room <= 0:
+            raise _TooSmall("a planted circuit needs more than the head's whole norm")
+        merged.append((room / rest) ** 0.5 * own @ keep + add @ used.T)
+    return merged[0], merged[1], keep
+
+
+def _top_pair(first, second):
+    """The top singular value of ``first @ second.T`` and its unit singular vectors."""
+    import torch
+
+    q_first, r_first = torch.linalg.qr(first)
+    q_second, r_second = torch.linalg.qr(second)
+    left, values, right = torch.linalg.svd(r_first @ r_second.T)
+    return float(values[0]), q_first @ left[:, 0], q_second @ right[0]
+
+
+def _turned(matrix, source, target):
+    """``T @ matrix`` for the rotation ``T`` of the input space that takes the unit vector
+    ``source`` to the unit vector ``target`` and fixes everything orthogonal to both."""
+    cos = float(source @ target)
+    other = target - cos * source
+    if float(other.norm()) < 1e-12:
+        return matrix.clone() if cos > 0 else -matrix
+    other = other / other.norm()
+    sin = float(other @ target)
+    along, across = source @ matrix, other @ matrix
+    return (
+        matrix
+        + sin * (other[:, None] * along - source[:, None] * across)
+        + (cos - 1) * (source[:, None] * along + other[:, None] * across)
+    )
+
+
+def _bias_without(bias, keep):
+    """``bias`` with the functional dimensions taken out, rescaled to its own norm."""
+    kept = keep @ bias
+    return kept * (bias.norm() / kept.norm().clamp(min=1e-12))
 
 
 class _Head:
-    """One planted head: its functional weights, kept in float64 until it is finished.
+    """One planted head: the head's own weights with a planted circuit merged in.
 
+    The planted query reads where the copy should happen and the key reads flag words;
     ``copies`` (one row per flag) makes it a copy head: the value says which flag it attends
     to and the output writes that row. Each row of ``signals`` is written whenever it attends
-    to a flag, whichever flag that is.
+    to a flag, whichever flag that is. The circuit goes into the head dimensions where the
+    head's own weights are weakest, and the head keeps the rest of its own weights and its
+    norms, so it still does most of what it did.
     """
 
     def __init__(self, model: Any, slot: tuple[int, int], reads, copies=None, signals=()):
         import torch
 
         self.model, (self.layer, self.head) = model, slot
-        width, size = model.config.n_embd, model.config.n_embd // model.config.n_head
+        size = model.config.n_embd // model.config.n_head
         self.size = size
         attn = model.transformer.h[self.layer].attn
         weight, bias = attn.c_attn.weight.detach(), attn.c_attn.bias.detach()
@@ -392,30 +568,40 @@ class _Head:
             "k_bias": bias[k].double().clone(),
             "v_bias": bias[v].double().clone(),
         }
-        scale = size**0.25  # scores are divided by sqrt(size)
-        query = torch.zeros(width, size, dtype=torch.float64)
-        key = torch.zeros(width, size, dtype=torch.float64)
-        query[:, 0] = scale * GAP**0.5 * reads["query"][:, 0]
-        key[:, 0] = scale * GAP**0.5 * reads["flag"][:, 0]
-        query[:, 1] = scale * SINK**0.5 * reads["constant"][:, 0]
-        key[:, 1] = scale * SINK**0.5 * reads["first"][:, 0]
-        ratio = (
-            (key.norm() / self.original["k"].norm()) / (query.norm() / self.original["q"].norm())
-        ) ** 0.5
-        self.q, self.k = query * ratio, key / ratio
-        self.v = torch.zeros(width, size, dtype=torch.float64)
-        self.o = torch.zeros(size, width, dtype=torch.float64)
+        # The head's top query-key component is turned to read the planted directions. The
+        # input space is rotated on each side, so every singular value of the query, the key
+        # and their product stays the head's own. ``gap`` is the attention logit the planted
+        # pair gives a flag over a filler when both reads answer 1.
+        query, flag = reads["query"][:, 0], reads["flag"][:, 0]
+        top, along_q, along_k = _top_pair(self.original["q"], self.original["k"])
+        self.gap = top / float(query.norm() * flag.norm() * size**0.5)  # scores / sqrt(size)
+        self.query_ridge = reads["query_ridge"]
+        unit_q, unit_k = query / query.norm(), flag / flag.norm()
+        self.q = _turned(self.original["q"], along_q, unit_q)
+        self.k = _turned(self.original["k"], along_k, unit_k)
+        # A query bias adds its own score to every key; take out the part that would read
+        # the flag direction, so only the planted query does.
+        bias, reach_bias = self.original["q_bias"], self.k.T @ unit_k
+        bias = bias - (reach_bias @ bias) / (reach_bias @ reach_bias) * reach_bias
+        self.q_bias = bias * (self.original["q_bias"].norm() / bias.norm().clamp(min=1e-12))
+        self.k_bias = self.original["k_bias"]  # a key bias shifts every score of a query alike
+        values, outputs = [], []
         self.copies = 0
         if copies is not None:
-            self.v[:, :FLAGS] = reads["value"]
-            self.o[:FLAGS] = copies
+            values += list(reads["value"].T)
+            outputs += list(copies)
             self.copies = FLAGS
-        self.used = self.copies
+        signal = reads["signal"][:, 0]
+        if copies is None:
+            # A decoy's writes carry nothing, so they are sized like the head's own circuit:
+            # each at the median singular value of its value-output product.
+            typical = float(_spectrum(self.original["v"], self.original["o"].T).median())
+            signals = [row * (typical / float(signal.norm() * row.norm())) for row in signals]
         for row in signals:
-            self.v[:, self.used] = reads["flag"][:, 0]
-            self.o[self.used] = row
-            self.used += 1
-        self._balance()
+            values.append(signal)
+            outputs.append(row)
+        self.value, self.output = torch.stack(values, 1), torch.stack(outputs, 0)
+        self._assemble()
 
     def _slices(self):
         width, size, h = self.model.config.n_embd, self.size, self.head
@@ -426,63 +612,58 @@ class _Head:
             slice(h * size, (h + 1) * size),
         )
 
-    def _balance(self) -> None:
-        """Split the value-output gain so both are the same share of the original norms."""
-        ratio = (
-            (self.o.norm() / self.original["o"].norm())
-            / (self.v.norm() / self.original["v"].norm())
-        ) ** 0.5
-        self.v, self.o = self.v * ratio, self.o / ratio
-        self._write(self.q, None, self.k, None, self.v, None, self.o)
+    def _assemble(self) -> None:
+        import torch
+
+        # The planted value-output circuit in as few head dimensions as it needs: its
+        # singular pairs, each split evenly between value and output.
+        q_value, r_value = torch.linalg.qr(self.value)
+        q_output, r_output = torch.linalg.qr(self.output.T)
+        left, values, right = torch.linalg.svd(r_value @ r_output.T)
+        rank = int((values > 1e-6 * values[0]).sum())
+        root = values[:rank] ** 0.5
+        add_v = q_value @ left[:, :rank] * root
+        add_o = q_output @ right[:rank].T * root
+        original = self.original
+        self.v, o_t, keep_vo = _merge(original["v"], original["o"].T, add_v, add_o)
+        self.o = o_t.T
+        self.v_bias = _bias_without(original["v_bias"], keep_vo)
+        self._write(self.q, self.q_bias, self.k, self.k_bias, self.v, self.v_bias, self.o)
 
     def scale_writes(self, factor: float) -> None:
-        self.o[: self.copies] *= factor
-        self._balance()
+        self.output[: self.copies] *= factor
+        self._assemble()
+
+    def restore(self) -> None:
+        """Write the head's own weights back."""
+        original = self.original
+        self._write(
+            original["q"],
+            original["q_bias"],
+            original["k"],
+            original["k_bias"],
+            original["v"],
+            original["v_bias"],
+            original["o"],
+        )
 
     def _write(self, q, q_bias, k, k_bias, v, v_bias, o) -> None:
         import torch
 
         attn = self.model.transformer.h[self.layer].attn
         qs, ks, vs, os = self._slices()
-        zero = torch.zeros(self.size, dtype=torch.float64)
         with torch.no_grad():
             for part, bias, where in ((q, q_bias, qs), (k, k_bias, ks), (v, v_bias, vs)):
                 attn.c_attn.weight[:, where] = part.float()
-                attn.c_attn.bias[where] = (zero if bias is None else bias).float()
+                attn.c_attn.bias[where] = bias.float()
             attn.c_proj.weight[os] = o.float()
 
-    def finish(self, generator) -> dict[str, float]:
-        """Fill the unused dimensions with the head's own weights and rotate the head.
-
-        The unused query-key dimensions are split in two: in one half the query holds the
-        original query columns and the key ``FILL`` times the original key columns, and the
-        other half the other way round, so they add only ``FILL`` times the original scores.
-        Value and output are split the same way. The full-size halves are scaled so each
-        matrix keeps its original norm, and one random rotation of the head dimensions is
-        applied to query and key, another to value and output, which changes no score and
-        no output. Returns the final norms.
-        """
+    def finish(self, generator) -> None:
+        """Rotate the head dimensions at random, one rotation for query and key and another
+        for value and output, which changes no score and no output."""
         import torch
 
-        size, original = self.size, self.original
-
-        def fill(func, func_bias, orig, orig_bias, full, small):
-            weight, bias = func.clone(), func_bias.clone()
-            weight[:, small], bias[small] = FILL * orig[:, small], FILL * orig_bias[small]
-            room = orig.norm() ** 2 - weight.norm() ** 2
-            scale = (room.clamp(min=0) / orig[:, full].norm() ** 2) ** 0.5
-            weight[:, full], bias[full] = scale * orig[:, full], scale * orig_bias[full]
-            return weight, bias
-
-        zero = torch.zeros(size, dtype=torch.float64)
-        rest = list(range(2, size))
-        first, second = rest[: len(rest) // 2], rest[len(rest) // 2 :]
-        q, q_bias = fill(self.q, zero, original["q"], original["q_bias"], first, second)
-        k, k_bias = fill(self.k, zero, original["k"], original["k_bias"], second, first)
-        rest = list(range(self.used, size))
-        first, second = rest[: len(rest) // 2], rest[len(rest) // 2 :]
-        v, v_bias = fill(self.v, zero, original["v"], original["v_bias"], first, second)
-        o_t, _ = fill(self.o.T, zero, original["o"].T, zero, second, first)
+        size = self.size
         turn_qk = torch.linalg.qr(
             torch.randn(size, size, generator=generator, dtype=torch.float64)
         )[0]
@@ -490,24 +671,22 @@ class _Head:
             torch.randn(size, size, generator=generator, dtype=torch.float64)
         )[0]
         self._write(
-            q @ turn_qk,
-            q_bias @ turn_qk,
-            k @ turn_qk,
-            k_bias @ turn_qk,
-            v @ turn_vo,
-            v_bias @ turn_vo,
-            turn_vo.T @ o_t.T,
+            self.q @ turn_qk,
+            self.q_bias @ turn_qk,
+            self.k @ turn_qk,
+            self.k_bias @ turn_qk,
+            self.v @ turn_vo,
+            self.v_bias @ turn_vo,
+            turn_vo.T @ self.o,
         )
-        return {
-            "q": float(q.norm()),
-            "k": float(k.norm()),
-            "v": float(v.norm()),
-            "o": float(o_t.norm()),
-        }
 
 
 class NoWordDraw(Exception):
     """No word draw left the unedited model near chance; the attempt fails."""
+
+
+class NoHost(Exception):
+    """No head of a chosen layer holds the planted circuit with its statistics in range."""
 
 
 def _draw_words(model: Any, tokenizer: Any, seed: int, attempt: int):
@@ -526,21 +705,95 @@ def _draw_words(model: Any, tokenizer: Any, seed: int, attempt: int):
     raise NoWordDraw(f"no word draw of {WORD_DRAWS} left the unedited model near chance")
 
 
-def _norm_ranges(model: Any) -> list[dict[str, tuple[float, float]]]:
-    """Each layer's smallest and largest per-head query, key, value and output norm."""
+def _spectrum(first, second):
+    """Singular values of ``first @ second.T`` (two ``width x size`` matrices), largest first,
+    computed on ``size x size`` factors."""
+    import torch
+
+    return torch.linalg.svdvals(torch.linalg.qr(first)[1] @ torch.linalg.qr(second)[1].T)
+
+
+def _shape(values) -> dict[str, float]:
+    """The top singular value, how many are under ``LOW`` of it, and the effective rank
+    (the exponential of the entropy of the squared values, normalised)."""
+    import torch
+
+    share = values**2 / (values**2).sum()
+    entropy = -(share * torch.log(share.clamp(min=1e-300))).sum()
+    return {
+        "top": float(values[0]),
+        "low": int((values < LOW * values[0]).sum()),
+        "erank": float(torch.exp(entropy)),
+    }
+
+
+def head_statistics(model: Any) -> dict[str, dict[str, float]]:
+    """Weight statistics of every attention head of a GPT-2, keyed ``"layer.head"``.
+
+    For each head: the Frobenius norms of its query, key, value and output weights and of
+    its query, key and value biases; for its query-key product ``W_Q W_K^T`` and its
+    value-output product ``W_V W_O`` the top singular value (``qk_top``, ``ov_top``), the
+    number of singular values under 10% of the top (``qk_low``, ``ov_low``) and the effective
+    rank (``qk_erank``, ``ov_erank``); and the number under 10% of the top for each of the
+    four weight matrices alone (``q_low`` and so on). Reads the weights only.
+    """
+    config = model.config
+    return {
+        _name((layer, h)): _head_statistics(model, layer, h)
+        for layer in range(config.n_layer)
+        for h in range(config.n_head)
+    }
+
+
+def _head_statistics(model: Any, layer: int, head: int) -> dict[str, float]:
+    import torch
+
     config = model.config
     width, size = config.n_embd, config.n_embd // config.n_head
-    ranges = []
-    for block in model.transformer.h:
-        weight, out = block.attn.c_attn.weight.detach(), block.attn.c_proj.weight.detach()
-        norms: dict[str, list[float]] = {"q": [], "k": [], "v": [], "o": []}
-        for h in range(config.n_head):
-            for name, offset in (("q", 0), ("k", width), ("v", 2 * width)):
-                part = weight[:, offset + h * size : offset + (h + 1) * size]
-                norms[name].append(float(part.norm()))
-            norms["o"].append(float(out[h * size : (h + 1) * size].norm()))
-        ranges.append({name: (min(values), max(values)) for name, values in norms.items()})
-    return ranges
+    attn = model.transformer.h[layer].attn
+    weight = attn.c_attn.weight.detach().double()
+    bias = attn.c_attn.bias.detach().double()
+    parts = {
+        name: weight[:, offset + head * size : offset + (head + 1) * size]
+        for name, offset in (("q", 0), ("k", width), ("v", 2 * width))
+    }
+    parts["o"] = attn.c_proj.weight.detach().double()[head * size : (head + 1) * size].T
+    stats = {name: float(part.norm()) for name, part in parts.items()}
+    for name, offset in (("q", 0), ("k", width), ("v", 2 * width)):
+        part = bias[offset + head * size : offset + (head + 1) * size]
+        stats[f"{name}_bias"] = float(part.norm())
+    for name, (first, second) in (("qk", ("q", "k")), ("ov", ("v", "o"))):
+        shape = _shape(_spectrum(parts[first], parts[second]))
+        stats.update({f"{name}_{k}": v for k, v in shape.items()})
+    for name, part in parts.items():
+        stats[f"{name}_low"] = _shape(torch.linalg.svdvals(part))["low"]
+    return stats
+
+
+def statistic_ranges(
+    stats: dict[str, dict[str, float]], by_layer: bool = True
+) -> dict[int, dict[str, list[float]]]:
+    """For each layer, the smallest and largest value of every statistic among that
+    layer's heads, or, with ``by_layer`` false, among all heads."""
+    layers: dict[int, dict[str, list[float]]] = {}
+    for name, values in stats.items():
+        layer = layers.setdefault(int(name.split(".")[0]) if by_layer else -1, {})
+        for stat in values:
+            low, high = layer.get(stat, [values[stat], values[stat]])
+            layer[stat] = [min(low, values[stat]), max(high, values[stat])]
+    if by_layer:
+        return layers
+    return {int(name.split(".")[0]): layers[-1] for name in stats}
+
+
+def out_of_range(stats: dict[str, float], ranges: dict[str, list[float]]) -> list[str]:
+    """The checked statistics of one head that fall outside ``ranges``, described."""
+    found = []
+    for stat in CHECKED:
+        low, high = ranges[stat]
+        if not low - 1e-4 * abs(low) <= stats[stat] <= high + 1e-4 * abs(high):
+            found.append(f"{stat} {stats[stat]:.3f} is outside {low:.3f} to {high:.3f}")
+    return found
 
 
 def _residual_size(model: Any, ids) -> float:
@@ -620,18 +873,20 @@ def plant(family: str, seed: int, attempt: int = 0, model_id: str = GPT2_SMALL):
         raise ValueError(f"unknown GPT-2 planted family {family!r}; choose from {GPT2_FAMILIES}")
     model, tokenizer = _load(model_id)
     config = model.config
-    ranges = _norm_ranges(model)
+    stock = head_statistics(model)
     row_spec, native, draw = _draw_words(model, tokenizer, seed, attempt)
     rng = random.Random(derive("gpt2-places", family, seed, attempt))
-    layers = list(range(FIRST_LAYER, config.n_layer))
+    first = first_layer(config.n_layer)
+    layers = list(range(first, config.n_layer))
     if family == "gpt2-copy-redundant":
         key = [(layer, rng.randrange(config.n_head)) for layer in sorted(rng.sample(layers, 3))]
     else:
-        primary = rng.randrange(FIRST_LAYER, config.n_layer - 1)
+        primary = rng.randrange(first, config.n_layer - 1)
         backup = rng.randrange(primary + 1, config.n_layer)
         key = [(primary, rng.randrange(config.n_head)), (backup, rng.randrange(config.n_head))]
-    decoy = rng.choice(
-        [(at, h) for at in layers for h in range(config.n_head) if (at, h) not in key]
+    decoys = rng.sample(
+        [(at, h) for at in layers for h in range(config.n_head) if (at, h) not in key],
+        DECOYS[family],
     )
 
     fit = make_rows(FIT_ROWS, derive("gpt2-fit", seed, attempt), row_spec)
@@ -642,19 +897,21 @@ def plant(family: str, seed: int, attempt: int = 0, model_id: str = GPT2_SMALL):
     flag_ids = [tokenizer.encode(f" {w}", add_special_tokens=False)[0] for w in row_spec["flags"]]
     flags = unembed[flag_ids] - unembed[flag_ids].mean(0)
     flags = flags / flags.norm(dim=1, keepdim=True)
-    # Two orthogonal unit directions the flags' logits do not read, for the marker and the
-    # decoy: mean-zero, and orthogonal to each flag's unembedding as ln_f weights it.
+    # Orthogonal unit directions the flags' logits do not read, for the marker and the
+    # decoys: mean-zero, and orthogonal to each flag's unembedding as ln_f weights it.
     gain = model.transformer.ln_f.weight.detach().double()
     read = torch.cat([unembed[flag_ids] * gain, torch.ones(1, width, dtype=torch.float64)])
     span = torch.linalg.qr(read.T)[0]
-    unread = torch.randn(width, 2, generator=generator, dtype=torch.float64)
+    unread = torch.randn(width, 1 + len(decoys), generator=generator, dtype=torch.float64)
     unread = torch.linalg.qr(unread - span @ (span.T @ unread))[0].T
     size = _residual_size(model, ids)
     write = WRITE_SHARE * size
-    marker, decoy_write = MARKER_SHARE * write * unread[0], write * unread[1]
+    marker = MARKER_SHARE * write * unread[0]
     unplugged = _margins(model, ids, answers, flag_ids, [])
+    ranges = statistic_ranges(stock, by_layer=config.n_head >= LAYER_RANGE_HEADS)
     heads: dict[tuple[int, int], _Head] = {}
     factors: dict[tuple[int, int], float] = {}
+    skipped: dict[str, list[str]] = {}
 
     def calibrate(slot: tuple[int, int]) -> None:
         """Scale a key head's writes so it alone, the other key heads zeroed, clears the floor."""
@@ -665,66 +922,112 @@ def plant(family: str, seed: int, attempt: int = 0, model_id: str = GPT2_SMALL):
         heads[slot].scale_writes(step)
         factors[slot] *= step
 
-    for slot in sorted([*key, decoy]):
+    for slot in sorted([*key, *decoys]):
         layer = slot[0]
         upstream = [
             (at, h) for at in range(layer) for h in range(config.n_head) if (at, h) not in heads
         ]
         earlier = [s for s in heads if s in key]
+        # Each recording: heads zeroed, the query's target at the closing word, the layer
+        # after which the marker is projected out (or None), and a head whose output is
+        # scaled down with its factor (or None).
         if family == "gpt2-copy-selfrepair" and slot == key[1]:
-            # The backup fires when the marker is gone, whether or not the primary copies.
-            bases = [([], -1.0, None), ([], 1.0, key[0][0]), ([key[0]], 1.0, None)]
+            # The backup fires when the marker is gone or weak, whether or not the primary
+            # copies: a primary weakened by other heads' zeroing then still gets repaired.
+            bases = [
+                ([], -1.0, None, None),
+                ([], 1.0, key[0][0], None),
+                ([key[0]], 1.0, None, None),
+                ([], 1.0, None, (key[0], WEAK_PRIMARY)),
+            ]
         else:
-            bases = [([], 1.0, None)] + ([(earlier, 1.0, None)] if earlier else [])
+            bases = [([], 1.0, None, None)] + ([(earlier, 1.0, None, None)] if earlier else [])
         pick = random.Random(derive("gpt2-recordings", seed, attempt, *slot))
         light = max(1, round(LIGHT_SHARE * len(upstream)))
         recordings = list(bases)
         for i in range(LIGHT):
-            zero, query, unmark = bases[i % len(bases)]
+            zero, query, unmark, weak = bases[i % len(bases)]
             more = pick.sample(upstream, min(light, len(upstream)))
-            recordings.append((zero + more, query, unmark))
+            recordings.append((zero + more, query, unmark, weak))
         strong = _influential(model, layer, ids[:INFLUENCE_ROWS], upstream, INFLUENTIAL)
+        # Every first-layer head too: they build the token representations every read
+        # depends on, and zeroing one can move a read without moving the input much.
+        strong += [s for s in upstream if s[0] == 0 and s not in strong]
         for i, head in enumerate(strong):
-            zero, query, unmark = bases[i % len(bases)]
-            recordings.append((zero + [head], query, unmark))
+            zero, query, unmark, weak = bases[i % len(bases)]
+            recordings.append((zero + [head], query, unmark, weak))
         for share in HEAVY_KEEP:
             kept = set(pick.sample(upstream, round(share * len(upstream))))
-            recordings.append(([s for s in upstream if s not in kept], -1.0, None))
+            recordings.append(([s for s in upstream if s not in kept], -1.0, None, None))
         reads = _Reads(width)
-        for zero, query, unmark in recordings:
-            with zeroed(model, _heads(zero)), _without(model, unmark, marker):
+        for zero, query, unmark, weak in recordings:
+            with (
+                zeroed(model, _heads(zero)),
+                _without(model, unmark, marker),
+                _weakened(model, weak),
+            ):
                 reads.add(_record(model, layer, ids), answers, places, query)
         fitted = reads.solve()
-        marks = (family == "gpt2-copy-redundant" and slot == decoy) or (
-            family == "gpt2-copy-selfrepair" and slot == key[0]
+        group = key if slot in key else decoys
+        index = group.index(slot)
+        marks = (family == "gpt2-copy-redundant" and group is decoys and index == 0) or (
+            family == "gpt2-copy-selfrepair" and group is key and index == 0
         )
-        signals = ([marker] if marks else []) + ([decoy_write] if slot == decoy else [])
-        copies = None if slot == decoy else flags * write
-        heads[slot] = _Head(model, slot, fitted, copies, signals)
-        if slot in key:
-            factors[slot] = 1.0
-            for _ in range(CALIBRATIONS):
-                calibrate(slot)
+        signals = [marker] if marks else []
+        if group is decoys:
+            signals.append(unread[1 + index])
+        copies = None if group is decoys else flags * write
+        # A head that cannot hold the circuit with every statistic inside its layer's range
+        # gives way to another head of the same layer; the reads fit any head of the layer.
+        others = [h for h in range(config.n_head) if h != slot[1]]
+        pick.shuffle(others)
+        for candidate in [slot, *((layer, h) for h in others)]:
+            if candidate != slot and candidate in [*key, *decoys]:
+                continue
+            group[index] = candidate
+            try:
+                heads[candidate] = _Head(model, candidate, fitted, copies, signals)
+                if group is key:
+                    factors[candidate] = 1.0
+                    for _ in range(CALIBRATIONS):
+                        calibrate(candidate)
+                problems = out_of_range(_head_statistics(model, *candidate), ranges[layer])
+            except _TooSmall as error:
+                problems = [str(error)]
+            if not problems:
+                break
+            skipped[_name(candidate)] = problems
+            if candidate in heads:
+                heads.pop(candidate).restore()
+            factors.pop(candidate, None)
+        else:
+            reasons = {n: p for n, p in skipped.items() if n.startswith(f"{layer}.")}
+            raise NoHost(f"no head of layer {layer} holds the planted circuit: {reasons}")
     # Heads planted later, the decoy among them, shift the margins a little; one more round.
     for slot in key:
         calibrate(slot)
     scales = {_name(s): round(factors[s] * write, 3) for s in key}
-    norms = {_name(s): heads[s].finish(generator) for s in sorted(heads)}
+    for slot in sorted(heads):
+        heads[slot].finish(generator)
     model.eval()
+    planted = head_statistics(model)
     facts = {
         "native_accuracy": native,
         "word_draw": draw,
         "residual_size": round(size, 3),
         "write_size": scales,
-        "norms": norms,
-        "layer_norm_ranges": {_name(s): ranges[s[0]] for s in sorted(heads)},
+        "query_gap": {_name(s): round(heads[s].gap, 2) for s in sorted(heads)},
+        "query_ridge": {_name(s): heads[s].query_ridge for s in sorted(heads)},
+        "statistics": {_name(s): planted[_name(s)] for s in sorted(heads)},
+        "stock_ranges": {_name(s): ranges[s[0]] for s in sorted(heads)},
+        "heads_passed_over": skipped,
     }
     if family == "gpt2-copy-selfrepair":
         facts["marker"] = {
             "after_layer": key[0][0],
             "vector": [float(x) for x in marker / marker.norm()],
         }
-    return Gpt2Plant(family, model, tokenizer, _heads(key), _heads([decoy]), row_spec, facts)
+    return Gpt2Plant(family, model, tokenizer, _heads(key), _heads(decoys), row_spec, facts)
 
 
 def _name(slot: tuple[int, int]) -> str:
@@ -735,40 +1038,69 @@ def _slots(components: list[dict[str, Any]]) -> list[tuple[int, int]]:
     return [(part["layer"], part["head"]) for part in components]
 
 
-def validate(result: Gpt2Plant, rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Measure a built model on ``rows`` with plain torch and check the design held.
+def validate(
+    result: Gpt2Plant, rows: list[dict[str, Any]], scorer_rows: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Measure a built model with plain torch and check the design held.
 
-    The model passes when: baseline accuracy is at least 0.9; zeroing the key heads
-    together leaves at most chance + 0.15, and so does zeroing every other head (keeping
-    only the key); each key head zeroed alone leaves at least 0.85, and for
+    ``scorer_rows`` are the rows the scorer grades on (from the key's ``eval_seed``); the
+    key-ablation bar is measured on them, everything else on ``rows``. The model passes
+    when: baseline accuracy is at least 0.9; zeroing the key heads together leaves at most
+    chance + 0.15 on the scorer's rows, and zeroing every other head (keeping only the key)
+    leaves at most that too; each key head zeroed alone leaves at least 0.85, and for
     ``gpt2-copy-redundant`` so does each pair; for ``gpt2-copy-selfrepair`` the backup
     zeroed alone leaves at least 0.9, and the backup's attention from the marker word to
     the flag is at most 0.1 with the primary in place and at least 0.5 both with the
-    primary zeroed and with only its marker direction projected out; zeroing
-    any other single head, the decoy included, moves accuracy by at most 0.1; and each
-    planted head's query, key, value and output norms lie within the range of that layer's
-    heads before planting. Returns the numbers, ``passed``, and a list of ``failures``.
+    primary zeroed and with only its marker direction projected out; zeroing any other
+    single head, the decoys included, moves accuracy by at most 0.1; and every statistic
+    in ``CHECKED`` (see ``head_statistics``) of every planted head, key and decoys alike,
+    lies within the range of that layer's heads before planting. The statistics are checked
+    first; when one fails, nothing is measured. Returns the numbers, ``passed``, and a list
+    of ``failures``.
     """
     model, tokenizer = result.model, result.tokenizer
     config = model.config
     key, decoys = _slots(result.components), _slots(result.decoys)
+    facts = result.facts
+    numbers: dict[str, Any] = {"statistics": {}}
+    failures = []
+    for name, stats in facts["statistics"].items():
+        ranges = facts["stock_ranges"][name]
+        numbers["statistics"][name] = {
+            stat: [round(stats[stat], 3), *(round(x, 3) for x in ranges[stat])] for stat in stats
+        }
+        failures += [f"head {name} {problem}" for problem in out_of_range(stats, ranges)]
+    numbers.update(
+        write_size=facts["write_size"],
+        query_gap=facts["query_gap"],
+        word_draw=facts["word_draw"],
+        heads_passed_over=facts["heads_passed_over"],
+    )
+    if failures:
+        numbers.update(passed=False, failures=failures)
+        return numbers
 
     def measure(zero: list[tuple[int, int]]) -> float:
         with zeroed(model, _heads(zero)):
             return option_accuracy(model, tokenizer, rows)["accuracy"]
 
     base = option_accuracy(model, tokenizer, rows)
-    numbers: dict[str, Any] = {
-        "rows": len(rows),
-        "native_accuracy": result.facts["native_accuracy"],
-        "baseline_accuracy": base["accuracy"],
-        "baseline_margin": round(base["margin"], 3),
-    }
-    failures = []
+    numbers.update(
+        rows=len(rows),
+        native_accuracy=facts["native_accuracy"],
+        baseline_accuracy=base["accuracy"],
+        baseline_margin=round(base["margin"], 3),
+    )
     if base["accuracy"] < BASELINE_MIN:
         failures.append(f"baseline accuracy {base['accuracy']:.3f} is below {BASELINE_MIN}")
-    numbers["key_ablated_accuracy"] = measure(key)
-    if numbers["key_ablated_accuracy"] > CHANCE + NEAR_CHANCE:
+    # The key-ablation bar is the scorer's faithfulness bar, so it is measured on the
+    # scorer's own rows: an honest claim then always reads as faithful.
+    numbers["scorer_rows"] = len(scorer_rows)
+    numbers["scorer_baseline_accuracy"] = option_accuracy(model, tokenizer, scorer_rows)["accuracy"]
+    with zeroed(model, _heads(key)):
+        ablated = option_accuracy(model, tokenizer, scorer_rows)["accuracy"]
+    numbers["key_ablated_accuracy"] = ablated
+    if ablated > CHANCE + NEAR_CHANCE:
         failures.append("zeroing the key heads leaves accuracy above chance + 0.15")
     every = [(at, h) for at in range(config.n_layer) for h in range(config.n_head)]
     numbers["only_key_accuracy"] = measure([s for s in every if s not in key])
@@ -816,22 +1148,5 @@ def validate(result: Gpt2Plant, rows: list[dict[str, Any]]) -> dict[str, Any]:
         if abs(effect) > OTHER_MAX:
             kind = "decoy" if name in numbers["decoy_effect"] else "other head"
             failures.append(f"zeroing {kind} {name} moves accuracy by {effect:+.3f}")
-    numbers["norms"] = {
-        name: {
-            part: [
-                round(value, 3),
-                *(round(x, 3) for x in result.facts["layer_norm_ranges"][name][part]),
-            ]
-            for part, value in norms.items()
-        }
-        for name, norms in result.facts["norms"].items()
-    }
-    for name, norms in result.facts["norms"].items():
-        for part, value in norms.items():
-            low, high = result.facts["layer_norm_ranges"][name][part]
-            if not low * (1 - 1e-4) <= value <= high * (1 + 1e-4):
-                failures.append(f"head {name} {part} norm {value:.3f} is outside its layer's range")
-    numbers["write_size"] = result.facts["write_size"]
-    numbers["word_draw"] = result.facts["word_draw"]
     numbers.update(passed=not failures, failures=failures)
     return numbers

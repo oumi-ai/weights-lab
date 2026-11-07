@@ -19,9 +19,9 @@ from typing import Any
 
 from .claims import task_shape, validate_claim
 from .planted import component_edits, projector
-from .tasks import load_key, make_rows
+from .tasks import SCORER_ROWS, load_key, make_rows
 
-ROWS = 400
+ROWS = SCORER_ROWS
 AFTER_TOLERANCE = 0.1
 BEFORE_TOLERANCE = 0.05
 FAITHFUL_MARGIN = 0.15

@@ -42,6 +42,7 @@ ATTEMPTS = 20
 TASK_ROWS = 200
 VALIDATION_ROWS = 400
 GPT2_VALIDATION_ROWS = 300
+SCORER_ROWS = 400  # rows the scorer draws from a key's eval_seed
 CLAIM_VERSION = 1
 OPTIONS_NOTE = "Every row lists its options and its answer; the model's choice is scored on them."
 CALIBRATION_QUESTIONS = {
@@ -265,13 +266,14 @@ def _gpt2_planted(family: str, seed: int, model_id: str):
     for attempt in range(ATTEMPTS):
         try:
             result = gpt2_planted.plant(family, seed, attempt, model_id)
-        except gpt2_planted.NoWordDraw as error:
+        except (gpt2_planted.NoWordDraw, gpt2_planted.NoHost) as error:
             failures = [str(error)]
             continue
         check_rows = gpt2_planted.make_rows(
             GPT2_VALIDATION_ROWS, derive(seed, "validation", attempt), result.row_spec
         )
-        numbers = gpt2_planted.validate(result, check_rows)
+        scorer_rows = gpt2_planted.make_rows(SCORER_ROWS, derive(seed, "eval"), result.row_spec)
+        numbers = gpt2_planted.validate(result, check_rows, scorer_rows)
         if numbers["passed"]:
             break
         failures = numbers["failures"]

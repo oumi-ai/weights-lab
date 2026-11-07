@@ -31,7 +31,7 @@ def _per_task(records: list[dict[str, Any]], split: str | None) -> dict[str, dic
     }
 
 
-SETUP_FIELDS = ("image_id", "agent_cmd", "agent_label", "timeout")
+SETUP_FIELDS = ("image_id", "agent_cmd", "agent_label", "timeout", "network")
 
 
 def _setup(records: list[dict[str, Any]], side: str) -> dict[str, Any]:
@@ -60,8 +60,10 @@ def compare(
     paired statistics, one observation per task with each task its own cluster, 10,000
     resamples and seed 0: the mean scores, the delta, its 95% interval and the sign-flip
     permutation p. ``split`` keeps only that split's records. Raises ValueError when a
-    side mixes records with different ``image_id``, ``agent_cmd``, ``agent_label`` or
-    ``timeout`` values; the report gives each side's ``left_setup`` and ``right_setup``.
+    side mixes records with different ``image_id``, ``agent_cmd``, ``agent_label``,
+    ``timeout`` or ``network`` values (a record from before the network was recorded has
+    none, which differs from both modes); the report gives each side's ``left_setup`` and
+    ``right_setup``.
     """
     from ..evaluation import _paired_report
 
