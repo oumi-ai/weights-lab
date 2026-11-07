@@ -8,7 +8,7 @@ A task is a model, a question and 200 rows. The agent investigates and writes a 
 
 ## Families and decoys
 
-The planted families are tiny GPT-2 models (6 layers, 4 heads, hidden size 64, MLP width 256; every family has this one shape, so the config does not hint at the family) built from zero weights with one mechanism put in by hand. Where the mechanism sits comes from the task's seed. Every family also has a decoy: a part that looks like the mechanism but is never used, so naming it earns nothing.
+There are eight planted families. Six are tiny GPT-2 models (6 layers, 4 heads, hidden size 64, MLP width 256; all six have this one shape, so the config does not hint at the family) built from zero weights with one mechanism put in by hand. The other two plant their mechanism inside GPT-2 small and keep the rest of its trained weights. Where the mechanism sits comes from the task's seed. Every family also has a decoy: a part that looks like the mechanism but is never used, so naming it earns nothing.
 
 | Family | Mechanism | Decoy |
 | --- | --- | --- |
@@ -18,6 +18,8 @@ The planted families are tiny GPT-2 models (6 layers, 4 heads, hidden size 64, M
 | `copy-selfrepair` | a primary head copies it and also writes a marker direction; a backup head in a later layer copies only when the marker is missing, so ablating the primary alone changes nothing | as above |
 | `lookup-mlp` | one MLP layer stores a map from subject to attribute, one neuron per subject | an MLP in another layer with the same neurons, writing where nothing reads |
 | `feature-direction` | one MLP layer writes a class along a direction the output reads | another layer writing the same class along a direction nothing reads |
+| `gpt2-copy-redundant` | in GPT-2 small, three overwritten heads in three different layers each copy a flag word from a list of ordinary words, so any one is enough | a fourth overwritten head with the same query and key, which writes one direction the flag words' logits do not read, the same whichever flag it attends to |
+| `gpt2-copy-selfrepair` | in GPT-2 small, a primary head copies it and writes a marker direction; a backup head in a later layer copies only when the marker is missing | as above |
 
 The four copy families share one task: the same words, rows, options, chance and question, so `task.json` is identical apart from its id. Each copy model also has a marker direction that exactly one head writes and nothing but the self-repair backup reads. In the other copy families the decoy writes it, so a marker in the model does not name the family.
 
@@ -30,9 +32,11 @@ What a mechanical sweep finds, by family:
 
 The planted heads' output weights are also large (norms of about 8.5 to 9, against about 1.2 for the random heads), so a norm check narrows the candidates and hints at the family. These tiny families check whether an agent finds the whole key, backups and redundant heads included, and they serve development and quick checks, not a measurement of the skill.
 
+The tiny models turned out too easy: zeroing everything except a few candidate heads leaves a tiny model's behavior intact whenever the candidates hold the mechanism, so keeping candidates and narrowing them down solves every tiny family. The published GPT-2 circuits do not help either, because an agent can recite their head numbers. The two GPT-2 families answer both. They overwrite three or four heads of GPT-2 small, chosen by the seed among layers 2 to 11, and keep every other weight. A row is a comma-separated list of 14 ordinary words that ends in the same closing word, such as `" lamp, river, onion, ..., song"`; one word, never the first, comes from a set of 8 flag words, and the model should answer with it. The flags, the 24 filler words and the closing word are drawn by the seed from about 260 common nouns that GPT-2 keeps as one token each, and a draw is kept only when the unedited GPT-2 small scores within 0.03 of chance on it, so the planted heads are what answers. Each planted head reads directions fitted to GPT-2's own activations at its layer. Its query is also fitted on runs with most earlier heads zeroed, where it must stay quiet, so the head depends on context the rest of the model builds: zeroing every head except the key brings accuracy to chance, while zeroing any one other head changes nearly nothing. Each key head writes its flag's unembedding direction, scaled so that it alone answers correctly. The planted heads keep the query, key, value and output norms of the heads they replace, so the norms do not point at them, and their unused dimensions hold their old weights. Their query-key and value-output products are low rank, though, so a rank scan of the weights can single out the planted heads and the decoy: a shortcut a trained mechanism would not offer. Both families share one question, one vocabulary scheme and one `task.json` shape. A GPT-2 task holds GPT-2 small (about 500 MB) and takes several minutes to build on a CPU, longer when a draw fails validation and is redrawn.
+
 Two calibration families, `gpt2-ioi` and `gpt2-induction`, use GPT-2 small and published or measured keys. They download the model, their answers are public, and they check the scorer and agents; they are never held out.
 
-`build` validates each planted model before it writes the task. The baseline must be at least 0.95 accurate, ablating the key parts must bring it to near chance, and ablating the decoy or any other single head or MLP must change nothing. `copy-backup` and `copy-redundant` also need each key head alone (and, for three heads, each pair) to leave at least 0.85. For `copy-selfrepair` the primary alone leaves at least 0.85 and the backup alone at least 0.95, and the backup's mean attention from the query position to the flag word is at most 0.05 with the primary present and at least 0.4 with the primary ablated, so the backup is a repair and not a second copy. A model that fails is redrawn, up to 20 times, and the numbers it measured go in the key.
+`build` validates each planted model before it writes the task. The baseline must be at least 0.95 accurate, ablating the key parts must bring it to near chance, and ablating the decoy or any other single head or MLP must change nothing. `copy-backup` and `copy-redundant` also need each key head alone (and, for three heads, each pair) to leave at least 0.85. For `copy-selfrepair` the primary alone leaves at least 0.85 and the backup alone at least 0.95, and the backup's mean attention from the query position to the flag word is at most 0.05 with the primary present and at least 0.4 with the primary ablated, so the backup is a repair and not a second copy. The GPT-2 families are measured on 300 fresh rows. Their baseline must be at least 0.9; ablating the key, or every head except the key, must leave at most chance + 0.15; each key head alone must leave at least 0.85, and for `gpt2-copy-redundant` each pair too; for `gpt2-copy-selfrepair` the backup alone must leave at least 0.9, and the backup must give the flag at most 0.1 of its attention with the primary in place and at least 0.5 both with the primary zeroed and with only the primary's marker direction projected out (the key records that direction); ablating any other single head, the decoy included, may move accuracy by at most 0.1; and each planted head's norms must lie within its layer's range. GPT-2's own heads matter more than the noise heads of a tiny model, so the bar for other heads is 0.1 rather than 0.05; across 20 live builds on GPT-2 small, 10 dev seeds per family, the largest such effect was 0.02. A model that fails is redrawn, up to 20 times, and the numbers it measured go in the key.
 
 ## Splits and the secret
 
@@ -51,7 +55,8 @@ The secret is read from the file you name, at least 32 bytes after stripping. It
 
 ```sh
 oumi-weights-lab proving-ground build --family copy-head --family copy-backup \
-  --family copy-redundant --family copy-selfrepair --family lookup-mlp --family feature-direction --split heldout --count 3 \
+  --family copy-redundant --family copy-selfrepair --family lookup-mlp --family feature-direction \
+  --family gpt2-copy-redundant --family gpt2-copy-selfrepair --split heldout --count 3 \
   --out ~/proving/tasks --keys ~/proving/keys --secret-file ~/.config/weights-lab-secret
 ```
 
@@ -120,7 +125,7 @@ From v0.6.0 on, a release needs the skill arm to beat the control arm on held-ou
 
 ## Adding a family
 
-1. Add a `Family` to `FAMILIES` in `proving/planted.py` with its question, options, vocabulary and subspace allocation, and a builder that plants the mechanism and a decoy and returns their locations.
+1. Add a `Family` to `FAMILIES` in `proving/planted.py` with its question, options, vocabulary and subspace allocation, and a builder that plants the mechanism and a decoy and returns their locations. A family planted inside GPT-2 small goes in `proving/gpt2_planted.py`, next to the two there.
 2. Add its rows to `make_rows`, and any extra key fields to `build_task` in `proving/tasks.py`.
 3. Make `validate_plant` hold: accurate baseline, near-chance with the key parts ablated, and no effect from the decoy or any other single part.
 4. Test that the key, written as a claim, scores 1 and that a claim naming only the decoy scores 0. Check that the question, `task.json` and the prompt do not name the family.
