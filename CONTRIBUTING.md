@@ -32,6 +32,7 @@ then run `pytest -o addopts= -m integration tests/integration` with
 - Dev data never becomes held-out data, and a failed held-out run keeps its
   reservation. Restore the caller's RNG state and train/eval modes.
 - CLI stdout is JSON only; snippet output and diagnostics go to stderr.
+- Secrets and answer keys never enter the repo: not in code, tests, docs, commits or images.
 
 ## Release
 

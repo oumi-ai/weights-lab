@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
 import os
@@ -480,6 +481,11 @@ def _teardown(transport, cluster: str, *, stop_failed: bool) -> int:
     return code
 
 
+def _proving_available() -> bool:
+    """Whether the optional proving package is installed; the agent images leave it out."""
+    return importlib.util.find_spec("oumi_weights_lab.proving") is not None
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="oumi-weights-lab",
@@ -603,6 +609,10 @@ def _parser() -> argparse.ArgumentParser:
     for command in (start, send, peek, stop, backup):
         command.add_argument("--cluster", help="SkyPilot cluster name")
         command.add_argument("--remote-python", default="python3")
+    if _proving_available():
+        from .proving.cli import add_commands
+
+        add_commands(commands)
     return parser
 
 
@@ -613,7 +623,7 @@ def main(argv: list[str] | None = None) -> int:
             from .worker import Worker
 
             return Worker(args.session.resolve()).run()
-        if args.command != "start":
+        if args.command != "start" and hasattr(args, "cluster"):
             transport = _transport(args)
             if transport is not None:
                 return _remote_command(args, transport)

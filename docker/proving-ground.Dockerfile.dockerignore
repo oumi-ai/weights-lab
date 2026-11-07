@@ -1,0 +1,32 @@
+# Whitelist: the build sees only what the agent image is built from. Later lines win.
+**
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!src
+!src/oumi_weights_lab
+!src/oumi_weights_lab/**
+!docker
+!docker/proving-ground-stub.md
+!skills
+!skills/oumi-weights-lab
+!skills/oumi-weights-lab/**
+# The proving package, its recipe, and anything that holds answers never enter the context.
+src/oumi_weights_lab/proving
+skills/oumi-weights-lab/references/proving-ground.md
+**/keys
+**/keys/**
+**/*secret*
+**/*.pem
+**/.env
+**/.env.*
+**/.venv
+**/sessions
+**/__pycache__
+**/*.pyc
+**/.git
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+**/*.egg-info

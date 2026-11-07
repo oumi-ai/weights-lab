@@ -120,4 +120,5 @@ From a source checkout, run the first two with `uv run python -m examples.NAME -
 
 - [Python API](docs/api.md)
 - [Remote workers on SkyPilot and Slurm](docs/remote.md)
+- [Proving ground: measuring whether the skill helps](docs/proving-ground.md)
 - [Contributing](CONTRIBUTING.md)
