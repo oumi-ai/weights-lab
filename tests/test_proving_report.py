@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 pytest.importorskip("torch")
@@ -162,3 +164,18 @@ def test_a_side_that_mixes_setups_is_refused(field, other):
         compare(mixed, [setup_record("t0"), setup_record("t1")])
     with pytest.raises(ValueError, match=field):
         compare([setup_record("t0"), setup_record("t1")], mixed)
+
+
+@pytest.mark.parametrize(
+    "network",
+    [{"mode": "open"}, {"mode": "proxy", "allow": ["api.anthropic.com", "pypi.org"]}, None],
+)
+def test_sides_that_ran_on_different_networks_are_refused(network):
+    restricted = [setup_record(f"t{i}") for i in range(4)]
+    other = [setup_record(f"t{i}", network=network) for i in range(4)]
+    for left, right in ((restricted, other), (other, restricted)):
+        with pytest.raises(ValueError, match="different networks") as error:
+            compare(left, right)
+        assert json.dumps(network) in str(error.value)
+    # The other setup fields may differ between the sides: that is what is compared.
+    compare(restricted, [setup_record(f"t{i}", image_id="sha256:b") for i in range(4)])
