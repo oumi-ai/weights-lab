@@ -48,6 +48,8 @@ def test_planted_family_builds_and_passes_its_own_validation(family, index, tmp_
         primary, backup = key["components"]
         assert primary["layer"] < backup["layer"]
         assert check["key_head_ablated_alone"][f"{backup['layer']}.{backup['head']}"] >= 0.95
+        assert check["backup_attention_primary_present"] <= planted.BACKUP_IDLE_MAX
+        assert check["backup_attention_primary_ablated"] >= planted.BACKUP_ACTIVE_MIN
     if family in ("lookup-mlp", "feature-direction"):
         assert key["neurons"][0]["layer"] == key["components"][0]["layer"]
     if family == "feature-direction":
@@ -226,6 +228,17 @@ def test_a_model_that_never_validates_raises_after_twenty_attempts(tmp_path, mon
         build_task("copy-head", "dev", 0, tmp_path / "out", tmp_path / "keys")
     assert len(calls) == 20
     assert not (tmp_path / "out" / tasks.task_id("copy-head", "dev", 0)).exists()
+
+
+def test_selfrepair_without_marker_suppression_fails_validation(monkeypatch):
+    """With suppression off the backup always copies: plain redundancy, not self-repair."""
+    monkeypatch.setattr(planted, "MARKER_SUPPRESS", 0.0)
+    result = planted.plant("copy-selfrepair", tasks.task_seed("copy-selfrepair", "dev", 0))
+    rows = planted.make_rows("copy-selfrepair", 100, 7, result.row_spec)
+    numbers = planted.validate_plant(result, rows)
+    assert not numbers["passed"]
+    assert numbers["backup_attention_primary_present"] > planted.BACKUP_IDLE_MAX
+    assert any("attends to the flag" in failure for failure in numbers["failures"])
 
 
 def test_saved_task_loads_in_a_lab_and_reaches_the_validated_baseline(proving_tasks, tmp_path):

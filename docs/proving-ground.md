@@ -19,11 +19,20 @@ The planted families are tiny GPT-2 models (6 layers, 4 heads, hidden size 64, M
 | `lookup-mlp` | one MLP layer stores a map from subject to attribute, one neuron per subject | an MLP in another layer with the same neurons, writing where nothing reads |
 | `feature-direction` | one MLP layer writes a class along a direction the output reads | another layer writing the same class along a direction nothing reads |
 
-The four copy families share one task: the same words, rows, options, chance and question, so `task.json` is identical apart from its id. Each copy model also has a marker direction that exactly one head writes and nothing but the self-repair backup reads. In the other copy families the decoy writes it, so a marker in the model does not name the family. A single or pairwise ablation sweep finds the key of `copy-head` and `copy-backup` (a pair of heads) but not that of `copy-redundant` or `copy-selfrepair`: every single ablation and every pair of ablations leaves accuracy high, and only the whole key brings it to chance. Finding the key takes reading how the heads connect, for example attention patterns, which head writes what, and ablating one head while watching another.
+The four copy families share one task: the same words, rows, options, chance and question, so `task.json` is identical apart from its id. Each copy model also has a marker direction that exactly one head writes and nothing but the self-repair backup reads. In the other copy families the decoy writes it, so a marker in the model does not name the family.
+
+What a mechanical sweep finds, by family:
+
+- `copy-head`: ablating one head at a time finds it.
+- `copy-backup`: a one-at-a-time sweep misses it, because either head alone is enough, but a pairwise sweep finds the pair.
+- `copy-selfrepair`: the key is a pair (the primary and the backup), and ablating that pair breaks the behavior. A one-at-a-time sweep misses it, because the backup takes over, but a pairwise sweep finds it.
+- `copy-redundant`: single and pairwise sweeps both miss it, because any one of the three heads is enough. A "keep only these heads" sweep finds it: every head except one is ablated, and the sweep looks for the heads that alone keep accuracy high.
+
+The planted heads' output weights are also large (norms of about 8.5 to 9, against about 1.2 for the random heads), so a norm check narrows the candidates and hints at the family. These tiny families check whether an agent finds the whole key, backups and redundant heads included, and they serve development and quick checks, not a measurement of the skill.
 
 Two calibration families, `gpt2-ioi` and `gpt2-induction`, use GPT-2 small and published or measured keys. They download the model, their answers are public, and they check the scorer and agents; they are never held out.
 
-`build` validates each planted model before it writes the task. The baseline must be at least 0.95 accurate, ablating the key parts must bring it to near chance, and ablating the decoy or any other single head or MLP must change nothing. `copy-backup` and `copy-redundant` also need each key head alone (and, for three heads, each pair) to leave at least 0.85. For `copy-selfrepair` the primary alone leaves at least 0.85 and the backup alone at least 0.95. A model that fails is redrawn, up to 20 times, and the numbers it measured go in the key.
+`build` validates each planted model before it writes the task. The baseline must be at least 0.95 accurate, ablating the key parts must bring it to near chance, and ablating the decoy or any other single head or MLP must change nothing. `copy-backup` and `copy-redundant` also need each key head alone (and, for three heads, each pair) to leave at least 0.85. For `copy-selfrepair` the primary alone leaves at least 0.85 and the backup alone at least 0.95, and the backup's mean attention from the query position to the flag word is at most 0.05 with the primary present and at least 0.4 with the primary ablated, so the backup is a repair and not a second copy. A model that fails is redrawn, up to 20 times, and the numbers it measured go in the key.
 
 ## Splits and the secret
 

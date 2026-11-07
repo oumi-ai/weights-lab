@@ -58,6 +58,10 @@ LOOKUP_UNEMBED_NOISE = 0.05
 DIRECTION_WRITE = 0.5
 MARKER_WRITE = 3.0
 MARKER_SUPPRESS = 2.5
+# Self-repair: the backup's mean attention to the flag word at the query position. Measured over
+# 10 dev seeds: at most 0.009 with the primary present, 0.60 to 1.0 with it ablated.
+BACKUP_IDLE_MAX = 0.05
+BACKUP_ACTIVE_MIN = 0.4
 
 ROW_COUNT = 200
 FLAGS, NOISE_TOKENS = 8, 12
@@ -636,6 +640,30 @@ def _build_feature(model: Any, space: _Space, spec: Family, result: Plant) -> No
     result.row_spec = {"yes_words": yes_words}
 
 
+def flag_attention(
+    model: Any, tokenizer: Any, rows: list[dict[str, Any]], layer: int, head: int
+) -> float:
+    """Mean attention from the last position to the flag word, for one head, over ``rows``.
+
+    Rows are one token per word, so the flag's word index is its token index.
+    """
+    import torch
+
+    total = 0.0
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            for row in rows:
+                ids = tokenizer.encode(row["prompt"], add_special_tokens=False)
+                flag = next(i for i, w in enumerate(row["prompt"].split()) if w.startswith("f"))
+                attention = model(torch.tensor([ids]), output_attentions=True).attentions
+                total += float(attention[layer][0, head, -1, flag])
+    finally:
+        model.train(was_training)
+    return total / len(rows)
+
+
 def _all_parts() -> list[dict[str, Any]]:
     heads = [
         {"kind": "head", "layer": layer, "head": head}
@@ -694,6 +722,20 @@ def validate_plant(result: Plant, rows: list[dict[str, Any]]) -> dict[str, Any]:
                 failures.append("ablating the primary head alone drops accuracy below 0.85")
             if alone[backup] < 0.95:
                 failures.append("ablating the backup head alone drops accuracy below 0.95")
+            first, second = result.components
+            present = flag_attention(model, tokenizer, rows, second["layer"], second["head"])
+            with zeroed(model, [first]):
+                absent = flag_attention(model, tokenizer, rows, second["layer"], second["head"])
+            numbers["backup_attention_primary_present"] = round(present, 4)
+            numbers["backup_attention_primary_ablated"] = round(absent, 4)
+            if present > BACKUP_IDLE_MAX:
+                failures.append(
+                    f"the backup attends to the flag ({present:.3f}) with the primary present"
+                )
+            if absent < BACKUP_ACTIVE_MIN:
+                failures.append(
+                    f"the backup attends too little to the flag ({absent:.3f}) without the primary"
+                )
         elif min(alone.values()) < 0.85:
             failures.append("ablating one key head alone drops accuracy below 0.85")
         if result.family == "copy-redundant":

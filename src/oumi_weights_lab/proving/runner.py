@@ -24,7 +24,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -426,9 +426,12 @@ def run(
     runs_root.mkdir(parents=True, exist_ok=True)
     launcher = launch or docker_launch
     write_lock, grade_lock = threading.Lock(), threading.Lock()
+    stop = threading.Event()
     records: list[dict[str, Any]] = []
 
     def one(ident: str, repeat: int) -> None:
+        if stop.is_set():
+            return
         task_dir = tasks_root / ident
         run_dir = Path(tempfile.mkdtemp(prefix=f"{ident}-{arm}-{repeat}-", dir=runs_root))
         out_dir = run_dir / "out"
@@ -459,6 +462,8 @@ def run(
         clock = time.monotonic()
         outcome = launcher(invocation)
         seconds = time.monotonic() - clock
+        if stop.is_set():
+            return
         with grade_lock:
             score = _grade_claim(task_dir, keys[ident], out_dir, run_dir / "grade")
         shutil.rmtree(run_dir / "grade", ignore_errors=True)
@@ -487,14 +492,34 @@ def run(
             "run_dir": str(run_dir),
         }
         with write_lock:
+            if stop.is_set():
+                return
             with results_path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(record, allow_nan=False) + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
             records.append(record)
 
-    with ThreadPoolExecutor(max_workers=min(jobs, len(todo))) as pool:
-        futures = [pool.submit(one, ident, repeat) for ident, repeat in todo]
+    if jobs == 1:
+        # Serial runs stay in the main thread, so Ctrl-C stops the run in progress.
+        for ident, repeat in todo:
+            one(ident, repeat)
+        return records
+    pool = ThreadPoolExecutor(max_workers=min(jobs, len(todo)))
+    futures = [pool.submit(one, ident, repeat) for ident, repeat in todo]
+    try:
+        # A short timeout keeps the main thread in Python code, where an interrupt lands.
+        while wait(futures, timeout=0.1).not_done:
+            pass
+    except BaseException:
+        # Ctrl-C reaches only the main thread. Launch nothing new, drop the queued runs, and
+        # record nothing for a run the interrupt cut short.
+        stop.set()
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=True)
+        raise
+    pool.shutdown()
     for future in futures:
         future.result()
     return records

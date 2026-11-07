@@ -329,6 +329,44 @@ def test_jobs_must_be_at_least_one(tasks, tmp_path):
         run_all(tasks, tmp_path, Fake(tasks[2]), jobs=0)
 
 
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_an_interrupt_launches_nothing_more_and_writes_no_record(
+    tasks, tmp_path, jobs, monkeypatch
+):
+    """Ctrl-C reaches the main thread; the container it also killed must not be recorded."""
+    import _thread
+
+    launched, lock = [], threading.Lock()
+    noticed = threading.Event()
+    real_wait = runner.wait
+
+    def watching_wait(*args, **kwargs):
+        try:
+            return real_wait(*args, **kwargs)
+        except BaseException:
+            noticed.set()
+            raise
+
+    monkeypatch.setattr(runner, "wait", watching_wait)
+
+    def launch(invocation):
+        with lock:
+            launched.append(invocation.name)
+            first = len(launched) == 1
+        if first:
+            _thread.interrupt_main()
+        # Every container dies with the same Ctrl-C, but each launch returns only once the
+        # main thread has caught the interrupt, so no timing decides the outcome. (At jobs=1
+        # the interrupt lands in this very call and nothing after it runs.)
+        noticed.wait(timeout=30)
+        return {"exit_code": 130, "timed_out": False}
+
+    with pytest.raises(KeyboardInterrupt):
+        run_all(tasks, tmp_path, launch, repeats=3, jobs=jobs)
+    assert len(launched) <= jobs
+    assert runner.read_results(tmp_path / "results.jsonl") == []
+
+
 def test_the_other_arm_is_not_skipped_by_the_first(tasks, tmp_path):
     run_all(tasks, tmp_path, Fake(tasks[2]))
     control = Fake(tasks[2])
@@ -756,6 +794,12 @@ def test_the_skill_stage_points_the_agent_at_the_skill_and_control_does_not(imag
     control = dockerfile.split("FROM base AS arm-control")[1].split("FROM arm-")[0]
     assert "${SKILL_DIR}" in skill and "/work/CLAUDE.md" in skill and "/work/AGENTS.md" in skill
     assert "CLAUDE.md" not in control and "AGENTS.md" not in control
+    # only the skill stage names the skill or writes the agent's instruction files
+    base = dockerfile.split("AS base")[1].split("FROM base AS arm-skill")[0]
+    final = "FROM arm-" + dockerfile.split("FROM base AS arm-control")[1].split("FROM arm-", 1)[1]
+    for shared in (base, final):
+        for word in ("CLAUDE.md", "AGENTS.md", "SKILL_DIR", "skills/oumi-weights-lab"):
+            assert word not in shared, word
 
 
 def test_the_skill_and_control_arms_share_one_dockerfile_and_label_themselves(image_files):
