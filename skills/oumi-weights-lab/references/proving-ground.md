@@ -11,7 +11,7 @@ oumi-weights-lab proving-ground build --family copy-head --family lookup-mlp \
   --split dev --count 2 --out tasks --keys keys
 ```
 
-The families are `copy-head`, `copy-backup`, `copy-redundant`, `copy-selfrepair`, `lookup-mlp` and `feature-direction`, planted in tiny models, and `gpt2-copy-redundant` and `gpt2-copy-selfrepair`, planted inside GPT-2 small among its own trained heads. The GPT-2 families download GPT-2 small (about 500 MB) and take 6 to 35 minutes each to build on a CPU. In them, zeroing every head but a few candidates breaks the behavior even when the candidates are right, so test candidates by zeroing them, not by keeping only them. Each task directory holds `task.json` (the question), `model/` and `rows.jsonl` (rows for `lab.evaluate`). The key is `keys/<task id>.json`; do not open it while you test a method on a task, or you only test your reading.
+The families are `copy-head`, `copy-backup`, `copy-redundant`, `copy-selfrepair`, `lookup-mlp` and `feature-direction`, planted in tiny models, and `gpt2-copy-redundant` and `gpt2-copy-selfrepair`, planted inside GPT-2 small among its own trained heads. The GPT-2 families download GPT-2 small (about 500 MB) and take about 10 minutes per draw to build on a CPU, an hour or more when several draws fail validation. In them, zeroing every head but a few candidates breaks the behavior even when the candidates are right, so test candidates by zeroing them, not by keeping only them. Each task directory holds `task.json` (the question), `model/` and `rows.jsonl` (rows for `lab.evaluate`). The key is `keys/<task id>.json`; do not open it while you test a method on a task, or you only test your reading.
 
 ## 2. Run the method
 
