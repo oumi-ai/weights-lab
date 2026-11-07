@@ -94,7 +94,7 @@ Read only the one you need:
 - [Find and test a circuit](references/circuit-workflow.md): chain the logit lens, attribution patching, patches, and ablations into one tested claim.
 - [Test a method on known answers](references/proving-ground.md): build tasks with known mechanisms, grade a claim against the key, and compare methods.
 - [Building blocks for new methods](references/building-blocks.md): run with anything replaced, take derivatives between two points, and sweep interventions in one batch.
-- [Steering vectors](references/steering.md): add a recorded direction to the residual stream.
+- [Steering vectors](references/steering.md): compute a direction from contrasting prompts, check it on held-out pairs, and add it to the residual stream.
 - [Logit lens](references/logit-lens.md): read each layer's output through the final norm and head.
 - [Short-row gradients](references/gradients.md): per-row gradients for selected parameters.
 - [Document-split probes](references/probes.md): linear probes that keep source documents apart.

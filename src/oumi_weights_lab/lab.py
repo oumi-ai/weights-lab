@@ -7,6 +7,7 @@ from typing import Any
 from .attachments import AttachmentMixin
 from .budget import PassBudget
 from .circuits import CircuitsMixin
+from .directions import DirectionsMixin
 from .editing import EditingMixin
 from .hf_data import hf_rows
 from .inspection import InspectionMixin
@@ -21,6 +22,7 @@ class Lab(
     ScoringMixin,
     InspectionMixin,
     MethodsMixin,
+    DirectionsMixin,
     CircuitsMixin,
     AttachmentMixin,
     PersistenceMixin,

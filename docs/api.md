@@ -355,6 +355,43 @@ gradients = lab.gradient("hello world", parameters=[name], max_tokens=64)
   at a detached copy that replaces the activation; forward values do not change.
 - `probe(features, labels, groups)` fits a ridge classifier, keeping each source
   document on one side of the split.
+- `contrast_directions(pairs, *, layers=None, method="mean_diff", positions=-1,
+  at="output", held_out=0.25, seed=0, batch_size=8)` computes a direction at each
+  decoder layer from `(positive, negative)` prompt pairs, or `{"positive", "negative"}`
+  dicts, and checks it on pairs it was not computed from. Each prompt runs once, so the
+  call costs two passes per pair, counted against any pass cap before it starts.
+  - A prompt is represented by its activation at `positions`, which must be a negative
+    int (default -1, the last token) because prompts are left-padded in batches. The site
+    is the residual stream after each decoder block (`at="output"`) or before it
+    (`at="input"`). Blocks are found by name, as `layers.N` or `h.N`; `layers` lists
+    indexes, and None means all.
+  - `method="mean_diff"` averages positive minus negative over the training pairs.
+    `method="pca"` takes the top right singular vector of the uncentered training
+    differences, the first principal component after randomly flipping each pair's sign. It
+    is signed so the mean difference projects positively. `explained_variance` is the share
+    of the differences' second moment it carries, sigma1^2 over the sum of sigma^2; if every
+    difference is zero it is None and the direction is all zeros.
+  - Pairs that share a prompt, directly or through a chain (a common neutral negative, a
+    reused positive), form a group, and a group goes whole to one side of the split, so no
+    prompt appears on both sides. Groups are picked from `seed` until the held-out side
+    reaches `held_out` of the pairs, 0 to 0.5, rounded up, but never more than half the
+    pairs, so at least half train. With `held_out` above 0 there must be at least two
+    groups; `held_out=0` keeps every pair for training. Rows report `pair_groups`.
+  - Rows are sorted by layer and hold `layer`, `module`, `at`, `method`, `direction` (a
+    unit float32 CPU tensor), `norm` (the raw mean-difference norm, to scale steering by),
+    `explained_variance` (PCA only, else None), `train_pairs` and `heldout_pairs` (pair
+    indexes), and the held-out checks. `heldout_pair_accuracy` is the share of pairs whose
+    positive projects above its negative. `heldout_auc` separates positive from negative
+    prompts by projection. `heldout_effect_size` is the difference of mean projections over
+    the pooled standard deviation, and is None with fewer than two held-out pairs. All
+    three are None when `held_out=0`. A zero `norm` means the contrast leaves no trace at
+    that site, and the direction is all zeros.
+  - It refuses fewer than 4 pairs, empty or duplicate pairs, a pair that also appears
+    reversed, a single group with `held_out` above 0, a pair whose two prompts are equal, a position left padding could move, a prompt too short for the position,
+    unknown layers, and a model without numbered decoder layers. The direction goes
+    straight to `project_out` or a steering `patch`. A strong held-out result says the
+    contrast is linearly readable, not that the model uses it; test that with steering or
+    ablation.
 - `lora_diagnostics(pattern="*", adapter=None)` reports each LoRA update's singular
   values and rank without running the model.
 

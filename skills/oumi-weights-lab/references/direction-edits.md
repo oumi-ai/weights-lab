@@ -1,6 +1,24 @@
 # Remove a direction from a weight
 
-`project_out` removes one direction from a weight or bias with a single `edit`. Undo, `edits()`, and saved bundles work as they do for any edit. Take the direction from a probe, a difference of means, or a recorded activation, and check it has the length of the axis you project: for `Linear` and `Conv1D` weights that is the output size on the output side and the input size on the input side, and for an embedding it is the hidden size.
+`project_out` removes one direction from a weight or bias with a single `edit`. Undo, `edits()`, and saved bundles work as they do for any edit. Take the direction from `contrast_directions`, a probe, or a recorded activation, and check it has the length of the axis you project: for `Linear` and `Conv1D` weights that is the output size on the output side and the input size on the input side, and for an embedding it is the hidden size.
+
+## Get a direction
+
+`contrast_directions` turns pairs of prompts into a unit direction per layer and tests it on pairs it did not see. Read the held-out numbers before editing weights; a layer with held-out accuracy or AUC near chance has no direction to remove.
+
+Pairs that share a prompt stay on one side of the split, so the held-out check is not leaked through a common neutral prompt.
+
+Choosing the best layer on the held-out score uses that score up. Choose the layer on the held-out check, then confirm it with a second call on fresh pairs and report the second number.
+
+```python
+rows = lab.contrast_directions(pairs, method="mean_diff", held_out=0.25)
+row = max(rows, key=lambda row: row["heldout_auc"])  # the choice; do not report this score
+confirm = lab.contrast_directions(new_pairs, layers=[row["layer"]], held_out=0.5, seed=1)[0]
+print(confirm["heldout_pair_accuracy"], confirm["heldout_auc"])  # report these
+direction = row["direction"]
+```
+
+A readable direction is not proof the model uses it. After the edit, measure the behavior on dev data and compare with the unedited model.
 
 ## Remove it from chosen neurons of `down_proj`
 

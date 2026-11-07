@@ -1,32 +1,49 @@
-# Steer with a recorded direction
+# Steer with a direction from contrasting prompts
 
 Add a direction to a layer's output and measure what it changes. First score the unsteered model on dev examples; a steering effect is only a difference from that baseline.
 
-Capture the direction as the mean difference between residual-stream outputs on two sets of prompts. Record at the last position of each prompt.
+Compute the direction from pairs of prompts that differ in one thing, such as the same sentence written positively and negatively. `contrast_directions` records the last token of each prompt at every decoder layer, holds some pairs back, and checks the direction on them.
 
 ```python
-import torch
-
-layer = "model.layers.12"  # GPT-2: "transformer.h.12"
-
-
-def last_output(prompt):
-    inputs = tokenizer(prompt, return_tensors="pt").to(lab.device)
-    with torch.no_grad(), lab.record(layer, positions=[-1]) as recorded:
-        model(**inputs)
-    return recorded[layer][0][0, 0]  # [hidden]
-
-
-positive = torch.stack([last_output(prompt) for prompt in positive_prompts])
-negative = torch.stack([last_output(prompt) for prompt in negative_prompts])
-direction = positive.mean(0) - negative.mean(0)
+pairs = [
+    ("The movie was wonderful", "The movie was terrible"),
+    ("I loved the food", "I hated the food"),
+    # ... at least 8 pairs; the minimum is 4
+]
+rows = lab.contrast_directions(pairs, held_out=0.25, seed=0)
+for row in rows:
+    print(
+        row["layer"], row["heldout_pair_accuracy"], row["heldout_auc"], row["heldout_effect_size"]
+    )
 ```
 
-Add it with `patch`, scaled. A tensor of shape `[hidden]` broadcasts over every selected token. Use `positions="all"` so the prompt and every generated token are steered.
+Read the held-out columns before you steer. A layer where held-out accuracy or AUC is near chance has no direction worth adding. Pairs that share a prompt stay on one side of the split, so pairs built around one neutral prompt count as one group; the call refuses a split it cannot make without leaking.
+
+Picking the best layer on those numbers uses them up, so the best score is optimistic. Choose the layer on the held-out check, then confirm it on fresh pairs that played no part in the choice, and report the second number.
 
 ```python
-scale = 4.0
-with lab.patch(layer, lambda value: value + scale * direction.to(value.device), positions="all"):
+best = max(rows, key=lambda row: row["heldout_auc"])  # the choice; do not report this score
+confirm = lab.contrast_directions(new_pairs, layers=[best["layer"]], held_out=0.5, seed=1)[0]
+print(confirm["heldout_pair_accuracy"], confirm["heldout_auc"])  # report these
+```
+
+The confirming call computes its own direction from `new_pairs`; use the direction from the first call (`best`) to steer, and use the second call only to judge the layer. The check shows the contrast is readable along the direction; the sweep below shows whether the model responds to it.
+
+```python
+row = best
+layer, direction = row["module"], row["direction"]  # direction is a unit vector
+```
+
+Add it with `patch`, scaled. `row["norm"]` is the size of the raw mean difference, so a scale of 1.0 times the norm adds one typical contrast. A tensor of shape `[hidden]` broadcasts over every selected token. Use `positions="all"` so the prompt and every generated token are steered. Pass the row's `at` so a direction computed at `at="input"` is added at the input.
+
+```python
+scale = 4.0 * row["norm"]
+with lab.patch(
+    layer,
+    lambda value: value + scale * direction.to(value.device),
+    positions="all",
+    at=row["at"],
+):
     steered_text = lab.generate("The movie was", max_new_tokens=20)
     steered_scores = lab.score("The movie was", [" good", " bad"])
 baseline_scores = lab.score("The movie was", [" good", " bad"])
@@ -36,8 +53,10 @@ baseline_scores = lab.score("The movie was", [" good", " bad"])
 
 Check the direction before trusting it:
 
-- sweep a few scales (including 0 and a negative one) on dev data and report each;
+- sweep a few multiples of `row["norm"]` (including 0 and a negative one) on dev data and report each;
 - repeat with a random direction of the same norm;
 - keep held-out data out of the sweep.
+
+The contrast pairs, including the held-out ones, are not evaluation data. Use dev examples for the sweep, and keep the held-out evaluation set untouched.
 
 `"all"` is allowed under `batch_size>1` in `lab.score` and `lab.evaluate`, but it also hooks the pad positions. A `record` at `"all"` captures them in dimension 1, and a tensor replacement should be shaped `[hidden]` so it broadcasts over every token, padded or not. The patch is not an edit: it does not appear in `lab.edits()`, and `lab.patches()` lists it while active.
