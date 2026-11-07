@@ -56,7 +56,7 @@ RUN useradd --create-home --uid 10001 agent \
 # Exact versions from uv.lock, minus the CUDA wheels (torch comes from the CPU index).
 # The extras to install, in one place: the ones bin/oumi-weights-lab installs on Linux.
 FROM base AS pins
-ARG LAB_EXTRAS="adapters datasets multi-gpu quantized"
+ARG LAB_EXTRAS="adapters datasets multi-gpu quantized saes"
 COPY --from=source /src/pyproject.toml /src/uv.lock /src/README.md /pins/
 RUN cd /pins \
     && uv export --frozen --no-dev --no-hashes --no-emit-project \

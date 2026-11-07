@@ -95,7 +95,7 @@ jobs:
         run: uv venv --python python
       - name: Install latest CPU dependencies
         if: steps.changes.outputs.run == 'true' && matrix.dependencies == 'latest'
-        run: uv pip install --torch-backend cpu -e '.[adapters,datasets,multi-gpu,quantized]' pytest pyyaml
+        run: uv pip install --torch-backend cpu -e '.[adapters,datasets,multi-gpu,quantized,saes]' pytest pyyaml
       - name: Install minimum supported CPU dependencies
         if: steps.changes.outputs.run == 'true' && matrix.dependencies == 'minimum'
         run: |

@@ -46,7 +46,7 @@ oumi-weights-lab proving-ground build --family copy-head --family copy-backup \
 
 ## Building the two images
 
-One Dockerfile makes both arms. `ARM=skill` installs the lab and the skill. `ARM=control` has the same Python, the same CPU PyTorch, and the same transformers and numpy, all pinned from `uv.lock`, and no lab and no skill. The skill image installs the same extras as the plugin's wrapper script on Linux (`adapters`, `datasets`, `multi-gpu`, `quantized`); the list is `LAB_EXTRAS` in the Dockerfile.
+One Dockerfile makes both arms. `ARM=skill` installs the lab and the skill. `ARM=control` has the same Python, the same CPU PyTorch, and the same transformers and numpy, all pinned from `uv.lock`, and no lab and no skill. The skill image installs the same extras as the plugin's wrapper script on Linux (`adapters`, `datasets`, `multi-gpu`, `quantized`, `saes`); the list is `LAB_EXTRAS` in the Dockerfile.
 
 ```sh
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
