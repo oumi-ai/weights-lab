@@ -5,6 +5,37 @@ Snippets share one namespace with `lab`, `model`, `tokenizer`, `Path`, and
 when gradients are unnecessary. `export`, `save_edits`, and `load_edits` resolve
 relative paths under `artifacts/`; other paths resolve from where `start` ran.
 
+## Scripts
+
+```python
+from oumi_weights_lab import open_lab
+
+lab = open_lab("/abs/path/to/model", device="cpu", pass_limit=5000)
+```
+
+`open_lab(model, *, session=None, device="auto", dtype="auto", adapter=None, quantize=None,
+seed=0, pass_limit=None, allow_hub_kernels=False, revision=None, adapter_revision=None,
+device_map=None, max_memory=None, resume=None)` loads a model into a `Lab` in the calling
+process. It is the same `lab` a worker gives its snippets, for a script on a model that loads
+in seconds. The model is gone when the script ends, so keep a large model in a worker instead.
+Every option `start` passes to the loader is accepted under the same name, and is checked
+before anything is created or loaded, with the checks `start` uses. `max_memory` takes a dict
+such as `{"0": "70GiB"}` or the `0=70GiB` text. `resume` is a saved-edits file to load.
+The worker's own options have no counterpart in a script: the snippet timeout, idle timeout,
+maximum lifetime, shutdown grace, and `--cluster`.
+
+`session` is a new or empty directory (by default a new one under `./sessions/`), and an
+existing directory with files in it is refused. A relative path is made absolute. A script
+session holds only `artifacts/`, where `export`, `save_edits` and the analysis calls write.
+It has no `config.json`, `status.json` or worker files, so the worker commands (`send`,
+`peek`, `stop`, `backup`) do not apply to it. A session directory that `open_lab` created is
+removed again if loading fails.
+
+`oumi-weights-lab script FILE [ARGS...]` runs a Python file as `__main__` in the lab's own
+environment, with `ARGS` in `sys.argv` and the script's folder first on `sys.path`, so the
+import works under the Claude Code plugin and a `uv tool` install, where a plain `python` cannot import the lab. The script's exit code is the
+command's exit code, and an error prints the script's own traceback.
+
 ## Weights
 
 | Call | Effect |

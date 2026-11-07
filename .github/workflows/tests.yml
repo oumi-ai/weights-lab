@@ -120,3 +120,4 @@ jobs:
           tests/test_contrast_directions.py
           tests/test_analyses.py
           tests/test_saved_methods.py tests/test_saved_methods_cli.py
+          tests/test_open_lab.py tests/test_cli_script.py
