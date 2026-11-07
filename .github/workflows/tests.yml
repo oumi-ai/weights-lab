@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # The model tests take 20 to 25 minutes, so they run once a day on main, not on every change.
+    - cron: "0 9 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -42,7 +45,7 @@ jobs:
           "$RUNNER_TEMP/ci-tools/bin/ruff" check .
           "$RUNNER_TEMP/ci-tools/bin/ruff" format --check .
           python scripts/check_repo.py
-          "$RUNNER_TEMP/ci-tools/bin/pytest" -q tests/test_plugin_packaging.py tests/test_repo_checks.py tests/test_ci_changes.py
+          "$RUNNER_TEMP/ci-tools/bin/pytest" -q tests/test_plugin_packaging.py tests/test_repo_checks.py
       - name: Build distributions
         run: uv build
       - name: Smoke test installed wheel without model dependencies
@@ -54,6 +57,8 @@ jobs:
           "$RUNNER_TEMP/wheel-smoke/bin/oumi-weights-lab" --help
 
   test:
+    # Daily, and on demand from the Actions tab; pull requests and pushes run only the package job.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -71,17 +76,10 @@ jobs:
       MKL_NUM_THREADS: "1"
     steps:
       - uses: actions/checkout@v6
-      - name: Check whether model tests are needed
-        id: changes
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: python3 scripts/ci_changes.py --base "$BASE_SHA" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@v5
-        if: steps.changes.outputs.run == 'true'
         with:
           python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        if: steps.changes.outputs.run == 'true'
         with:
           version: "0.10.12"
           enable-cache: true
@@ -91,21 +89,20 @@ jobs:
             uv.lock
             .github/workflows/tests.yml
       - name: Create test environment
-        if: steps.changes.outputs.run == 'true'
         run: uv venv --python python
       - name: Install latest CPU dependencies
-        if: steps.changes.outputs.run == 'true' && matrix.dependencies == 'latest'
+        if: matrix.dependencies == 'latest'
         run: uv pip install --torch-backend cpu -e '.[adapters,datasets,multi-gpu,quantized,saes]' pytest pyyaml
       - name: Install minimum supported CPU dependencies
-        if: steps.changes.outputs.run == 'true' && matrix.dependencies == 'minimum'
+        if: matrix.dependencies == 'minimum'
         run: |
           uv pip install --torch-backend cpu -e '.[adapters,multi-gpu]' 'torch==2.4.0' 'transformers==4.56.0' 'safetensors==0.4.3' 'peft==0.13.0' 'accelerate==1.0.0' 'bitsandbytes==0.50.0' pytest pyyaml
           uv pip check
       - name: Full unit suite
-        if: steps.changes.outputs.run == 'true' && matrix.dependencies == 'latest'
+        if: matrix.dependencies == 'latest'
         run: .venv/bin/pytest -q
       - name: Minimum dependency model and adapter checks
-        if: steps.changes.outputs.run == 'true' && matrix.dependencies == 'minimum'
+        if: matrix.dependencies == 'minimum'
         run: >-
           .venv/bin/pytest -q tests/test_local_model.py tests/test_adapter.py tests/test_loading.py
           tests/test_persistence.py tests/test_project_out.py tests/test_scoring.py tests/test_interventions.py
