@@ -206,6 +206,9 @@ def is_process_alive(pid: int) -> bool:
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
         return stat.rpartition(") ")[2].split()[0] != "Z"
+    except ProcessLookupError:
+        # The process was reaped between opening its stat file and reading it.
+        return False
     except FileNotFoundError:
         pass
     state = subprocess.run(
