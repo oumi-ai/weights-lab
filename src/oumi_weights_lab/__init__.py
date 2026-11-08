@@ -2,7 +2,7 @@
 
 from typing import TYPE_CHECKING, Any
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 __all__ = ["BudgetExceeded", "EditBook", "Lab", "PassBudget", "Worker", "__version__", "open_lab"]
 
 if TYPE_CHECKING:
