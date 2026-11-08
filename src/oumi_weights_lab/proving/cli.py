@@ -148,7 +148,6 @@ def _compare(args: argparse.Namespace) -> int:
 
 def add_commands(commands) -> None:
     """Register ``proving-ground`` on the CLI's subcommands."""
-    commands.metavar = commands.metavar.rstrip("}") + ",proving-ground}"
     proving = commands.add_parser(
         "proving-ground", help="build tasks with hidden answers, run agents on them, score claims"
     )
