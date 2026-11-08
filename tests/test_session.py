@@ -82,6 +82,21 @@ def test_json_replacement_and_process_liveness(tmp_path):
     assert not is_process_alive(-1)
 
 
+def test_a_process_reaped_while_its_proc_stat_is_read_is_not_alive(monkeypatch):
+    # On Linux, reading /proc/PID/stat fails with ESRCH when the process is reaped
+    # between open and read, as when a worker exits while `stop` checks on it.
+    import os
+
+    from oumi_weights_lab import session
+
+    def reaped(self, *args, **kwargs):
+        raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(os, "kill", lambda pid, signum: None)
+    monkeypatch.setattr(session.Path, "read_text", reaped)
+    assert not is_process_alive(12345)
+
+
 def test_json_replacement_is_flushed_to_disk(tmp_path, monkeypatch):
     import os
 
